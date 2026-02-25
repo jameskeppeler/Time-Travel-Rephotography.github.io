@@ -3,7 +3,7 @@
 	url = https://github.com/Time-Travel-Rephotography/face-parsing.PyTorch.git
 [submodule "models/encoder4editing"]
 	path = models/encoder4editing
-	url = https://github.com/Time-Travel-Rephotography/encoder4editing.git
+	url = https://github.com/jameskeppeler/encoder4editing.git
 [submodule "losses/contextual_loss"]
 	path = losses/contextual_loss
 	url = https://github.com/Time-Travel-Rephotography/contextual_loss_pytorch.git
