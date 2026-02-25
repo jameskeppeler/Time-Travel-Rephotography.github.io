@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 from torch import nn
 
 
@@ -21,16 +21,11 @@ def resize(t: torch.Tensor, size: int) -> torch.Tensor:
 
 
 def make_image(tensor):
-    return (
-        tensor.detach()
-            .clamp_(min=-1, max=1)
-            .add(1)
-            .div_(2)
-            .mul(255)
-            .type(torch.uint8)
-            .permute(0, 2, 3, 1)
-            .to('cpu')
-            .numpy()
-    )
+    # Convert on CPU to avoid CUDA uint8 transfer issues (torch 1.4 / CUDA 10.1 + Ampere).
+    t = tensor.detach()
+    t.clamp_(min=-1, max=1)
+    t = (t + 1).div(2).mul(255).round()
+    t = t.to("cpu").type(torch.uint8)
+    return t.permute(0, 2, 3, 1).contiguous().numpy()
 
 

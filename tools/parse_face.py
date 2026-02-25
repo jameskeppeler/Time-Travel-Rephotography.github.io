@@ -1,4 +1,4 @@
-from argparse import ArgumentParser
+﻿from argparse import ArgumentParser
 import os
 from os.path import join as pjoin
 from subprocess import run
@@ -15,6 +15,9 @@ def create_skin_mask(anno_dir, mask_dir, skin_thresh=13, include_hair=False):
     for name in tqdm(names):
         anno = cv2.imread(pjoin(anno_dir, name), 0)
         mask = np.logical_and(0 < anno, anno <= skin_thresh)
+        # AUTO_INCLUDE_HAIR_WHEN_MASK_SMALL: avoid empty/tiny masks (prevents NaNs in masked losses)
+        if mask.sum() < 1000:
+            mask |= anno == 17
         if include_hair:
             mask |= anno == 17
         cv2.imwrite(pjoin(mask_dir, name), mask * 255)
@@ -50,6 +53,7 @@ def parse_args(args=None, namespace=None):
 
 if __name__ == "__main__":
     main(parse_args())
+
 
 
 

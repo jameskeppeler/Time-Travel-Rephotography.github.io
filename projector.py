@@ -1,4 +1,4 @@
-from argparse import Namespace
+﻿from argparse import Namespace
 import os
 from os.path import join as pjoin
 import random
@@ -88,14 +88,14 @@ def save(
     imgs_arr = make_image(imgs)
     for path_prefix, img, latent, noise in zip(path_prefixes, imgs_arr, latents, noises):
         os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
-        cv2.imwrite(path_prefix + ".png", img[...,::-1])
+        cv2.imwrite(path_prefix + ".png", img[...,::-1].copy())
         torch.save({"latent": latent.detach().cpu(), "noise": noise.detach().cpu()},
                 path_prefix + ".pt")
 
     if imgs_rand is not None:
         imgs_arr = make_image(imgs_rand)
         for path_prefix, img in zip(path_prefixes, imgs_arr):
-            cv2.imwrite(path_prefix + "-rand.png", img[...,::-1])
+            cv2.imwrite(path_prefix + "-rand.png", img[...,::-1].copy())
 
 
 def main(args):
@@ -170,3 +170,4 @@ def parse_args():
 
 if __name__ == "__main__":
     sys.exit(main(parse_args()))
+
