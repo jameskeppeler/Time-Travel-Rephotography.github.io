@@ -116,3 +116,213 @@ Codes for the StyleGAN2 model come from [https://github.com/rosinality/stylegan2
 
 ## Acknowledgments
 We thank [Nick Brandreth](https://www.nickbrandreth.com/) for capturing the dry plate photos. We thank Bo Zhang, Qingnan Fan, Roy Or-El, Aleksander Holynski and Keunhong Park for insightful advice. We thank [Xiaojie Feng](https://github.com/fengxiaojie-coder) for his contributions on the colab demo.
+## Windows CUDA 11.8 troubleshooting and verified working workflow
+
+This repository was successfully brought to a working state on Windows for the projector workflow after extensive troubleshooting. This section records the final known-good configuration, the code changes required, the local assets required, and the restore procedure that was verified in a fresh clone.
+
+### Known-good references
+
+- Main repo tag: `rephoto_cuda11_working_2026-02-26_bootstrap_v2`
+- Main repo commit: `fa95639`
+- Prior restore tag: `rephoto_cuda11_working_2026-02-25_postrestore`
+- Submodule tag: `encoder4editing_cuda11_working_2026-02-25`
+- Submodule commit: `9520744f95c9109c3cfcd5ca1f5f0dc6da70541f`
+
+A clean restore clone was tested and the projector workflow ran successfully after restoring required local assets.
+
+### What failed originally
+
+The original Windows setup failed for several separate reasons:
+
+1. The old environment (`torch 1.4.0` + `CUDA 10.1`) eventually saw the GPU after driver/device troubleshooting, but it produced corrupted or blocky saved outputs on modern Ampere hardware.
+2. Both the main repo and the `encoder4editing` submodule rely on StyleGAN operator paths that normally JIT-compile custom CUDA/C++ extensions. That is fragile on Windows and was not reliable in this setup.
+3. A fresh CUDA11 environment initially did not contain all required Python packages for the full projector pipeline.
+4. Newer `torchvision` changed the `make_grid()` API from `range=` to `value_range=`, which caused a runtime crash during logging.
+5. A fresh clone does not include all required local assets (test image, checkpoints, face parsing weights), so the pipeline cannot run until those are restored.
+
+### Code changes made
+
+#### `utils/torch_helpers.py`
+
+The image conversion path was changed so tensors are converted on CPU before casting to `uint8`.
+
+Reason:
+- This avoids corrupted/blocky saved outputs seen with the older GPU-side conversion path.
+
+Functional behavior:
+- detach tensor
+- clamp safely
+- scale from `[-1, 1]` to `[0, 255]`
+- move to CPU
+- cast to `uint8`
+- return contiguous HWC NumPy array
+
+#### `projector.py`
+
+The OpenCV save path was changed so the RGB-to-BGR flip is followed by `.copy()`.
+
+Change:
+- `img[..., ::-1]` -> `img[..., ::-1].copy()`
+
+Reason:
+- This ensures the array passed to `cv2.imwrite()` is contiguous and avoids negative-stride save issues.
+
+#### `op/upfirdn2d.py`
+
+The top-level `upfirdn2d` path was patched so the delegated e4e op is used only when:
+- the delegated implementation exists, and
+- the input tensor is actually CUDA
+
+Otherwise it falls back to the pure PyTorch implementation.
+
+Reason:
+- This prevents invalid delegation on CPU and preserves a safe fallback path.
+
+#### `utils/optimize.py`
+
+`torchvision.utils.make_grid()` calls were updated for newer `torchvision`.
+
+Change:
+- `range=(-1, 1)` -> `value_range=(-1, 1)`
+
+Reason:
+- Without this, projector execution crashed during visual logging.
+
+#### `models/encoder4editing/models/stylegan2/op/upfirdn2d.py`
+
+The submodule `upfirdn2d` operator was patched to avoid `torch.utils.cpp_extension.load()` JIT compilation on Windows.
+
+Reason:
+- Instead of compiling a custom extension at import time, this file now routes to the repository's pure PyTorch fallback implementation.
+- This is the key Windows/CUDA11 compatibility fix for the submodule operator path.
+
+#### Other tracked files in the known-good state
+
+These files were also part of the known-good working tree during troubleshooting and should remain pinned to the verified repo/submodule revisions:
+
+- `op/fused_act.py`
+- `tools/parse_face.py`
+- `models/encoder4editing/models/stylegan2/op/fused_act.py`
+
+Even where they were not the final blocking issue, they are part of the verified working state and should be preserved by using the known-good tags and commits listed above.
+
+### Verified working environment
+
+A new conda environment was created and verified:
+
+- Environment name: `rephoto_cuda11`
+- Python: `3.8`
+- PyTorch: `2.4.1`
+- CUDA runtime: `11.8`
+- GPU verified: `NVIDIA GeForce RTX 3060 Laptop GPU`
+
+Additional packages installed into this environment:
+
+- `opencv`
+- `tensorboard`
+- `matplotlib`
+- `tqdm`
+- `scikit-image`
+
+The exported environment file is included in the repo:
+
+- `rephoto_cuda11_working.yml`
+
+A patch snapshot was also generated during troubleshooting:
+
+- `rephoto_cuda11_working.patch`
+
+### Required local assets
+
+These assets are required locally but may not exist in a fresh clone:
+
+1. Test input image:
+   - `dataset\Abraham Lincoln_01.png`
+
+2. Main checkpoints:
+   - `checkpoint\*`
+
+3. Face parsing checkpoint:
+   - `third_party\face_parsing\res\cp\79999_iter.pth`
+
+### Bootstrap script for local assets
+
+To simplify restore/setup, the repository includes:
+
+- `bootstrap_local_assets.ps1`
+
+Current usage:
+
+    .\bootstrap_local_assets.ps1 -SourceRepo "C:\Users\james\Projects\Time-Travel-Rephotography.github.io"
+
+This script copies:
+- the verified test image into `.\dataset`
+- the main checkpoint tree into `.\checkpoint`
+- the face parsing checkpoint into `.\third_party\face_parsing\res\cp`
+
+### Verified restore procedure
+
+A clean restore test was successfully performed from a parent folder.
+
+High-level process:
+
+1. Clone the repository with submodules:
+   - `git clone --recurse-submodules ...`
+
+2. Check out the verified tag:
+   - `rephoto_cuda11_working_2026-02-26_bootstrap_v2`
+
+3. Confirm the submodule resolves to:
+   - `9520744f95c9109c3cfcd5ca1f5f0dc6da70541f`
+
+4. Run the bootstrap script with `-SourceRepo` pointing at a local working copy that already contains the needed assets.
+
+5. Run projector successfully in the clean restore clone.
+
+### Verified projector commands
+
+Stage-1 run (32x32 only):
+
+    python projector.py "dataset\Abraham Lincoln_01.png" `
+      --encoder_ckpt "checkpoint\encoder\checkpoint_g.pt" `
+      --color_transfer 0 `
+      --eye 0 `
+      --lr 0.001 `
+      --noise_regularize 0 `
+      --camera_lr 0 `
+      --wplus_step 250 `
+      --results_dir "results/projector_restore_test_v2"
+
+Full run (32x32 + 64x64):
+
+    python projector.py "dataset\Abraham Lincoln_01.png" `
+      --encoder_ckpt "checkpoint\encoder\checkpoint_g.pt" `
+      --color_transfer 0 `
+      --eye 0 `
+      --lr 0.001 `
+      --noise_regularize 0 `
+      --camera_lr 0 `
+      --results_dir "results/projector_restore_test_full_v2"
+
+### What a successful run now confirms
+
+A successful run now confirms the full intended projector protocol is working:
+
+1. Initialize latent code (encoder / e4e path)
+2. Generate the initial sibling image
+3. Run face parsing and skin-mask generation
+4. Run histogram matching
+5. Save the initial image and latent/noise state
+6. Optimize through the configured W+ stages
+7. Save the final image, final latent/noise `.pt`, and random-noise variant under the selected `results_dir`
+
+### Practical recommendation
+
+For Windows use, treat the following as the canonical reproducible state:
+
+- main repo checked out at `rephoto_cuda11_working_2026-02-26_bootstrap_v2`
+- `models/encoder4editing` submodule at `encoder4editing_cuda11_working_2026-02-25`
+- conda environment restored from `rephoto_cuda11_working.yml`
+- local assets restored with `bootstrap_local_assets.ps1`
+
+This is the currently verified working baseline for the Windows CUDA 11.8 projector workflow.
