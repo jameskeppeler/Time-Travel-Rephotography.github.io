@@ -260,6 +260,23 @@ This script copies:
 - the main checkpoint tree into `.\checkpoint`
 - the face parsing checkpoint into `.\third_party\face_parsing\res\cp`
 
+### Bootstrapping required local assets (copy or download)
+
+**Copy from an existing populated repo (original behavior):**
+```powershell
+.\bootstrap_local_assets.ps1 -Mode copy -SourceRepo "C:\Path\To\Populated\Repo"
+
+### Bootstrapping required local assets (copy or download)
+
+**Download required assets (no SourceRepo needed):**
+```powershell
+# Recommended: Hugging Face mirror (often avoids Google Drive quota limits)
+.\bootstrap_local_assets.ps1 -Mode download -DownloadProvider hf
+
+# Alternative: Google Drive (official IDs; may hit quota)
+.\bootstrap_local_assets.ps1 -Mode download -DownloadProvider gdrive
+
+
 ### Verified restore procedure
 
 A clean restore test was successfully performed from a parent folder.
