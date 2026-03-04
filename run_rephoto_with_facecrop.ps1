@@ -26,7 +26,7 @@ param(
 [string]$GFPGANRoot = $env:GFPGAN_ROOT,
 [string]$FaceCropEnvName = "facecrop_py310",
 [string]$RephotoEnvName  = "rephoto_cuda11",
-
+[string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
 [double]$GFPGANBlend = 0.35
 )
 
@@ -291,6 +291,7 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "GFPGANEnvName=$GFPGANEnvName"
     "FaceCropEnvName=$FaceCropEnvName"
     "RephotoEnvName=$RephotoEnvName"
+    "EncoderCkptPath=$EncoderCkptPath"
     "GFPGANBlend=$GFPGANBlend"
     "ProjectorInputDir=$ProjectorInputDir"
     "CropCount=$($CropFiles.Count)"
@@ -308,6 +309,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
+
+if (-not (Test-Path -LiteralPath $EncoderCkptPath)) {
+    throw "Encoder checkpoint not found: $EncoderCkptPath"
+}
 
 # Run projector on each crop in the rephoto environment.
 Set-Location $RepoRoot
@@ -340,7 +345,7 @@ Write-Progress -Activity "run_rephoto_with_facecrop" `
 
     conda run -n $RephotoEnvName python projector.py `
         $ProjectorImagePath `
-        --encoder_ckpt "checkpoint\encoder\checkpoint_g.pt" `
+        --encoder_ckpt $EncoderCkptPath `
         --color_transfer 0 `
         --eye 0 `
         --lr 0.001 `
