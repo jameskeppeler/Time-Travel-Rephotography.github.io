@@ -98,7 +98,7 @@ if ([string]::IsNullOrWhiteSpace($GFPGANRoot)) {
 }
 
 if ($UseGFPGAN -and (-not (Test-Path -LiteralPath $GFPGANRoot))) {
-    throw "GFPGANRoot not found. Set env:GFPGAN_ROOT or place GFPGAN at: $CandidateGFPGAN"
+    throw "GFPGANRoot not found. Set env:GFPGAN_ROOT, pass -GFPGANRoot, or place GFPGAN at: $CandidateGFPGAN"
 }
 $GFPGANRunRoot    = Join-Path $PreRoot "gfpgan_runs\$SafeBase"
 $GFPGANOutputDir  = Join-Path $GFPGANRunRoot "gfpgan_output"
@@ -148,7 +148,7 @@ if (-not $UseExistingCrops) {
         -dt $DetThreshold
 
     if ($LASTEXITCODE -ne 0) {
-        throw "face-crop-plus failed."
+        throw "Face crop failed (command: $FaceCropCommand, env: $FaceCropEnvName)."
     }
 }
 else {
