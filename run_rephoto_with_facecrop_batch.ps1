@@ -21,9 +21,13 @@ param(
     [string]$FaceCropEnvName = "facecrop_py310",
     [string]$FaceCropCommand = "face-crop-plus",
     [string]$RephotoEnvName  = "rephoto_cuda11",
+    [string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
+    [string]$ProjectorScriptPath  = (Join-Path $PSScriptRoot "projector.py"),
+    [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
+    [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
 
 [double]$GFPGANBlend = 0.35
-))
+)
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
@@ -66,6 +70,10 @@ $RunArgs = @{
     GFPGANRoot      = $GFPGANRoot
     FaceCropEnvName = $FaceCropEnvName
     RephotoEnvName  = $RephotoEnvName
+    EncoderCkptPath = $EncoderCkptPath
+    ProjectorScriptPath = $ProjectorScriptPath
+    PreprocessRoot  = $PreprocessRoot
+    ResultsRoot     = $ResultsRoot
     FaceCropCommand = $FaceCropCommand
     GFPGANBlend     = $GFPGANBlend
     GFPGANVersion   = $GFPGANVersion
