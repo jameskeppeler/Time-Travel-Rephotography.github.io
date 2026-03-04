@@ -19,6 +19,7 @@ param(
     [string]$GFPGANEnvName   = "gfpgan_py38",
     [string]$GFPGANRoot      = $env:GFPGAN_ROOT,
     [string]$FaceCropEnvName = "facecrop_py310",
+    [string]$FaceCropCommand = "face-crop-plus",
     [string]$RephotoEnvName  = "rephoto_cuda11",
 
 [double]$GFPGANBlend = 0.35
@@ -65,6 +66,7 @@ $RunArgs = @{
     GFPGANRoot      = $GFPGANRoot
     FaceCropEnvName = $FaceCropEnvName
     RephotoEnvName  = $RephotoEnvName
+    FaceCropCommand = $FaceCropCommand
     GFPGANBlend     = $GFPGANBlend
     GFPGANVersion   = $GFPGANVersion
 }
