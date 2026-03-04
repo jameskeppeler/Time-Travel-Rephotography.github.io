@@ -28,6 +28,7 @@ param(
     [string]$RephotoEnvName  = "rephoto_cuda11",
     [string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
     [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
+    [string]$ProjectorScriptPath = (Join-Path $PSScriptRoot "projector.py"),
     [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
 
     
@@ -177,9 +178,6 @@ Write-Host ""
 Write-Host "Cropped face count: $($CropFiles.Count)"
 Write-Host ""
 
-Write-Host "Manifest: $ManifestPath"
-Write-Host ""
-
 $TotalSteps = if ($CropOnly) { 1 } else { 2 + $CropFiles.Count }
 $CurrentStep = 1
 
@@ -305,7 +303,11 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "RunStamp=$RunStamp"
     "CropOutputDir=$CropOutDir"
     "ResultRoot=$ResultRoot"
+    "ProjectorScriptPath=$ProjectorScriptPath"
 ) | Set-Content -LiteralPath $ManifestPath
+
+Write-Host "Manifest: $ManifestPath"
+Write-Host ""
 
 Write-Host "=== GPU pre-check ==="
 
@@ -319,6 +321,10 @@ Write-Host ""
 
 if (-not (Test-Path -LiteralPath $EncoderCkptPath)) {
     throw "Encoder checkpoint not found: $EncoderCkptPath"
+}
+
+if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
+    throw "Projector script not found: $ProjectorScriptPath"
 }
 
 # Run projector on each crop in the rephoto environment.
@@ -350,7 +356,7 @@ Write-Progress -Activity "run_rephoto_with_facecrop" `
     Write-Host "Results: $ThisResultDir"
     Write-Host ""
 
-    conda run -n $RephotoEnvName python projector.py `
+    conda run -n $RephotoEnvName python $ProjectorScriptPath `
         $ProjectorImagePath `
         --encoder_ckpt $EncoderCkptPath `
         --color_transfer 0 `
