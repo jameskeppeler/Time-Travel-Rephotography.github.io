@@ -21,13 +21,16 @@ param(
 
     [ValidateSet("1.3", "1.4")]
     [string]$GFPGANVersion = "1.3",
+    [string]$GFPGANEnvName = "gfpgan_py38",
+    [string]$GFPGANRoot = $env:GFPGAN_ROOT,
+    [string]$FaceCropEnvName = "facecrop_py310",
+    [string]$RephotoEnvName  = "rephoto_cuda11",
+    [string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
+    [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
+    [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
 
-[string]$GFPGANEnvName = "gfpgan_py38",
-[string]$GFPGANRoot = $env:GFPGAN_ROOT,
-[string]$FaceCropEnvName = "facecrop_py310",
-[string]$RephotoEnvName  = "rephoto_cuda11",
-[string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
-[double]$GFPGANBlend = 0.35
+    
+    [double]$GFPGANBlend = 0.35
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,7 +83,7 @@ else {
 }
 
 # Working folders inside the repo.
-$PreRoot          = Join-Path $RepoRoot "preprocess"
+$PreRoot          = $PreprocessRoot
 $TempInputDir     = Join-Path $PreRoot "facecrop_input\$SafeBase"
 $CropOutDir       = Join-Path $PreRoot "face_crops\$SafeBase"
 
@@ -100,7 +103,7 @@ $GFPGANOutputDir  = Join-Path $GFPGANRunRoot "gfpgan_output"
 $GFPGANBlendDir   = Join-Path $GFPGANRunRoot "blended_faces"
 
 $RunStamp         = Get-Date -Format "yyyy-MM-dd_HHmmss"
-$ResultRoot       = Join-Path $RepoRoot "results\integrated_$SafeBase\$RunStamp"
+$ResultRoot       = Join-Path $ResultsRoot "integrated_$SafeBase\$RunStamp"
 
 # By default, projector uses the raw cropped faces.
 # If GFPGAN is enabled later, we will switch this to the blended faces folder.
@@ -292,6 +295,8 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "FaceCropEnvName=$FaceCropEnvName"
     "RephotoEnvName=$RephotoEnvName"
     "EncoderCkptPath=$EncoderCkptPath"
+    "PreprocessRoot=$PreprocessRoot"
+    "ResultsRoot=$ResultsRoot"
     "GFPGANBlend=$GFPGANBlend"
     "ProjectorInputDir=$ProjectorInputDir"
     "CropCount=$($CropFiles.Count)"
