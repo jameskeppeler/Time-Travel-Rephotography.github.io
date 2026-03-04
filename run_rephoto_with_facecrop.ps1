@@ -24,6 +24,7 @@ param(
     [string]$GFPGANEnvName = "gfpgan_py38",
     [string]$GFPGANRoot = $env:GFPGAN_ROOT,
     [string]$FaceCropEnvName = "facecrop_py310",
+    [string]$FaceCropCommand = "face-crop-plus",
     [string]$RephotoEnvName  = "rephoto_cuda11",
     [string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
     [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
@@ -136,7 +137,7 @@ if (-not $UseExistingCrops) {
     Write-Host ""
 
     # Run face cropping in the facecrop environment.
-    conda run -n $FaceCropEnvName face-crop-plus `
+    conda run -n $FaceCropEnvName $FaceCropCommand `
         -i $TempInputDir `
         -o $CropOutDir `
         -s 1000 `
@@ -293,6 +294,7 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "GFPGANVersion=$GFPGANVersion"
     "GFPGANEnvName=$GFPGANEnvName"
     "FaceCropEnvName=$FaceCropEnvName"
+    "FaceCropCommand=$FaceCropCommand"
     "RephotoEnvName=$RephotoEnvName"
     "EncoderCkptPath=$EncoderCkptPath"
     "PreprocessRoot=$PreprocessRoot"
