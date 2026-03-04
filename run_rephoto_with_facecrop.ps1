@@ -2,23 +2,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InputImage,
 
-[ValidateScript({
-    if ($_ -eq "test") { return $true }
-
-    $n = 0
-    if (-not [int]::TryParse($_, [ref]$n)) {
-        throw "Preset must be 'test', '1500', or a multiple of 1000 from 1000 through 100000."
-    }
-
-    if ($n -eq 1500) { return $true }
-
-    if ($n -ge 1000 -and $n -le 100000 -and ($n % 1000 -eq 0)) {
-        return $true
-    }
-
-    throw "Preset must be 'test', '1500', or a multiple of 1000 from 1000 through 100000."
-})]
-[string]$Preset = "3000",
+    [string]$Preset = "3000",
 
     [ValidateSet("all", "largest")]
     [string]$Strategy = "all",
@@ -38,50 +22,15 @@ param(
     [ValidateSet("1.3", "1.4")]
     [string]$GFPGANVersion = "1.3",
 
-    [string]$GFPGANEnvName = "gfpgan_py38",
+[string]$GFPGANEnvName = "gfpgan_py38",
+[string]$GFPGANRoot = $env:GFPGAN_ROOT,
+[string]$FaceCropEnvName = "facecrop_py310",
+[string]$RephotoEnvName  = "rephoto_cuda11",
 
-    [double]$GFPGANBlend = 0.35
+[double]$GFPGANBlend = 0.35
 )
 
 $ErrorActionPreference = "Stop"
-
-function Get-ProjectedRuntimeMinutes {
-    param([int]$Iterations)
-
-    switch ($Iterations) {
-        750  { return 10 }
-        1500 { return 20 }
-        3000 { return 38 }
-        6000 { return 136 }
-    }
-
-    if ($Iterations -lt 6000) {
-        return [math]::Round((38.0 / 3000.0) * $Iterations, 0)
-    }
-
-    $Exponent = [math]::Log(467.0 / 136.0) / [math]::Log(18000.0 / 6000.0)
-    $K = 136.0 / [math]::Pow(6000.0, $Exponent)
-
-    return [math]::Round($K * [math]::Pow($Iterations, $Exponent), 0)
-}
-
-function Format-Minutes {
-    param([double]$Minutes)
-
-    $Hours = [math]::Floor($Minutes / 60)
-    $Remain = [math]::Round($Minutes - ($Hours * 60), 0)
-
-    if ($Remain -eq 60) {
-        $Hours++
-        $Remain = 0
-    }
-
-    if ($Hours -gt 0) {
-        return "{0}h {1}m" -f $Hours, $Remain
-    }
-
-    return "{0}m" -f $Remain
-}
 
 # Use the folder the script lives in as the repo root.
 $RepoRoot = $PSScriptRoot
@@ -102,20 +51,32 @@ if ([string]::IsNullOrWhiteSpace($SafeBase)) {
 $InputExt = [System.IO.Path]::GetExtension($ResolvedInput).ToLower()
 
 # Preset mapping.
-if ($Preset -eq "test") {
+$PresetNorm = $Preset.Trim().ToLower()
+
+if ($PresetNorm -eq "test") {
     $W1 = 250
     $W2 = 750
 }
 else {
-    $W1 = 250
-    $W2 = [int]$Preset
-}
+    if (-not ($PresetNorm -match '^\d+$')) {
+        throw "Preset must be 'test' or a number (e.g., 1500, 3000, 6000, 18000). Got: $Preset"
+    }
 
-if ($Preset -ne "test") {
-    $EstimatedMinutes = Get-ProjectedRuntimeMinutes -Iterations $W2
-    Write-Host ("Estimated runtime on RTX 3060 Laptop GPU (very rough): {0}" -f (Format-Minutes $EstimatedMinutes))
-    Write-Host "Actual runtime will vary with thermals, CUDA/PyTorch build, VRAM pressure, and any future GPU changes."
-    Write-Host ""
+    $N = [int]$PresetNorm
+
+    if ($N -eq 1500) {
+        # allowed special-case
+    }
+    elseif (($N % 1000) -ne 0) {
+        throw "Numeric preset must be 1500 or a multiple of 1000. Got: $N"
+    }
+
+    if ($N -lt 1000 -or $N -gt 100000) {
+        throw "Numeric preset must be between 1000 and 100000 (or 1500). Got: $N"
+    }
+
+    $W1 = 250
+    $W2 = $N
 }
 
 # Working folders inside the repo.
@@ -123,7 +84,17 @@ $PreRoot          = Join-Path $RepoRoot "preprocess"
 $TempInputDir     = Join-Path $PreRoot "facecrop_input\$SafeBase"
 $CropOutDir       = Join-Path $PreRoot "face_crops\$SafeBase"
 
-$GFPGANRoot       = "C:\Users\james\Projects\GFPGAN"
+$CandidateGFPGAN = Join-Path $RepoRoot "deps\GFPGAN"
+
+if ([string]::IsNullOrWhiteSpace($GFPGANRoot)) {
+    if (Test-Path -LiteralPath $CandidateGFPGAN) {
+        $GFPGANRoot = $CandidateGFPGAN
+    }
+}
+
+if ($UseGFPGAN -and (-not (Test-Path -LiteralPath $GFPGANRoot))) {
+    throw "GFPGANRoot not found. Set env:GFPGAN_ROOT or place GFPGAN at: $CandidateGFPGAN"
+}
 $GFPGANRunRoot    = Join-Path $PreRoot "gfpgan_runs\$SafeBase"
 $GFPGANOutputDir  = Join-Path $GFPGANRunRoot "gfpgan_output"
 $GFPGANBlendDir   = Join-Path $GFPGANRunRoot "blended_faces"
@@ -162,7 +133,7 @@ if (-not $UseExistingCrops) {
     Write-Host ""
 
     # Run face cropping in the facecrop environment.
-    conda run -n facecrop_py310 face-crop-plus `
+    conda run -n $FaceCropEnvName face-crop-plus `
         -i $TempInputDir `
         -o $CropOutDir `
         -s 1000 `
@@ -201,30 +172,6 @@ if ($CropIndex -ge 0) {
 Write-Host ""
 Write-Host "Cropped face count: $($CropFiles.Count)"
 Write-Host ""
-
-$ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
-
-@(
-    "InputImage=$ResolvedInput"
-    "SafeBase=$SafeBase"
-    "Preset=$Preset"
-    "WPlusStep=$W1,$W2"
-    "Strategy=$Strategy"
-    "FaceFactor=$FaceFactor"
-    "DetThreshold=$DetThreshold"
-    "CropIndex=$CropIndex"
-    "CropOnly=$CropOnly"
-    "UseExistingCrops=$UseExistingCrops"
-    "UseGFPGAN=$UseGFPGAN"
-    "GFPGANVersion=$GFPGANVersion"
-    "GFPGANEnvName=$GFPGANEnvName"
-    "GFPGANBlend=$GFPGANBlend"
-    "ProjectorInputDir=$ProjectorInputDir"
-    "CropCount=$($CropFiles.Count)"
-    "RunStamp=$RunStamp"
-    "CropOutputDir=$CropOutDir"
-    "ResultRoot=$ResultRoot"
-) | Set-Content -LiteralPath $ManifestPath
 
 Write-Host "Manifest: $ManifestPath"
 Write-Host ""
@@ -326,12 +273,38 @@ if ($UseGFPGAN) {
     $ProjectorInputDir = $GFPGANBlendDir
 }
 
+$ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
+
+@(
+    "InputImage=$ResolvedInput"
+    "SafeBase=$SafeBase"
+    "Preset=$Preset"
+    "WPlusStep=$W1,$W2"
+    "Strategy=$Strategy"
+    "FaceFactor=$FaceFactor"
+    "DetThreshold=$DetThreshold"
+    "CropIndex=$CropIndex"
+    "CropOnly=$CropOnly"
+    "UseExistingCrops=$UseExistingCrops"
+    "UseGFPGAN=$UseGFPGAN"
+    "GFPGANVersion=$GFPGANVersion"
+    "GFPGANEnvName=$GFPGANEnvName"
+    "FaceCropEnvName=$FaceCropEnvName"
+    "RephotoEnvName=$RephotoEnvName"
+    "GFPGANBlend=$GFPGANBlend"
+    "ProjectorInputDir=$ProjectorInputDir"
+    "CropCount=$($CropFiles.Count)"
+    "RunStamp=$RunStamp"
+    "CropOutputDir=$CropOutDir"
+    "ResultRoot=$ResultRoot"
+) | Set-Content -LiteralPath $ManifestPath
+
 Write-Host "=== GPU pre-check ==="
 
-conda run -n rephoto_cuda11 python -c "import sys, torch; ok = torch.cuda.is_available(); print(f'cuda_available={ok}'); print(f'device_count={torch.cuda.device_count()}'); sys.exit(0 if ok else 1)"
+conda run -n $RephotoEnvName python -c "import sys, torch; ok = torch.cuda.is_available(); print(f'cuda_available={ok}'); print(f'device_count={torch.cuda.device_count()}'); sys.exit(0 if ok else 1)"
 
 if ($LASTEXITCODE -ne 0) {
-    throw "CUDA is not available in rephoto_cuda11. Aborting before projector run."
+  throw "CUDA is not available in $RephotoEnvName. Aborting before projector run."
 }
 
 Write-Host ""
@@ -365,7 +338,7 @@ Write-Progress -Activity "run_rephoto_with_facecrop" `
     Write-Host "Results: $ThisResultDir"
     Write-Host ""
 
-    conda run -n rephoto_cuda11 python projector.py `
+    conda run -n $RephotoEnvName python projector.py `
         $ProjectorImagePath `
         --encoder_ckpt "checkpoint\encoder\checkpoint_g.pt" `
         --color_transfer 0 `
