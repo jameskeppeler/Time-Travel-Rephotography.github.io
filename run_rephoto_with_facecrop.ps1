@@ -2,8 +2,23 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InputImage,
 
-    [ValidateSet("test", "1500", "3000", "6000")]
-    [string]$Preset = "3000",
+[ValidateScript({
+    if ($_ -eq "test") { return $true }
+
+    $n = 0
+    if (-not [int]::TryParse($_, [ref]$n)) {
+        throw "Preset must be 'test', '1500', or a multiple of 1000 from 1000 through 100000."
+    }
+
+    if ($n -eq 1500) { return $true }
+
+    if ($n -ge 1000 -and $n -le 100000 -and ($n % 1000 -eq 0)) {
+        return $true
+    }
+
+    throw "Preset must be 'test', '1500', or a multiple of 1000 from 1000 through 100000."
+})]
+[string]$Preset = "3000",
 
     [ValidateSet("all", "largest")]
     [string]$Strategy = "all",
@@ -30,6 +45,44 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+function Get-ProjectedRuntimeMinutes {
+    param([int]$Iterations)
+
+    switch ($Iterations) {
+        750  { return 10 }
+        1500 { return 20 }
+        3000 { return 38 }
+        6000 { return 136 }
+    }
+
+    if ($Iterations -lt 6000) {
+        return [math]::Round((38.0 / 3000.0) * $Iterations, 0)
+    }
+
+    $Exponent = [math]::Log(467.0 / 136.0) / [math]::Log(18000.0 / 6000.0)
+    $K = 136.0 / [math]::Pow(6000.0, $Exponent)
+
+    return [math]::Round($K * [math]::Pow($Iterations, $Exponent), 0)
+}
+
+function Format-Minutes {
+    param([double]$Minutes)
+
+    $Hours = [math]::Floor($Minutes / 60)
+    $Remain = [math]::Round($Minutes - ($Hours * 60), 0)
+
+    if ($Remain -eq 60) {
+        $Hours++
+        $Remain = 0
+    }
+
+    if ($Hours -gt 0) {
+        return "{0}h {1}m" -f $Hours, $Remain
+    }
+
+    return "{0}m" -f $Remain
+}
+
 # Use the folder the script lives in as the repo root.
 $RepoRoot = $PSScriptRoot
 
@@ -49,11 +102,20 @@ if ([string]::IsNullOrWhiteSpace($SafeBase)) {
 $InputExt = [System.IO.Path]::GetExtension($ResolvedInput).ToLower()
 
 # Preset mapping.
-switch ($Preset) {
-    "test"  { $W1 = 250; $W2 = 750 }
-    "1500" { $W1 = 250; $W2 = 1500 }
-    "3000" { $W1 = 250; $W2 = 3000 }
-    "6000" { $W1 = 250; $W2 = 6000 }
+if ($Preset -eq "test") {
+    $W1 = 250
+    $W2 = 750
+}
+else {
+    $W1 = 250
+    $W2 = [int]$Preset
+}
+
+if ($Preset -ne "test") {
+    $EstimatedMinutes = Get-ProjectedRuntimeMinutes -Iterations $W2
+    Write-Host ("Estimated runtime on RTX 3060 Laptop GPU (very rough): {0}" -f (Format-Minutes $EstimatedMinutes))
+    Write-Host "Actual runtime will vary with thermals, CUDA/PyTorch build, VRAM pressure, and any future GPU changes."
+    Write-Host ""
 }
 
 # Working folders inside the repo.
