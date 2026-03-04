@@ -210,8 +210,8 @@ if ($UseGFPGAN) {
     Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem -LiteralPath $GFPGANBlendDir  -File    -ErrorAction SilentlyContinue | Remove-Item -Force
 
-    Set-Location $GFPGANRoot
-
+    Push-Location -LiteralPath $GFPGANRoot
+try {
     conda run -n $GFPGANEnvName python (Join-Path $GFPGANRoot "inference_gfpgan.py") `
         -i $CropOutDir `
         -o $GFPGANOutputDir `
@@ -221,9 +221,11 @@ if ($UseGFPGAN) {
         --bg_upsampler none `
         --suffix gfp
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "GFPGAN inference failed."
-    }
+    if ($LASTEXITCODE -ne 0) { throw "GFPGAN inference failed." }
+}
+finally {
+    Pop-Location
+}
 
     $BlendScriptPath = Join-Path $env:TEMP "rephoto_gfpgan_blend.py"
 
@@ -263,8 +265,6 @@ for f in sorted(glob.glob(os.path.join(orig_dir, "*.jpg"))):
     if ($LASTEXITCODE -ne 0) {
         throw "GFPGAN blend step failed."
     }
-
-    Set-Location $RepoRoot
 
     Write-Host "GFPGAN output: $GFPGANOutputDir"
     Write-Host "GFPGAN blended faces: $GFPGANBlendDir"
@@ -328,62 +328,66 @@ if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
 }
 
 # Run projector on each crop in the rephoto environment.
-Set-Location $RepoRoot
+Push-Location -LiteralPath $RepoRoot
+try {
+    foreach ($Crop in $CropFiles) {
+        $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
+        $ThisResultDir = Join-Path $ResultRoot "$CropBase`_p$Preset"
 
-foreach ($Crop in $CropFiles) {
-    $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
-    $ThisResultDir = Join-Path $ResultRoot "$CropBase`_p$Preset"
+        $ProjectorImagePath = $Crop.FullName
 
-$ProjectorImagePath = $Crop.FullName
+        if ($UseGFPGAN) {
+            $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
+            if (-not (Test-Path -LiteralPath $BlendedCandidate)) {
+                throw "Expected GFPGAN blended face not found: $BlendedCandidate"
+            }
+            $ProjectorImagePath = $BlendedCandidate
+        }
 
-if ($UseGFPGAN) {
-    $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
-    if (-not (Test-Path -LiteralPath $BlendedCandidate)) {
-        throw "Expected GFPGAN blended face not found: $BlendedCandidate"
-    }
-    $ProjectorImagePath = $BlendedCandidate
-}
+        New-Item -ItemType Directory -Path $ThisResultDir -Force | Out-Null
 
-    New-Item -ItemType Directory -Path $ThisResultDir -Force | Out-Null
+        $CurrentStep++
+        Write-Progress -Activity "run_rephoto_with_facecrop" `
+            -Status "Rephoto crop $CurrentStep of $TotalSteps" `
+            -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
 
-$CurrentStep++
-Write-Progress -Activity "run_rephoto_with_facecrop" `
-    -Status "Rephoto crop $CurrentStep of $TotalSteps" `
-    -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
+        Write-Host "=== Rephoto step ==="
+        Write-Host "Crop: $($Crop.FullName)"
+        Write-Host "Results: $ThisResultDir"
+        Write-Host ""
 
-    Write-Host "=== Rephoto step ==="
-    Write-Host "Crop: $($Crop.FullName)"
-    Write-Host "Results: $ThisResultDir"
-    Write-Host ""
+        conda run -n $RephotoEnvName python $ProjectorScriptPath `
+            $ProjectorImagePath `
+            --encoder_ckpt $EncoderCkptPath `
+            --color_transfer 0 `
+            --eye 0 `
+            --lr 0.001 `
+            --noise_regularize 0 `
+            --camera_lr 0 `
+            --wplus_step $W1 $W2 `
+            --results_dir $ThisResultDir
 
-    conda run -n $RephotoEnvName python $ProjectorScriptPath `
-        $ProjectorImagePath `
-        --encoder_ckpt $EncoderCkptPath `
-        --color_transfer 0 `
-        --eye 0 `
-        --lr 0.001 `
-        --noise_regularize 0 `
-        --camera_lr 0 `
-        --wplus_step $W1 $W2 `
-        --results_dir $ThisResultDir
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "projector.py failed for crop: $($Crop.Name)"
-    }
+        if ($LASTEXITCODE -ne 0) {
+            throw "projector.py failed for crop: $($Crop.Name)"
+        }
 
         $FinalPng = Get-ChildItem -LiteralPath $ThisResultDir -File -Filter "*.png" |
-        Where-Object {
-            $_.Name -notmatch '(-init|-rand)\.png$' -and
-            $_.Name -notmatch '_g\.png$'
-        } |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
+            Where-Object {
+                $_.Name -notmatch '(-init|-rand)\.png$' -and
+                $_.Name -notmatch '_g\.png$'
+            } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
 
-    if ($null -ne $FinalPng) {
-        $SimpleFinal = Join-Path $ThisResultDir "final_$CropBase`_p$Preset.png"
-        Copy-Item -LiteralPath $FinalPng.FullName -Destination $SimpleFinal -Force
-        Write-Host "Simple final copy: $SimpleFinal"
+        if ($null -ne $FinalPng) {
+            $SimpleFinal = Join-Path $ThisResultDir "final_$CropBase`_p$Preset.png"
+            Copy-Item -LiteralPath $FinalPng.FullName -Destination $SimpleFinal -Force
+            Write-Host "Simple final copy: $SimpleFinal"
+        }
     }
+}
+finally {
+    Pop-Location
 }
 
 Write-Progress -Activity "run_rephoto_with_facecrop" -Completed
