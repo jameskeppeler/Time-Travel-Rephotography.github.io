@@ -326,3 +326,119 @@ For Windows use, treat the following as the canonical reproducible state:
 - local assets restored with `bootstrap_local_assets.ps1`
 
 This is the currently verified working baseline for the Windows CUDA 11.8 projector workflow.
+
+## Integrated face-crop + GFPGAN wrapper workflow
+
+This repository now also includes a Windows wrapper workflow for running the projector from raw face photos with optional face enhancement and conservative blending before projection.
+
+Wrapper scripts:
+
+- `run_rephoto_with_facecrop.ps1`
+- `run_rephoto_with_facecrop_batch.ps1`
+
+These wrappers can:
+
+1. detect and crop faces with `face-crop-plus`
+2. optionally enhance cropped faces with GFPGAN
+3. blend the GFPGAN result conservatively back into the original crop
+4. run the Time-Travel-Rephotography projector on the final prepared face crop(s)
+
+### Recommended preprocessing settings
+
+Current tested settings:
+
+- face crop strategy: `all`
+- face factor: `0.65`
+- detection threshold: `0.9`
+
+Current conservative GFPGAN settings:
+
+- `-UseGFPGAN`
+- `-GFPGANVersion 1.3`
+- `-GFPGANBlend 0.35`
+
+In practice, the best visual balance so far has been:
+
+- run GFPGAN
+- then blend only **35%** of the restored result back into the original cropped face
+
+This preserves detail from the original historical face crop while avoiding an overly synthetic or over-smoothed result.
+
+### Preset rules
+
+`-Preset` now accepts:
+
+- `test` (maps to `wplus_step 250 750`)
+- `1500`
+- any multiple of `1000` from `1000` through `100000`
+
+Examples:
+
+- `1000`
+- `1500`
+- `3000`
+- `6000`
+- `18000`
+- `50000`
+- `100000`
+
+Internal mapping:
+
+- `test` -> `wplus_step 250 750`
+- numeric preset `N` -> `wplus_step 250 N`
+
+### Practical quality tiers
+
+Current recommended standard presets:
+
+- `1500`: best for generating a Photoshop color-overlay base from the original image
+- `3000`: best balance of accuracy and runtime
+- `6000`: best standard high-accuracy preset when time is less important
+
+Longer runs are also supported, including higher 1000-step increments above 6000.
+
+A tested `18000` run produced the best visual result so far, but it required a very long runtime on the reference machine.
+
+### Runtime trend on the reference GPU
+
+The wrapper prints a rough projected runtime estimate for numeric presets.
+
+These estimates were fit from the following observed runs on:
+
+- **GPU:** NVIDIA GeForce RTX 3060 Laptop GPU
+
+Observed timings:
+
+- `750` -> about **10 min**
+- `1500` -> about **20 min**
+- `3000` -> about **38 min**
+- `6000` -> about **2 h 16 min**
+- `18000` -> about **7 h 47 min**
+
+Above `6000`, the estimate is an extrapolation from the observed curve and should be treated as approximate only.
+
+Actual runtime depends heavily on:
+
+- GPU model
+- VRAM
+- thermals / throttling
+- CUDA / PyTorch build
+- background GPU load
+
+A stronger GPU (for example a desktop-class 4060 Ti or better) will generally complete the same preset noticeably faster than the RTX 3060 Laptop GPU used for the reference timings.
+
+### Example single-image wrapper usage
+
+Run a single cropped face with GFPGAN preprocessing and conservative blend:
+
+```powershell
+.\run_rephoto_with_facecrop.ps1 `
+  -InputImage ".\dataset\unk.jpg" `
+  -Preset 3000 `
+  -Strategy all `
+  -FaceFactor 0.65 `
+  -DetThreshold 0.9 `
+  -CropIndex 0 `
+  -UseGFPGAN `
+  -GFPGANVersion 1.3 `
+  -GFPGANBlend 0.35
