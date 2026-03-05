@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QSlider,
     QPushButton,
+    QProgressBar,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -67,10 +69,32 @@ class MainWindow(QMainWindow):
         # --- Main settings ---
         form_layout = QFormLayout()
 
-        self.preset_combo = QComboBox()
-        self.preset_combo.addItems(["test", "1500", "3000", "6000", "18000"])
-        self.preset_combo.setCurrentText("3000")
-        form_layout.addRow("Preset", self.preset_combo)
+        # Iteration slider (maps to numeric Preset values; test is handled separately)
+        self.test_preset_checkbox = QCheckBox("Test mode (fast)")
+        self.test_preset_checkbox.setChecked(False)
+        self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
+        form_layout.addRow("Preset", self.test_preset_checkbox)
+
+        self.iter_slider = QSlider(Qt.Horizontal)
+        # 0..3 map to [1500, 3000, 6000, 18000]
+        self.iter_values = [1500, 3000, 6000, 18000]
+        self.iter_slider.setMinimum(0)
+        self.iter_slider.setMaximum(len(self.iter_values) - 1)
+        self.iter_slider.setValue(1)  # default 3000
+        self.iter_slider.setTickPosition(QSlider.TicksBelow)
+        self.iter_slider.setTickInterval(1)
+        self.iter_slider.valueChanged.connect(self.update_iteration_label)
+
+        self.iter_label = QLabel("")
+        self.update_iteration_label()
+
+        slider_wrap = QVBoxLayout()
+        slider_wrap.addWidget(self.iter_slider)
+        slider_wrap.addWidget(self.iter_label)
+        slider_widget = QWidget()
+        slider_widget.setLayout(slider_wrap)
+
+        form_layout.addRow("Iterations", slider_widget)
 
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(["all", "largest"])
@@ -133,6 +157,11 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(button_row)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)  # indeterminate
+        self.progress_bar.setVisible(False)
+        main_layout.addWidget(self.progress_bar)
+
         # --- Result Preview ---
         preview_group = QGroupBox("Result Preview")
         preview_layout = QVBoxLayout()
@@ -194,13 +223,15 @@ class MainWindow(QMainWindow):
 
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
+        self.progress_bar.setVisible(is_running)
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.quit_button.setEnabled(not is_running)
 
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
-        self.preset_combo.setEnabled(not is_running)
+        self.test_preset_checkbox.setEnabled(not is_running)
+        self.iter_slider.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
         self.strategy_combo.setEnabled(not is_running)
         self.crop_only_checkbox.setEnabled(not is_running)
         self.det_threshold_edit.setEnabled(not is_running)
@@ -214,7 +245,9 @@ class MainWindow(QMainWindow):
             self.update_mode_controls()
 
     def reset_form_defaults(self):
-        self.preset_combo.setCurrentText("3000")
+        self.test_preset_checkbox.setChecked(False)
+        self.iter_slider.setValue(1)
+        self.update_iteration_label()
         self.strategy_combo.setCurrentText("all")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
@@ -242,6 +275,15 @@ class MainWindow(QMainWindow):
         if dir_path:
             self.results_root_edit.setText(dir_path)
             self.log_box.append(f"Results folder set: {dir_path}")
+
+    def update_iteration_label(self):
+        if self.test_preset_checkbox.isChecked():
+            self.iter_label.setText("Using preset: test  (wplus_step 250 750)")
+            self.iter_slider.setEnabled(False)
+        else:
+            self.iter_slider.setEnabled(True)
+            v = self.iter_values[self.iter_slider.value()]
+            self.iter_label.setText(f"Using preset: {v}  (wplus_step 250 {v})")
 
     def validate_numeric_inputs(self):
         value = self.det_threshold_edit.text().strip()
@@ -277,7 +319,7 @@ class MainWindow(QMainWindow):
             "-InputImage",
             input_image,
             "-Preset",
-            self.preset_combo.currentText(),
+            ("test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])),
             "-Strategy",
             self.strategy_combo.currentText(),
             "-FaceFactor",
@@ -549,6 +591,8 @@ window = MainWindow()
 window.resize(950, 750)
 window.show()
 sys.exit(app.exec())
+
+
 
 
 
