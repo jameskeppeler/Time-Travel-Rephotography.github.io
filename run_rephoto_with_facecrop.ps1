@@ -74,6 +74,22 @@ if (Test-Path -LiteralPath $ConfigPath) {
     }
 }
 
+# Normalize paths: allow relative paths, but resolve them from the repo root.
+function Resolve-RepoPath([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return $p }
+    if ([System.IO.Path]::IsPathRooted($p)) { return $p }
+    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $p))
+}
+
+$EncoderCkptPath      = Resolve-RepoPath $EncoderCkptPath
+$ProjectorScriptPath  = Resolve-RepoPath $ProjectorScriptPath
+$PreprocessRoot       = Resolve-RepoPath $PreprocessRoot
+$ResultsRoot          = Resolve-RepoPath $ResultsRoot
+
+if (-not [string]::IsNullOrWhiteSpace($GFPGANRoot)) {
+    $GFPGANRoot = Resolve-RepoPath $GFPGANRoot
+}
+
 # Resolve and validate input image path.
 $ResolvedInput = (Resolve-Path -LiteralPath $InputImage).Path
 if (-not (Test-Path -LiteralPath $ResolvedInput)) {
@@ -430,3 +446,4 @@ Write-Host ""
 Write-Host "Done."
 Write-Host "Crops are in: $CropOutDir"
 Write-Host "Rephoto results are in: $ResultRoot"
+
