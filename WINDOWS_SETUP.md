@@ -286,6 +286,26 @@ Above `6000`, estimates are extrapolated and should be treated as approximate. A
   -GFPGANVersion 1.3 `
   -GFPGANBlend 0.35
 ```
+### Optional wrapper config file
+
+If `rephoto_wrapper.config.json` is present in the repo root, the wrappers will use it to supply default values for common paths and environment names.
+
+This lets you avoid repeating the same parameters on every run. Explicit command-line arguments still take precedence over the config file.
+
+Example config file:
+
+```json
+{
+  "GFPGANRoot": ".\\deps\\GFPGAN",
+  "GFPGANEnvName": "gfpgan_py38",
+  "FaceCropEnvName": "facecrop_py310",
+  "FaceCropCommand": "face-crop-plus",
+  "RephotoEnvName": "rephoto_cuda11",
+  "EncoderCkptPath": ".\\checkpoint\\encoder\\checkpoint_g.pt",
+  "ProjectorScriptPath": ".\\projector.py",
+  "PreprocessRoot": ".\\preprocess",
+  "ResultsRoot": ".\\results"
+}
 
 ### Configurable wrapper parameters
 

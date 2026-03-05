@@ -31,6 +31,41 @@ param(
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
+
+$ConfigPath = Join-Path $RepoRoot "rephoto_wrapper.config.json"
+
+if (Test-Path -LiteralPath $ConfigPath) {
+    $Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+
+    if ([string]::IsNullOrWhiteSpace($GFPGANRoot) -and $Config.GFPGANRoot) {
+        $GFPGANRoot = Join-Path $RepoRoot $Config.GFPGANRoot
+    }
+    if ($GFPGANEnvName -eq "gfpgan_py38" -and $Config.GFPGANEnvName) {
+        $GFPGANEnvName = $Config.GFPGANEnvName
+    }
+    if ($FaceCropEnvName -eq "facecrop_py310" -and $Config.FaceCropEnvName) {
+        $FaceCropEnvName = $Config.FaceCropEnvName
+    }
+    if ($FaceCropCommand -eq "face-crop-plus" -and $Config.FaceCropCommand) {
+        $FaceCropCommand = $Config.FaceCropCommand
+    }
+    if ($RephotoEnvName -eq "rephoto_cuda11" -and $Config.RephotoEnvName) {
+        $RephotoEnvName = $Config.RephotoEnvName
+    }
+    if ($EncoderCkptPath -eq (Join-Path $PSScriptRoot "checkpoint\\encoder\\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
+        $EncoderCkptPath = Join-Path $RepoRoot $Config.EncoderCkptPath
+    }
+    if ($ProjectorScriptPath -eq (Join-Path $PSScriptRoot "projector.py") -and $Config.ProjectorScriptPath) {
+        $ProjectorScriptPath = Join-Path $RepoRoot $Config.ProjectorScriptPath
+    }
+    if ($PreprocessRoot -eq (Join-Path $PSScriptRoot "preprocess") -and $Config.PreprocessRoot) {
+        $PreprocessRoot = Join-Path $RepoRoot $Config.PreprocessRoot
+    }
+    if ($ResultsRoot -eq (Join-Path $PSScriptRoot "results") -and $Config.ResultsRoot) {
+        $ResultsRoot = Join-Path $RepoRoot $Config.ResultsRoot
+    }
+}
+
 $SingleRunner = Join-Path $RepoRoot "run_rephoto_with_facecrop.ps1"
 
 if (-not (Test-Path -LiteralPath $SingleRunner)) {

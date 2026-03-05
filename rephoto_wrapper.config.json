@@ -1,0 +1,11 @@
+{
+  "GFPGANRoot": ".\\deps\\GFPGAN",
+  "GFPGANEnvName": "gfpgan_py38",
+  "FaceCropEnvName": "facecrop_py310",
+  "FaceCropCommand": "face-crop-plus",
+  "RephotoEnvName": "rephoto_cuda11",
+  "EncoderCkptPath": ".\\checkpoint\\encoder\\checkpoint_g.pt",
+  "ProjectorScriptPath": ".\\projector.py",
+  "PreprocessRoot": ".\\preprocess",
+  "ResultsRoot": ".\\results"
+}
