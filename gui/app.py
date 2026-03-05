@@ -2,6 +2,7 @@
 import sys
 from pathlib import Path
 
+from PySide6.QtCore import QProcess
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -26,6 +27,7 @@ class MainWindow(QMainWindow):
 
         self.repo_root = Path(__file__).resolve().parent.parent
         self.wrapper_script = self.repo_root / "run_rephoto_with_facecrop.ps1"
+        self.process = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -213,6 +215,41 @@ class MainWindow(QMainWindow):
 
         return command
 
+    def append_stdout_from_process(self):
+        if self.process is None:
+            return
+
+        text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+        if text:
+            for line in text.splitlines():
+                self.log_box.append(line)
+
+    def append_stderr_from_process(self):
+        if self.process is None:
+            return
+
+        text = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
+        if text:
+            for line in text.splitlines():
+                self.log_box.append(line)
+
+    def process_finished(self, exit_code, exit_status):
+        self.log_box.append(f"Process finished with exit code: {exit_code}")
+
+        if exit_code == 0:
+            self.status_label.setText("Status: Backend completed successfully")
+        else:
+            self.status_label.setText("Status: Backend returned an error")
+
+        self.run_button.setEnabled(True)
+        self.process = None
+
+    def process_error(self, process_error):
+        self.log_box.append(f"Process launch error: {process_error}")
+        self.status_label.setText("Status: Process launch error")
+        self.run_button.setEnabled(True)
+        self.process = None
+
     def run_wrapper(self):
         input_image = self.input_image_edit.text().strip()
 
@@ -233,6 +270,11 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Wrapper script missing")
             return
 
+        if self.process is not None:
+            self.log_box.append("A backend process is already running.")
+            self.status_label.setText("Status: Backend already running")
+            return
+
         if not self.validate_numeric_inputs():
             return
 
@@ -242,46 +284,24 @@ class MainWindow(QMainWindow):
         self.append_command_preview(command)
         self.status_label.setText("Status: Running backend...")
         self.run_button.setEnabled(False)
-        QApplication.processEvents()
 
-        try:
-            result = subprocess.run(
-                command,
-                cwd=str(self.repo_root),
-                capture_output=True,
-                text=True,
-            )
-
-            if result.stdout:
-                self.log_box.append("----- STDOUT -----")
-                for line in result.stdout.splitlines():
-                    self.log_box.append(line)
-
-            if result.stderr:
-                self.log_box.append("----- STDERR -----")
-                for line in result.stderr.splitlines():
-                    self.log_box.append(line)
-
-            self.log_box.append(f"Process finished with exit code: {result.returncode}")
-
-            if result.returncode == 0:
-                self.status_label.setText("Status: Backend completed successfully")
-            else:
-                self.status_label.setText("Status: Backend returned an error")
-
-        except Exception as exc:
-            self.log_box.append(f"Execution error: {exc}")
-            self.status_label.setText("Status: Execution error")
-
-        finally:
-            self.run_button.setEnabled(True)
-
+        self.process = QProcess(self)
+        self.process.setWorkingDirectory(str(self.repo_root))
+        self.process.readyReadStandardOutput.connect(self.append_stdout_from_process)
+        self.process.readyReadStandardError.connect(self.append_stderr_from_process)
+        self.process.finished.connect(self.process_finished)
+        self.process.errorOccurred.connect(self.process_error)
+        self.process.start(command[0], command[1:])
 
 app = QApplication(sys.argv)
 window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
+
+
+
 
 
 
