@@ -1,15 +1,18 @@
-﻿import subprocess
-import os
+﻿import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QProcess, Qt
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -29,6 +32,15 @@ class MainWindow(QMainWindow):
         self.repo_root = Path(__file__).resolve().parent.parent
         self.wrapper_script = self.repo_root / "run_rephoto_with_facecrop.ps1"
         self.process = None
+        self.run_started_at = None
+
+        # Hidden defaults (not exposed in UI)
+        self.default_face_factor = 0.65
+        self.default_gfpgan_blend = 0.35
+
+        # Preview state
+        self.preview_pixmap = None
+        self.last_result_image_path = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -39,6 +51,7 @@ class MainWindow(QMainWindow):
         title_label = QLabel("Time-Travel Rephotography")
         main_layout.addWidget(title_label)
 
+        # --- Input image ---
         input_row = QHBoxLayout()
         self.input_image_edit = QLineEdit()
         self.input_image_edit.setPlaceholderText("Select an input image...")
@@ -51,6 +64,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(QLabel("Input Image"))
         main_layout.addLayout(input_row)
 
+        # --- Main settings ---
         form_layout = QFormLayout()
 
         self.preset_combo = QComboBox()
@@ -63,31 +77,40 @@ class MainWindow(QMainWindow):
         self.strategy_combo.setCurrentText("all")
         form_layout.addRow("Strategy", self.strategy_combo)
 
-        self.use_gfpgan_checkbox = QCheckBox("Enable GFPGAN enhancement")
-        self.use_gfpgan_checkbox.setChecked(False)
-        self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
-        form_layout.addRow("GFPGAN", self.use_gfpgan_checkbox)
-
-        self.crop_only_checkbox = QCheckBox("Run crop-only test first")
-        self.crop_only_checkbox.setChecked(True)
+        self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
+        self.crop_only_checkbox.setChecked(False)
         self.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         form_layout.addRow("Crop Only", self.crop_only_checkbox)
 
-        self.blend_edit = QLineEdit("0.35")
-        form_layout.addRow("Blend Amount", self.blend_edit)
-
-        self.face_factor_edit = QLineEdit("0.65")
-        form_layout.addRow("FaceFactor", self.face_factor_edit)
+        self.use_gfpgan_checkbox = QCheckBox("Enable enhancement (GFPGAN)")
+        self.use_gfpgan_checkbox.setChecked(False)
+        self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
+        form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
 
         self.det_threshold_edit = QLineEdit("0.9")
-        form_layout.addRow("DetThreshold", self.det_threshold_edit)
-
-        self.auto_open_checkbox = QCheckBox("Auto-open output folder on success")
-        self.auto_open_checkbox.setChecked(True)
-        form_layout.addRow("Auto-Open", self.auto_open_checkbox)
+        form_layout.addRow("Face detection sensitivity (0–1)", self.det_threshold_edit)
 
         main_layout.addLayout(form_layout)
 
+        # --- Outputs (Results only) ---
+        outputs_group = QGroupBox("Outputs")
+        outputs_layout = QFormLayout()
+        outputs_group.setLayout(outputs_layout)
+
+        results_row = QHBoxLayout()
+        self.results_root_edit = QLineEdit(str(self.repo_root / "results"))
+        self.results_browse_button = QPushButton("Browse...")
+        self.results_browse_button.clicked.connect(self.browse_results_root)
+        results_row.addWidget(self.results_root_edit)
+        results_row.addWidget(self.results_browse_button)
+
+        results_widget = QWidget()
+        results_widget.setLayout(results_row)
+        outputs_layout.addRow("Results folder", results_widget)
+
+        main_layout.addWidget(outputs_group)
+
+        # --- Buttons ---
         button_row = QHBoxLayout()
 
         self.run_button = QPushButton("Run")
@@ -110,36 +133,50 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(button_row)
 
+        # --- Result Preview ---
+        preview_group = QGroupBox("Result Preview")
+        preview_layout = QVBoxLayout()
+        preview_group.setLayout(preview_layout)
+
+        self.preview_label = QLabel("No result image yet.")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumHeight(320)
+        self.preview_label.setStyleSheet("border: 1px solid #999;")
+        preview_layout.addWidget(self.preview_label)
+
+        preview_controls = QHBoxLayout()
+        self.open_image_location_button = QPushButton("Open Image Location")
+        self.open_image_location_button.clicked.connect(self.open_result_image_location)
+        self.open_image_location_button.setEnabled(False)
+
+        preview_controls.addWidget(self.open_image_location_button)
+        preview_layout.addLayout(preview_controls)
+
+        main_layout.addWidget(preview_group)
+
+        # --- Log ---
         main_layout.addWidget(QLabel("Log Output"))
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.append("GUI loaded successfully.")
-        self.log_box.append("Run now launches the PowerShell wrapper.")
-        self.log_box.append("Crop-only is enabled by default for the first live test.")
         main_layout.addWidget(self.log_box)
-
-        folder_row = QHBoxLayout()
-
-        self.open_preprocess_button = QPushButton("Open Preprocess Folder")
-        self.open_preprocess_button.clicked.connect(self.open_preprocess_folder)
-
-        self.open_results_button = QPushButton("Open Results Folder")
-        self.open_results_button.clicked.connect(self.open_results_folder)
-
-        folder_row.addWidget(self.open_preprocess_button)
-        folder_row.addWidget(self.open_results_button)
-
-        main_layout.addLayout(folder_row)
 
         self.status_label = QLabel("Status: Ready")
         main_layout.addWidget(self.status_label)
 
+        # Initial state
         self.update_mode_controls()
-
         if not self.gfpgan_is_available():
-            self.log_box.append("GFPGAN not found (deps\\GFPGAN). GFPGAN is disabled.")
+            self.log_box.append("GFPGAN not found (deps\\GFPGAN). Enhancement is disabled.")
         else:
-            self.log_box.append("GFPGAN found. GFPGAN is available.")
+            self.log_box.append("GFPGAN found. Enhancement is available.")
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.refresh_preview_scale()
+
+    def gfpgan_is_available(self):
+        return (self.repo_root / "deps" / "GFPGAN").exists()
 
     def update_mode_controls(self):
         crop_only = self.crop_only_checkbox.isChecked()
@@ -149,74 +186,40 @@ class MainWindow(QMainWindow):
             if self.use_gfpgan_checkbox.isChecked():
                 self.use_gfpgan_checkbox.setChecked(False)
             self.use_gfpgan_checkbox.setEnabled(False)
-            self.blend_edit.setEnabled(False)
             return
 
         self.use_gfpgan_checkbox.setEnabled(not crop_only)
-        self.blend_edit.setEnabled((not crop_only) and self.use_gfpgan_checkbox.isChecked())
+        if crop_only and self.use_gfpgan_checkbox.isChecked():
+            self.use_gfpgan_checkbox.setChecked(False)
 
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
+        self.quit_button.setEnabled(not is_running)
+
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
         self.preset_combo.setEnabled(not is_running)
         self.strategy_combo.setEnabled(not is_running)
         self.crop_only_checkbox.setEnabled(not is_running)
-        self.face_factor_edit.setEnabled(not is_running)
         self.det_threshold_edit.setEnabled(not is_running)
+
+        self.results_root_edit.setEnabled(not is_running)
+        self.results_browse_button.setEnabled(not is_running)
 
         if is_running:
             self.use_gfpgan_checkbox.setEnabled(False)
-            self.blend_edit.setEnabled(False)
         else:
             self.update_mode_controls()
-
-    def validate_numeric_inputs(self):
-        checks = [
-            ("FaceFactor", self.face_factor_edit.text().strip()),
-            ("DetThreshold", self.det_threshold_edit.text().strip()),
-        ]
-
-        if (not self.crop_only_checkbox.isChecked()) and self.use_gfpgan_checkbox.isChecked():
-            checks.append(("GFPGANBlend", self.blend_edit.text().strip()))
-
-        parsed_values = {}
-
-        for label, value in checks:
-            try:
-                parsed_values[label] = float(value)
-            except ValueError:
-                self.log_box.append(f"Invalid numeric value for {label}: {value}")
-                self.status_label.setText(f"Status: Invalid {label} value")
-                return False
-
-        if parsed_values["FaceFactor"] <= 0:
-            self.log_box.append("FaceFactor must be greater than 0.")
-            self.status_label.setText("Status: Invalid FaceFactor range")
-            return False
-
-        if not (0 <= parsed_values["DetThreshold"] <= 1):
-            self.log_box.append("DetThreshold must be between 0 and 1.")
-            self.status_label.setText("Status: Invalid DetThreshold range")
-            return False
-
-        if "GFPGANBlend" in parsed_values and not (0 <= parsed_values["GFPGANBlend"] <= 1):
-            self.log_box.append("GFPGANBlend must be between 0 and 1.")
-            self.status_label.setText("Status: Invalid GFPGANBlend range")
-            return False
-
-        return True
 
     def reset_form_defaults(self):
         self.preset_combo.setCurrentText("3000")
         self.strategy_combo.setCurrentText("all")
+        self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
-        self.crop_only_checkbox.setChecked(True)
-        self.blend_edit.setText("0.35")
-        self.face_factor_edit.setText("0.65")
         self.det_threshold_edit.setText("0.9")
+        self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -233,16 +236,37 @@ class MainWindow(QMainWindow):
             self.log_box.append(f"Selected image: {file_path}")
             self.status_label.setText("Status: Image selected")
 
+    def browse_results_root(self):
+        start_dir = self.results_root_edit.text().strip() or str(self.repo_root)
+        dir_path = QFileDialog.getExistingDirectory(self, "Select Results Folder", start_dir)
+        if dir_path:
+            self.results_root_edit.setText(dir_path)
+            self.log_box.append(f"Results folder set: {dir_path}")
+
+    def validate_numeric_inputs(self):
+        value = self.det_threshold_edit.text().strip()
+        try:
+            det = float(value)
+        except ValueError:
+            self.log_box.append(f"Invalid numeric value for Face detection sensitivity: {value}")
+            self.status_label.setText("Status: Invalid detection value")
+            return False
+
+        if not (0 <= det <= 1):
+            self.log_box.append("Face detection sensitivity must be between 0 and 1.")
+            self.status_label.setText("Status: Invalid detection range")
+            return False
+
+        return True
+
     def append_command_preview(self, command):
         preview = " ".join(f'"{part}"' if " " in part else part for part in command)
         self.log_box.append("Wrapper command:")
         self.log_box.append(preview)
 
-    def gfpgan_is_available(self):
-        return (self.repo_root / "deps" / "GFPGAN").exists()
-
     def build_wrapper_command(self):
         input_image = self.input_image_edit.text().strip()
+        results_root = self.results_root_edit.text().strip()
 
         command = [
             "powershell.exe",
@@ -257,9 +281,11 @@ class MainWindow(QMainWindow):
             "-Strategy",
             self.strategy_combo.currentText(),
             "-FaceFactor",
-            self.face_factor_edit.text().strip(),
+            str(self.default_face_factor),
             "-DetThreshold",
             self.det_threshold_edit.text().strip(),
+            "-ResultsRoot",
+            results_root,
         ]
 
         if self.crop_only_checkbox.isChecked():
@@ -268,15 +294,148 @@ class MainWindow(QMainWindow):
             command.extend([
                 "-UseGFPGAN",
                 "-GFPGANBlend",
-                self.blend_edit.text().strip(),
+                str(self.default_gfpgan_blend),
             ])
 
         return command
 
+    def find_latest_image(self, root: Path, after_epoch: float | None):
+        if not root.exists():
+            return None
+
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        newest = None
+        newest_mtime = -1.0
+
+        for p in root.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if after_epoch is not None and mtime < after_epoch:
+                continue
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest = p
+
+        return newest
+
+    def simplify_run_folder(self, folder: Path):
+        """
+        Keep only two images in the run folder:
+          - original.*        (baseline/input image; prefers *_blend_g.*)
+          - rephotographed.*  (final projector output; prefers *init(*)
+        Deletes other image files in that folder.
+        Returns (original_path, rephoto_path).
+        """
+        if folder is None or (not folder.exists()):
+            return (None, None)
+
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        imgs = [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts]
+        if not imgs:
+            return (None, None)
+
+        finals = [p for p in imgs if ("-init(" in p.name) or ("_init(" in p.name) or ("init(" in p.name)]
+        final = max(finals, key=lambda p: p.stat().st_mtime) if finals else max(imgs, key=lambda p: p.stat().st_mtime)
+
+        remaining = [p for p in imgs if p != final]
+        original = None
+
+        # Prefer *_blend_g.*
+        cand = [p for p in remaining if "_blend_g" in p.stem]
+        if cand:
+            original = max(cand, key=lambda p: p.stat().st_mtime)
+
+        # Fallback: oldest remaining image
+        if original is None and remaining:
+            original = min(remaining, key=lambda p: p.stat().st_mtime)
+
+        if original is None:
+            return (None, final)
+
+        orig_target = folder / f"original{original.suffix.lower()}"
+        final_target = folder / f"rephotographed{final.suffix.lower()}"
+
+        # Remove existing targets if present
+        for t in (orig_target, final_target):
+            if t.exists():
+                try:
+                    t.unlink()
+                except OSError:
+                    pass
+
+        # Rename via temporary names to avoid collisions
+        tmp_orig = folder / f"__tmp_original{original.suffix.lower()}"
+        tmp_final = folder / f"__tmp_rephotographed{final.suffix.lower()}"
+
+        original.replace(tmp_orig)
+        final.replace(tmp_final)
+        tmp_orig.replace(orig_target)
+        tmp_final.replace(final_target)
+
+        kept = {orig_target.name.lower(), final_target.name.lower()}
+        removed = 0
+        for p in folder.iterdir():
+            if p.is_file() and p.suffix.lower() in exts and p.name.lower() not in kept:
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+        self.log_box.append(f"Simplified output: kept {orig_target.name} and {final_target.name}; removed {removed} other image(s).")
+        return (orig_target, final_target)
+    def set_preview_image(self, image_path: Path | None):
+        self.last_result_image_path = None
+        self.preview_pixmap = None
+        self.open_image_location_button.setEnabled(False)
+
+        if image_path is None or not image_path.exists():
+            self.preview_label.setText("No result image found.")
+            self.preview_label.setPixmap(QPixmap())
+            return
+
+        pix = QPixmap(str(image_path))
+        if pix.isNull():
+            self.preview_label.setText("Could not load result image.")
+            self.preview_label.setPixmap(QPixmap())
+            return
+
+        self.last_result_image_path = image_path
+        self.preview_pixmap = pix
+        self.open_image_location_button.setEnabled(True)
+        self.refresh_preview_scale()
+
+    def refresh_preview_scale(self):
+        if self.preview_pixmap is None:
+            return
+        w = max(1, self.preview_label.width() - 10)
+        h = max(1, self.preview_label.height() - 10)
+        scaled = self.preview_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.preview_label.setPixmap(scaled)
+
+    def open_result_image_location(self):
+        if self.last_result_image_path is None:
+            return
+
+        img_path = self.last_result_image_path.resolve()
+        folder = str(img_path.parent)
+
+        # Open the containing folder (reliable on all Windows setups)
+        os.startfile(folder)
+
+        # Copy the full file path to clipboard for convenience
+        QApplication.clipboard().setText(str(img_path))
+        self.log_box.append("Opened containing folder. Image path copied to clipboard.")
+
     def append_stdout_from_process(self):
         if self.process is None:
             return
-
         text = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
         if text:
             for line in text.splitlines():
@@ -285,7 +444,6 @@ class MainWindow(QMainWindow):
     def append_stderr_from_process(self):
         if self.process is None:
             return
-
         text = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
         if text:
             for line in text.splitlines():
@@ -296,33 +454,37 @@ class MainWindow(QMainWindow):
 
         if exit_code == 0:
             self.status_label.setText("Status: Backend completed successfully")
-            if hasattr(self, "auto_open_checkbox") and self.auto_open_checkbox.isChecked():
-                # Open results for full runs, preprocess for crop-only runs
-                if self.crop_only_checkbox.isChecked():
-                    self.open_preprocess_folder()
+
+            # Only preview a result image for non-crop-only runs
+            if self.crop_only_checkbox.isChecked():
+                self.set_preview_image(None)
+                self.log_box.append("Crop-only run: no result image produced.")
+            else:
+                results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+                newest = self.find_latest_image(results_root, self.run_started_at)
+
+                if newest is None:
+                    self.log_box.append("No new result image was found in the results folder.")
+                    self.set_preview_image(None)
                 else:
-                    self.open_results_folder()
+                    run_folder = newest.parent
+                    orig_path, rephoto_path = self.simplify_run_folder(run_folder)
+                    # Prefer the renamed final file; otherwise fall back to newest
+                    self.set_preview_image(rephoto_path or newest)
+
         else:
             self.status_label.setText("Status: Backend returned an error")
 
         self.set_controls_for_running(False)
         self.process = None
+        self.run_started_at = None
 
     def process_error(self, process_error):
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
         self.set_controls_for_running(False)
         self.process = None
-
-    def open_preprocess_folder(self):
-        path = self.repo_root / "preprocess"
-        os.makedirs(path, exist_ok=True)
-        os.startfile(str(path))
-
-    def open_results_folder(self):
-        path = self.repo_root / "results"
-        os.makedirs(path, exist_ok=True)
-        os.startfile(str(path))
+        self.run_started_at = None
 
     def cancel_run(self):
         if self.process is None:
@@ -333,7 +495,6 @@ class MainWindow(QMainWindow):
         self.log_box.append("Cancel requested. Stopping backend process...")
         self.status_label.setText("Status: Cancelling...")
 
-        # Try a gentle stop first; then force-kill if needed
         self.process.terminate()
         if not self.process.waitForFinished(2000):
             self.process.kill()
@@ -347,7 +508,6 @@ class MainWindow(QMainWindow):
             return
 
         input_image_path = Path(input_image)
-
         if not input_image_path.exists():
             self.log_box.append(f"Input image not found: {input_image}")
             self.status_label.setText("Status: Input image not found")
@@ -373,6 +533,8 @@ class MainWindow(QMainWindow):
         self.status_label.setText("Status: Running backend...")
         self.set_controls_for_running(True)
 
+        self.run_started_at = time.time()
+
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(self.repo_root))
         self.process.readyReadStandardOutput.connect(self.append_stdout_from_process)
@@ -381,24 +543,12 @@ class MainWindow(QMainWindow):
         self.process.errorOccurred.connect(self.process_error)
         self.process.start(command[0], command[1:])
 
+
 app = QApplication(sys.argv)
 window = MainWindow()
-window.resize(900, 600)
+window.resize(950, 750)
 window.show()
 sys.exit(app.exec())
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
