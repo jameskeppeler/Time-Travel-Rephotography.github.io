@@ -1,5 +1,4 @@
 ﻿import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,9 +16,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
-    QSlider,
     QPushButton,
     QProgressBar,
+    QSlider,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -41,7 +40,8 @@ class MainWindow(QMainWindow):
         self.default_gfpgan_blend = 0.35
 
         # Preview state
-        self.preview_pixmap = None
+        self.input_pixmap = None
+        self.result_pixmap = None
         self.last_result_image_path = None
 
         central = QWidget()
@@ -69,33 +69,6 @@ class MainWindow(QMainWindow):
         # --- Main settings ---
         form_layout = QFormLayout()
 
-        # Iteration slider (maps to numeric Preset values; test is handled separately)
-        self.test_preset_checkbox = QCheckBox("Test mode (fast)")
-        self.test_preset_checkbox.setChecked(False)
-        self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
-        form_layout.addRow("Preset", self.test_preset_checkbox)
-
-        self.iter_slider = QSlider(Qt.Horizontal)
-        # 0..3 map to [1500, 3000, 6000, 18000]
-        self.iter_values = [1500, 3000, 6000, 18000]
-        self.iter_slider.setMinimum(0)
-        self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(1)  # default 3000
-        self.iter_slider.setTickPosition(QSlider.TicksBelow)
-        self.iter_slider.setTickInterval(1)
-        self.iter_slider.valueChanged.connect(self.update_iteration_label)
-
-        self.iter_label = QLabel("")
-        self.update_iteration_label()
-
-        slider_wrap = QVBoxLayout()
-        slider_wrap.addWidget(self.iter_slider)
-        slider_wrap.addWidget(self.iter_label)
-        slider_widget = QWidget()
-        slider_widget.setLayout(slider_wrap)
-
-        form_layout.addRow("Iterations", slider_widget)
-
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(["all", "largest"])
         self.strategy_combo.setCurrentText("all")
@@ -113,6 +86,31 @@ class MainWindow(QMainWindow):
 
         self.det_threshold_edit = QLineEdit("0.9")
         form_layout.addRow("Face detection sensitivity (0–1)", self.det_threshold_edit)
+
+        # --- Iteration slider + test mode ---
+        self.test_preset_checkbox = QCheckBox("Test mode (fast)")
+        self.test_preset_checkbox.setChecked(False)
+        self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
+        form_layout.addRow("Preset", self.test_preset_checkbox)
+
+        self.iter_slider = QSlider(Qt.Horizontal)
+        self.iter_values = [1500, 3000, 6000, 18000]
+        self.iter_slider.setMinimum(0)
+        self.iter_slider.setMaximum(len(self.iter_values) - 1)
+        self.iter_slider.setValue(1)  # default 3000
+        self.iter_slider.setTickPosition(QSlider.TicksBelow)
+        self.iter_slider.setTickInterval(1)
+        self.iter_slider.valueChanged.connect(self.update_iteration_label)
+
+        self.iter_label = QLabel("")
+        self.update_iteration_label()
+
+        slider_wrap = QVBoxLayout()
+        slider_wrap.addWidget(self.iter_slider)
+        slider_wrap.addWidget(self.iter_label)
+        slider_widget = QWidget()
+        slider_widget.setLayout(slider_wrap)
+        form_layout.addRow("Iterations", slider_widget)
 
         main_layout.addLayout(form_layout)
 
@@ -157,31 +155,48 @@ class MainWindow(QMainWindow):
 
         main_layout.addLayout(button_row)
 
+        # --- Progress bar ---
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)  # indeterminate
         self.progress_bar.setVisible(False)
         main_layout.addWidget(self.progress_bar)
 
-        # --- Result Preview ---
-        preview_group = QGroupBox("Result Preview")
-        preview_layout = QVBoxLayout()
-        preview_group.setLayout(preview_layout)
+        # --- Previews (Input on left, Result on right) ---
+        previews_group = QGroupBox("Previews")
+        previews_layout = QHBoxLayout()
+        previews_group.setLayout(previews_layout)
 
-        self.preview_label = QLabel("No result image yet.")
-        self.preview_label.setAlignment(Qt.AlignCenter)
-        self.preview_label.setMinimumHeight(320)
-        self.preview_label.setStyleSheet("border: 1px solid #999;")
-        preview_layout.addWidget(self.preview_label)
+        # Input preview
+        input_group = QGroupBox("Input Preview")
+        input_layout = QVBoxLayout()
+        input_group.setLayout(input_layout)
 
-        preview_controls = QHBoxLayout()
+        self.input_preview_label = QLabel("No input image yet.")
+        self.input_preview_label.setAlignment(Qt.AlignCenter)
+        self.input_preview_label.setMinimumHeight(340)
+        self.input_preview_label.setStyleSheet("border: 1px solid #999;")
+        input_layout.addWidget(self.input_preview_label)
+
+        # Result preview
+        result_group = QGroupBox("Result Preview")
+        result_layout = QVBoxLayout()
+        result_group.setLayout(result_layout)
+
+        self.result_preview_label = QLabel("No result image yet.")
+        self.result_preview_label.setAlignment(Qt.AlignCenter)
+        self.result_preview_label.setMinimumHeight(340)
+        self.result_preview_label.setStyleSheet("border: 1px solid #999;")
+        result_layout.addWidget(self.result_preview_label)
+
         self.open_image_location_button = QPushButton("Open Image Location")
         self.open_image_location_button.clicked.connect(self.open_result_image_location)
         self.open_image_location_button.setEnabled(False)
+        result_layout.addWidget(self.open_image_location_button)
 
-        preview_controls.addWidget(self.open_image_location_button)
-        preview_layout.addLayout(preview_controls)
+        previews_layout.addWidget(input_group)
+        previews_layout.addWidget(result_group)
 
-        main_layout.addWidget(preview_group)
+        main_layout.addWidget(previews_group)
 
         # --- Log ---
         main_layout.addWidget(QLabel("Log Output"))
@@ -202,7 +217,8 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.refresh_preview_scale()
+        self.refresh_input_preview_scale()
+        self.refresh_result_preview_scale()
 
     def gfpgan_is_available(self):
         return (self.repo_root / "deps" / "GFPGAN").exists()
@@ -221,20 +237,31 @@ class MainWindow(QMainWindow):
         if crop_only and self.use_gfpgan_checkbox.isChecked():
             self.use_gfpgan_checkbox.setChecked(False)
 
+    def update_iteration_label(self):
+        if self.test_preset_checkbox.isChecked():
+            self.iter_label.setText("Using preset: test  (wplus_step 250 750)")
+            self.iter_slider.setEnabled(False)
+        else:
+            self.iter_slider.setEnabled(True)
+            v = self.iter_values[self.iter_slider.value()]
+            self.iter_label.setText(f"Using preset: {v}  (wplus_step 250 {v})")
+
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
-        self.progress_bar.setVisible(is_running)
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.quit_button.setEnabled(not is_running)
+        self.progress_bar.setVisible(is_running)
 
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
-        self.test_preset_checkbox.setEnabled(not is_running)
-        self.iter_slider.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
+
         self.strategy_combo.setEnabled(not is_running)
         self.crop_only_checkbox.setEnabled(not is_running)
         self.det_threshold_edit.setEnabled(not is_running)
+
+        self.test_preset_checkbox.setEnabled(not is_running)
+        self.iter_slider.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
 
         self.results_root_edit.setEnabled(not is_running)
         self.results_browse_button.setEnabled(not is_running)
@@ -245,15 +272,18 @@ class MainWindow(QMainWindow):
             self.update_mode_controls()
 
     def reset_form_defaults(self):
-        self.test_preset_checkbox.setChecked(False)
-        self.iter_slider.setValue(1)
-        self.update_iteration_label()
         self.strategy_combo.setCurrentText("all")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
         self.det_threshold_edit.setText("0.9")
+
+        self.test_preset_checkbox.setChecked(False)
+        self.iter_slider.setValue(1)
+        self.update_iteration_label()
+
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
+
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
 
@@ -268,6 +298,7 @@ class MainWindow(QMainWindow):
             self.input_image_edit.setText(file_path)
             self.log_box.append(f"Selected image: {file_path}")
             self.status_label.setText("Status: Image selected")
+            self.set_input_preview_image(Path(file_path))
 
     def browse_results_root(self):
         start_dir = self.results_root_edit.text().strip() or str(self.repo_root)
@@ -275,15 +306,6 @@ class MainWindow(QMainWindow):
         if dir_path:
             self.results_root_edit.setText(dir_path)
             self.log_box.append(f"Results folder set: {dir_path}")
-
-    def update_iteration_label(self):
-        if self.test_preset_checkbox.isChecked():
-            self.iter_label.setText("Using preset: test  (wplus_step 250 750)")
-            self.iter_slider.setEnabled(False)
-        else:
-            self.iter_slider.setEnabled(True)
-            v = self.iter_values[self.iter_slider.value()]
-            self.iter_label.setText(f"Using preset: {v}  (wplus_step 250 {v})")
 
     def validate_numeric_inputs(self):
         value = self.det_threshold_edit.text().strip()
@@ -310,6 +332,8 @@ class MainWindow(QMainWindow):
         input_image = self.input_image_edit.text().strip()
         results_root = self.results_root_edit.text().strip()
 
+        preset_value = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
+
         command = [
             "powershell.exe",
             "-ExecutionPolicy",
@@ -319,7 +343,7 @@ class MainWindow(QMainWindow):
             "-InputImage",
             input_image,
             "-Preset",
-            ("test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])),
+            preset_value,
             "-Strategy",
             self.strategy_combo.currentText(),
             "-FaceFactor",
@@ -388,12 +412,10 @@ class MainWindow(QMainWindow):
         remaining = [p for p in imgs if p != final]
         original = None
 
-        # Prefer *_blend_g.*
         cand = [p for p in remaining if "_blend_g" in p.stem]
         if cand:
             original = max(cand, key=lambda p: p.stat().st_mtime)
 
-        # Fallback: oldest remaining image
         if original is None and remaining:
             original = min(remaining, key=lambda p: p.stat().st_mtime)
 
@@ -403,7 +425,6 @@ class MainWindow(QMainWindow):
         orig_target = folder / f"original{original.suffix.lower()}"
         final_target = folder / f"rephotographed{final.suffix.lower()}"
 
-        # Remove existing targets if present
         for t in (orig_target, final_target):
             if t.exists():
                 try:
@@ -411,7 +432,6 @@ class MainWindow(QMainWindow):
                 except OSError:
                     pass
 
-        # Rename via temporary names to avoid collisions
         tmp_orig = folder / f"__tmp_original{original.suffix.lower()}"
         tmp_final = folder / f"__tmp_rephotographed{final.suffix.lower()}"
 
@@ -432,34 +452,59 @@ class MainWindow(QMainWindow):
 
         self.log_box.append(f"Simplified output: kept {orig_target.name} and {final_target.name}; removed {removed} other image(s).")
         return (orig_target, final_target)
-    def set_preview_image(self, image_path: Path | None):
-        self.last_result_image_path = None
-        self.preview_pixmap = None
-        self.open_image_location_button.setEnabled(False)
 
-        if image_path is None or not image_path.exists():
-            self.preview_label.setText("No result image found.")
-            self.preview_label.setPixmap(QPixmap())
+    def set_input_preview_image(self, image_path: Path | None):
+        self.input_pixmap = None
+        if image_path is None or (not image_path.exists()):
+            self.input_preview_label.setText("No input image yet.")
+            self.input_preview_label.setPixmap(QPixmap())
             return
 
         pix = QPixmap(str(image_path))
         if pix.isNull():
-            self.preview_label.setText("Could not load result image.")
-            self.preview_label.setPixmap(QPixmap())
+            self.input_preview_label.setText("Could not load input image.")
+            self.input_preview_label.setPixmap(QPixmap())
+            return
+
+        self.input_pixmap = pix
+        self.refresh_input_preview_scale()
+
+    def set_result_preview_image(self, image_path: Path | None):
+        self.last_result_image_path = None
+        self.result_pixmap = None
+        self.open_image_location_button.setEnabled(False)
+
+        if image_path is None or (not image_path.exists()):
+            self.result_preview_label.setText("No result image found.")
+            self.result_preview_label.setPixmap(QPixmap())
+            return
+
+        pix = QPixmap(str(image_path))
+        if pix.isNull():
+            self.result_preview_label.setText("Could not load result image.")
+            self.result_preview_label.setPixmap(QPixmap())
             return
 
         self.last_result_image_path = image_path
-        self.preview_pixmap = pix
+        self.result_pixmap = pix
         self.open_image_location_button.setEnabled(True)
-        self.refresh_preview_scale()
+        self.refresh_result_preview_scale()
 
-    def refresh_preview_scale(self):
-        if self.preview_pixmap is None:
+    def refresh_input_preview_scale(self):
+        if self.input_pixmap is None:
             return
-        w = max(1, self.preview_label.width() - 10)
-        h = max(1, self.preview_label.height() - 10)
-        scaled = self.preview_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.preview_label.setPixmap(scaled)
+        w = max(1, self.input_preview_label.width() - 10)
+        h = max(1, self.input_preview_label.height() - 10)
+        scaled = self.input_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.input_preview_label.setPixmap(scaled)
+
+    def refresh_result_preview_scale(self):
+        if self.result_pixmap is None:
+            return
+        w = max(1, self.result_preview_label.width() - 10)
+        h = max(1, self.result_preview_label.height() - 10)
+        scaled = self.result_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.result_preview_label.setPixmap(scaled)
 
     def open_result_image_location(self):
         if self.last_result_image_path is None:
@@ -468,10 +513,7 @@ class MainWindow(QMainWindow):
         img_path = self.last_result_image_path.resolve()
         folder = str(img_path.parent)
 
-        # Open the containing folder (reliable on all Windows setups)
         os.startfile(folder)
-
-        # Copy the full file path to clipboard for convenience
         QApplication.clipboard().setText(str(img_path))
         self.log_box.append("Opened containing folder. Image path copied to clipboard.")
 
@@ -497,9 +539,8 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             self.status_label.setText("Status: Backend completed successfully")
 
-            # Only preview a result image for non-crop-only runs
             if self.crop_only_checkbox.isChecked():
-                self.set_preview_image(None)
+                self.set_result_preview_image(None)
                 self.log_box.append("Crop-only run: no result image produced.")
             else:
                 results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
@@ -507,12 +548,11 @@ class MainWindow(QMainWindow):
 
                 if newest is None:
                     self.log_box.append("No new result image was found in the results folder.")
-                    self.set_preview_image(None)
+                    self.set_result_preview_image(None)
                 else:
                     run_folder = newest.parent
-                    orig_path, rephoto_path = self.simplify_run_folder(run_folder)
-                    # Prefer the renamed final file; otherwise fall back to newest
-                    self.set_preview_image(rephoto_path or newest)
+                    _, rephoto_path = self.simplify_run_folder(run_folder)
+                    self.set_result_preview_image(rephoto_path or newest)
 
         else:
             self.status_label.setText("Status: Backend returned an error")
@@ -555,6 +595,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Input image not found")
             return
 
+        # Ensure input preview is shown even if the path was typed manually
+        self.set_input_preview_image(input_image_path)
+
         if not self.wrapper_script.exists():
             self.log_box.append(f"Wrapper script not found: {self.wrapper_script}")
             self.status_label.setText("Status: Wrapper script missing")
@@ -588,13 +631,6 @@ class MainWindow(QMainWindow):
 
 app = QApplication(sys.argv)
 window = MainWindow()
-window.resize(950, 750)
+window.resize(1100, 820)
 window.show()
 sys.exit(app.exec())
-
-
-
-
-
-
-
