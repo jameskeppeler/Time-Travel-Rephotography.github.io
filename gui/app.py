@@ -62,10 +62,12 @@ class MainWindow(QMainWindow):
 
         self.use_gfpgan_checkbox = QCheckBox("Enable GFPGAN enhancement")
         self.use_gfpgan_checkbox.setChecked(False)
+        self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
         form_layout.addRow("GFPGAN", self.use_gfpgan_checkbox)
 
         self.crop_only_checkbox = QCheckBox("Run crop-only test first")
         self.crop_only_checkbox.setChecked(True)
+        self.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         form_layout.addRow("Crop Only", self.crop_only_checkbox)
 
         self.blend_edit = QLineEdit("0.35")
@@ -84,10 +86,14 @@ class MainWindow(QMainWindow):
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.run_wrapper)
 
+        self.reset_button = QPushButton("Reset Defaults")
+        self.reset_button.clicked.connect(self.reset_form_defaults)
+
         self.quit_button = QPushButton("Quit")
         self.quit_button.clicked.connect(self.close)
 
         button_row.addWidget(self.run_button)
+        button_row.addWidget(self.reset_button)
         button_row.addWidget(self.quit_button)
 
         main_layout.addLayout(button_row)
@@ -102,6 +108,61 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Status: Ready")
         main_layout.addWidget(self.status_label)
+
+        self.update_mode_controls()
+
+    def update_mode_controls(self):
+        crop_only = self.crop_only_checkbox.isChecked()
+        self.use_gfpgan_checkbox.setEnabled(not crop_only)
+        self.blend_edit.setEnabled((not crop_only) and self.use_gfpgan_checkbox.isChecked())
+
+    def validate_numeric_inputs(self):
+        checks = [
+            ("FaceFactor", self.face_factor_edit.text().strip()),
+            ("DetThreshold", self.det_threshold_edit.text().strip()),
+        ]
+
+        if (not self.crop_only_checkbox.isChecked()) and self.use_gfpgan_checkbox.isChecked():
+            checks.append(("GFPGANBlend", self.blend_edit.text().strip()))
+
+        parsed_values = {}
+
+        for label, value in checks:
+            try:
+                parsed_values[label] = float(value)
+            except ValueError:
+                self.log_box.append(f"Invalid numeric value for {label}: {value}")
+                self.status_label.setText(f"Status: Invalid {label} value")
+                return False
+
+        if parsed_values["FaceFactor"] <= 0:
+            self.log_box.append("FaceFactor must be greater than 0.")
+            self.status_label.setText("Status: Invalid FaceFactor range")
+            return False
+
+        if not (0 <= parsed_values["DetThreshold"] <= 1):
+            self.log_box.append("DetThreshold must be between 0 and 1.")
+            self.status_label.setText("Status: Invalid DetThreshold range")
+            return False
+
+        if "GFPGANBlend" in parsed_values and not (0 <= parsed_values["GFPGANBlend"] <= 1):
+            self.log_box.append("GFPGANBlend must be between 0 and 1.")
+            self.status_label.setText("Status: Invalid GFPGANBlend range")
+            return False
+
+        return True
+
+    def reset_form_defaults(self):
+        self.preset_combo.setCurrentText("3000")
+        self.strategy_combo.setCurrentText("all")
+        self.use_gfpgan_checkbox.setChecked(False)
+        self.crop_only_checkbox.setChecked(True)
+        self.blend_edit.setText("0.35")
+        self.face_factor_edit.setText("0.65")
+        self.det_threshold_edit.setText("0.9")
+        self.update_mode_controls()
+        self.log_box.append("Defaults restored.")
+        self.status_label.setText("Status: Defaults restored")
 
     def browse_for_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -160,9 +221,19 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Select an image first")
             return
 
+        input_image_path = Path(input_image)
+
+        if not input_image_path.exists():
+            self.log_box.append(f"Input image not found: {input_image}")
+            self.status_label.setText("Status: Input image not found")
+            return
+
         if not self.wrapper_script.exists():
             self.log_box.append(f"Wrapper script not found: {self.wrapper_script}")
             self.status_label.setText("Status: Wrapper script missing")
+            return
+
+        if not self.validate_numeric_inputs():
             return
 
         command = self.build_wrapper_command()
@@ -211,5 +282,10 @@ window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
+
+
+
+
 
 
