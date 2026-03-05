@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$InputImage,
 
@@ -26,10 +26,10 @@ param(
     [string]$FaceCropEnvName = "facecrop_py310",
     [string]$FaceCropCommand = "face-crop-plus",
     [string]$RephotoEnvName  = "rephoto_cuda11",
-    [string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
-    [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
-    [string]$ProjectorScriptPath = (Join-Path $PSScriptRoot "projector.py"),
-    [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
+    [string]$EncoderCkptPath = ".\checkpoint\encoder\checkpoint_g.pt",
+    [string]$PreprocessRoot  = ".\preprocess",
+    [string]$ProjectorScriptPath = ".\projector.py",
+    [string]$ResultsRoot     = ".\results",
 
     
     [double]$GFPGANBlend = 0.35
