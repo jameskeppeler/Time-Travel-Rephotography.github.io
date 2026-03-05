@@ -1,4 +1,5 @@
 ﻿import subprocess
+import os
 import sys
 from pathlib import Path
 
@@ -112,6 +113,19 @@ class MainWindow(QMainWindow):
         self.log_box.append("Run now launches the PowerShell wrapper.")
         self.log_box.append("Crop-only is enabled by default for the first live test.")
         main_layout.addWidget(self.log_box)
+
+        folder_row = QHBoxLayout()
+
+        self.open_preprocess_button = QPushButton("Open Preprocess Folder")
+        self.open_preprocess_button.clicked.connect(self.open_preprocess_folder)
+
+        self.open_results_button = QPushButton("Open Results Folder")
+        self.open_results_button.clicked.connect(self.open_results_folder)
+
+        folder_row.addWidget(self.open_preprocess_button)
+        folder_row.addWidget(self.open_results_button)
+
+        main_layout.addLayout(folder_row)
 
         self.status_label = QLabel("Status: Ready")
         main_layout.addWidget(self.status_label)
@@ -273,6 +287,16 @@ class MainWindow(QMainWindow):
         self.set_controls_for_running(False)
         self.process = None
 
+    def open_preprocess_folder(self):
+        path = self.repo_root / "preprocess"
+        os.makedirs(path, exist_ok=True)
+        os.startfile(str(path))
+
+    def open_results_folder(self):
+        path = self.repo_root / "results"
+        os.makedirs(path, exist_ok=True)
+        os.startfile(str(path))
+
     def cancel_run(self):
         if self.process is None:
             self.log_box.append("No backend process is running.")
@@ -335,6 +359,7 @@ window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
 
 
 
