@@ -88,6 +88,10 @@ class MainWindow(QMainWindow):
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.run_wrapper)
 
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self.cancel_run)
+        self.cancel_button.setEnabled(False)
+
         self.reset_button = QPushButton("Reset Defaults")
         self.reset_button.clicked.connect(self.reset_form_defaults)
 
@@ -95,6 +99,7 @@ class MainWindow(QMainWindow):
         self.quit_button.clicked.connect(self.close)
 
         button_row.addWidget(self.run_button)
+        button_row.addWidget(self.cancel_button)
         button_row.addWidget(self.reset_button)
         button_row.addWidget(self.quit_button)
 
@@ -120,6 +125,7 @@ class MainWindow(QMainWindow):
 
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
+        self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
@@ -267,6 +273,20 @@ class MainWindow(QMainWindow):
         self.set_controls_for_running(False)
         self.process = None
 
+    def cancel_run(self):
+        if self.process is None:
+            self.log_box.append("No backend process is running.")
+            self.status_label.setText("Status: No backend process to cancel")
+            return
+
+        self.log_box.append("Cancel requested. Stopping backend process...")
+        self.status_label.setText("Status: Cancelling...")
+
+        # Try a gentle stop first; then force-kill if needed
+        self.process.terminate()
+        if not self.process.waitForFinished(2000):
+            self.process.kill()
+
     def run_wrapper(self):
         input_image = self.input_image_edit.text().strip()
 
@@ -315,6 +335,7 @@ window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
 
 
 
