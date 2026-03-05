@@ -82,6 +82,10 @@ class MainWindow(QMainWindow):
         self.det_threshold_edit = QLineEdit("0.9")
         form_layout.addRow("DetThreshold", self.det_threshold_edit)
 
+        self.auto_open_checkbox = QCheckBox("Auto-open output folder on success")
+        self.auto_open_checkbox.setChecked(True)
+        form_layout.addRow("Auto-Open", self.auto_open_checkbox)
+
         main_layout.addLayout(form_layout)
 
         button_row = QHBoxLayout()
@@ -220,6 +224,9 @@ class MainWindow(QMainWindow):
         self.log_box.append("Wrapper command:")
         self.log_box.append(preview)
 
+    def gfpgan_is_available(self):
+        return (self.repo_root / "deps" / "GFPGAN").exists()
+
     def build_wrapper_command(self):
         input_image = self.input_image_edit.text().strip()
 
@@ -243,7 +250,7 @@ class MainWindow(QMainWindow):
 
         if self.crop_only_checkbox.isChecked():
             command.append("-CropOnly")
-        elif self.use_gfpgan_checkbox.isChecked():
+        elif self.use_gfpgan_checkbox.isChecked() and self.gfpgan_is_available():
             command.extend([
                 "-UseGFPGAN",
                 "-GFPGANBlend",
@@ -275,6 +282,12 @@ class MainWindow(QMainWindow):
 
         if exit_code == 0:
             self.status_label.setText("Status: Backend completed successfully")
+            if hasattr(self, "auto_open_checkbox") and self.auto_open_checkbox.isChecked():
+                # Open results for full runs, preprocess for crop-only runs
+                if self.crop_only_checkbox.isChecked():
+                    self.open_preprocess_folder()
+                else:
+                    self.open_results_folder()
         else:
             self.status_label.setText("Status: Backend returned an error")
 
@@ -359,6 +372,8 @@ window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
+
 
 
 
