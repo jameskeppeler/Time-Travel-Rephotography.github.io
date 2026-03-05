@@ -118,6 +118,23 @@ class MainWindow(QMainWindow):
         self.use_gfpgan_checkbox.setEnabled(not crop_only)
         self.blend_edit.setEnabled((not crop_only) and self.use_gfpgan_checkbox.isChecked())
 
+    def set_controls_for_running(self, is_running):
+        self.run_button.setEnabled(not is_running)
+        self.reset_button.setEnabled(not is_running)
+        self.browse_button.setEnabled(not is_running)
+        self.input_image_edit.setEnabled(not is_running)
+        self.preset_combo.setEnabled(not is_running)
+        self.strategy_combo.setEnabled(not is_running)
+        self.crop_only_checkbox.setEnabled(not is_running)
+        self.face_factor_edit.setEnabled(not is_running)
+        self.det_threshold_edit.setEnabled(not is_running)
+
+        if is_running:
+            self.use_gfpgan_checkbox.setEnabled(False)
+            self.blend_edit.setEnabled(False)
+        else:
+            self.update_mode_controls()
+
     def validate_numeric_inputs(self):
         checks = [
             ("FaceFactor", self.face_factor_edit.text().strip()),
@@ -241,13 +258,13 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Status: Backend returned an error")
 
-        self.run_button.setEnabled(True)
+        self.set_controls_for_running(False)
         self.process = None
 
     def process_error(self, process_error):
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
-        self.run_button.setEnabled(True)
+        self.set_controls_for_running(False)
         self.process = None
 
     def run_wrapper(self):
@@ -283,7 +300,7 @@ class MainWindow(QMainWindow):
         self.log_box.append("Run button clicked.")
         self.append_command_preview(command)
         self.status_label.setText("Status: Running backend...")
-        self.run_button.setEnabled(False)
+        self.set_controls_for_running(True)
 
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(self.repo_root))
@@ -298,6 +315,8 @@ window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
+
 
 
 
