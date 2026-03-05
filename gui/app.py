@@ -136,8 +136,22 @@ class MainWindow(QMainWindow):
 
         self.update_mode_controls()
 
+        if not self.gfpgan_is_available():
+            self.log_box.append("GFPGAN not found (deps\\GFPGAN). GFPGAN is disabled.")
+        else:
+            self.log_box.append("GFPGAN found. GFPGAN is available.")
+
     def update_mode_controls(self):
         crop_only = self.crop_only_checkbox.isChecked()
+        gfpgan_available = self.gfpgan_is_available()
+
+        if not gfpgan_available:
+            if self.use_gfpgan_checkbox.isChecked():
+                self.use_gfpgan_checkbox.setChecked(False)
+            self.use_gfpgan_checkbox.setEnabled(False)
+            self.blend_edit.setEnabled(False)
+            return
+
         self.use_gfpgan_checkbox.setEnabled(not crop_only)
         self.blend_edit.setEnabled((not crop_only) and self.use_gfpgan_checkbox.isChecked())
 
@@ -372,6 +386,7 @@ window = MainWindow()
 window.resize(900, 600)
 window.show()
 sys.exit(app.exec())
+
 
 
 
