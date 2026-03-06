@@ -1,9 +1,12 @@
 ﻿import os
 import sys
+import ctypes
+import platform
+import subprocess
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt
+from PySide6.QtCore import QProcess, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -22,6 +25,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSplitter,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -37,6 +41,16 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
+        # Progress animation (used for long rephoto stage)
+        self._progress_anim_timer = QTimer(self)
+        self._progress_anim_timer.setInterval(100)
+        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
+        self._progress_anim_active = False
+        self._progress_anim_t0 = 0.0
+        self._progress_anim_duration = 0.0
+        self._progress_anim_start = 0
+        self._progress_anim_end = 0
+        self._progress_anim_stage = ""
         # Hidden defaults (not exposed in UI)
         self.default_face_factor = 0.65
         self.default_gfpgan_blend = 0.35
@@ -84,6 +98,7 @@ class MainWindow(QMainWindow):
         self.use_gfpgan_checkbox = QCheckBox("Enable enhancement (GFPGAN)")
         self.use_gfpgan_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
+        self.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
         form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
         self.det_threshold_edit = QDoubleSpinBox()
         self.det_threshold_edit.setRange(0.0, 1.0)
@@ -112,7 +127,16 @@ class MainWindow(QMainWindow):
         self.iter_slider.valueChanged.connect(self.update_iteration_label)
 
         self.iter_label = QLabel("")
+        self.iter_row_label = QLabel("Iterations")
+        self.iter_row_label = QLabel("Iterations")
         self.runtime_label = QLabel("")
+        self.runtime_info = QToolButton()
+        self.runtime_info.setText("ⓘ")
+        self.runtime_info.setAutoRaise(True)
+        self.runtime_info.setCursor(Qt.PointingHandCursor)
+        self.runtime_info.setFixedSize(18, 18)
+        self.runtime_info.setStyleSheet("QToolButton { color: #1a73e8; border: 1px solid #1a73e8; border-radius: 9px; font-weight: bold; padding: 0px; } QToolButton:hover { background: #e8f0fe; }")
+        self.runtime_info.setToolTip("Estimated processing time is approximate.")
         self.update_iteration_label()
 
         slider_wrap = QVBoxLayout()
@@ -122,11 +146,12 @@ class MainWindow(QMainWindow):
         slider_row_widget = QWidget()
         slider_row_widget.setLayout(slider_row)
         slider_wrap.addWidget(slider_row_widget)
+        self.iter_label.setVisible(False)
         slider_wrap.addWidget(self.iter_label)
-        slider_wrap.addWidget(self.runtime_label)
         slider_widget = QWidget()
         slider_widget.setLayout(slider_wrap)
-        form_layout.addRow("Iterations", slider_widget)
+        self.iter_row_label = QLabel("Iterations")
+        form_layout.addRow(self.iter_row_label, slider_widget)
 
         main_layout.addLayout(form_layout)
 
@@ -170,13 +195,39 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.quit_button)
 
         main_layout.addLayout(button_row)
+        # --- Progress row ---
+        progress_row = QHBoxLayout()
 
-        # --- Progress bar ---
         self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)  # indeterminate
-        self.progress_bar.setVisible(False)
-        main_layout.addWidget(self.progress_bar)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setFormat("Ready... %p%")
+        self.progress_bar.setFixedHeight(28)
+        self.progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.progress_bar.setAutoFillBackground(True)
+                # Estimate + info icon kept adjacent (left side)
+        runtime_pack = QHBoxLayout()
+        runtime_pack.setContentsMargins(0, 0, 0, 0)
+        runtime_pack.setSpacing(6)
+        runtime_pack.addWidget(self.runtime_label)
+        runtime_pack.addWidget(self.runtime_info)
+        runtime_widget = QWidget()
+        runtime_widget.setLayout(runtime_pack)
+        progress_row.addWidget(runtime_widget)
 
+        progress_row.addWidget(self.progress_bar, 1)
+
+        self.elapsed_label = QLabel("Elapsed: 0:00")
+        progress_row.addWidget(self.elapsed_label)
+
+        progress_widget = QWidget()
+        progress_widget.setLayout(progress_row)
+        main_layout.addWidget(progress_widget)
+
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(500)
+        self._elapsed_timer.timeout.connect(self.update_elapsed_label)
         # --- Previews (Input on left, Result on right) ---
         previews_group = QGroupBox("Previews")
         previews_layout = QHBoxLayout()
@@ -279,14 +330,14 @@ class MainWindow(QMainWindow):
 
     def update_iteration_label(self):
         if self.test_preset_checkbox.isChecked():
-            self.iter_label.setText("Using preset: test  (wplus_step 250 750)")
+            self.iter_row_label.setText("Iterations: test")
             self.iter_slider.setEnabled(False)
             self.advanced_mode_checkbox.setEnabled(False)
         else:
             self.iter_slider.setEnabled(True)
             self.advanced_mode_checkbox.setEnabled(True)
             v = self.iter_values[self.iter_slider.value()]
-            self.iter_label.setText(f"Using preset: {v}  (wplus_step 250 {v})")
+            self.iter_row_label.setText(f"Iterations: {v}")
 
         # Always refresh the estimate (if present)
         if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
@@ -296,7 +347,7 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.quit_button.setEnabled(not is_running)
-        self.progress_bar.setVisible(is_running)
+        self.progress_bar.setVisible(True)
 
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
@@ -313,10 +364,142 @@ class MainWindow(QMainWindow):
         self.results_browse_button.setEnabled(not is_running)
 
         if is_running:
+            # Reset progress UI on each run start
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("Starting... 0%")
             self.use_gfpgan_checkbox.setEnabled(False)
         else:
             self.update_mode_controls()
 
+    def start_progress_animation(self, start_pct: int, end_pct: int, duration_s: float, stage: str):
+        start_pct = int(max(0, min(100, start_pct)))
+        end_pct = int(max(0, min(100, end_pct)))
+        duration_s = float(max(0.3, duration_s))
+
+        self._progress_anim_active = True
+        self._progress_anim_t0 = time.time()
+        self._progress_anim_duration = duration_s
+        self._progress_anim_start = start_pct
+        self._progress_anim_end = end_pct
+        self._progress_anim_stage = stage
+
+        # Set initial stage text immediately (direct)
+        self._set_progress_direct(start_pct, stage)
+
+        if not self._progress_anim_timer.isActive():
+            self._progress_anim_timer.start()
+    def stop_progress_animation(self):
+        self._progress_anim_active = False
+        if hasattr(self, "_progress_anim_timer") and self._progress_anim_timer.isActive():
+            self._progress_anim_timer.stop()
+
+    def on_progress_anim_tick(self):
+        if not self._progress_anim_active:
+            return
+
+        elapsed = time.time() - self._progress_anim_t0
+        t = min(1.0, max(0.0, elapsed / self._progress_anim_duration))
+        pct = int(round(self._progress_anim_start + t * (self._progress_anim_end - self._progress_anim_start)))
+
+        # Direct set to avoid triggering nested animations
+        self._set_progress_direct(pct, self._progress_anim_stage)
+
+        if t >= 1.0:
+            self.stop_progress_animation()
+    def reset_progress_state(self):
+        self.stop_progress_animation()
+        self._progress_total_steps = None
+        self._progress_crop_count = None
+        self._progress_rephoto_done = 0
+        self._progress_stage = "Starting"
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Starting... 0%")
+
+    def _set_progress_direct(self, percent: int, stage: str):
+        percent = max(0, min(100, int(percent)))
+        self._progress_stage = stage
+        self.progress_bar.setValue(percent)
+        self.progress_bar.setFormat(f"{stage}... {percent}%")
+
+    def _set_progress(self, percent: int, stage: str, smooth: bool = True):
+        percent = max(0, min(100, int(percent)))
+
+        # If an animation is already running (e.g., rephoto stage), do direct updates
+        if (not smooth) or getattr(self, "_progress_anim_active", False):
+            self._set_progress_direct(percent, stage)
+            return
+
+        cur = int(self.progress_bar.value())
+
+        # If moving backwards or no change, update directly
+        if percent <= cur:
+            self._set_progress_direct(percent, stage)
+            return
+
+        # Smooth short jumps between stages (e.g., 5% -> 15% -> 25%)
+        delta = percent - cur
+        duration = max(0.6, min(1.6, (delta / 100.0) * 1.2 + 0.4))
+        self.start_progress_animation(start_pct=cur, end_pct=percent, duration_s=duration, stage=stage)
+    def update_progress_from_line(self, line: str):
+        s = (line or "").strip()
+
+        # Stage markers (from the PowerShell wrapper output)
+        if s.startswith("=== Face crop step"):
+            self._set_progress(5, "Cropping faces")
+            return
+
+        if s.startswith("=== GFPGAN step"):
+            # Enhancement happens before GPU pre-check; show progress movement even though wrapper doesn't count it as a step.
+            if self._progress_total_steps:
+                pct = int(round((1.5 / self._progress_total_steps) * 100))
+                self._set_progress(max(self.progress_bar.value(), pct), "Enhancing faces")
+            else:
+                self._set_progress(max(self.progress_bar.value(), 15), "Enhancing faces")
+            return
+
+        if s.startswith("=== GPU pre-check"):
+            # Step 2 of TotalSteps
+            if self._progress_total_steps:
+                pct = int(round((2 / self._progress_total_steps) * 100))
+                self._set_progress(max(self.progress_bar.value(), pct), "GPU pre-check")
+            else:
+                self._set_progress(max(self.progress_bar.value(), 25), "GPU pre-check")
+            return
+        if s.startswith("=== Rephoto step"):
+            # Start a continuous progress animation for the long projector stage.
+            # We animate toward 99% based on the current estimate.
+            try:
+                preset_val = self.get_selected_preset_value()
+                base_mins = self.estimate_runtime_minutes(preset_val)
+                hw = self.get_hardware_info()
+                scale, _note = self.compute_runtime_scale(hw)
+                est_seconds = max(30.0, float(base_mins) * 60.0 * float(scale))
+            except Exception:
+                est_seconds = 600.0  # fallback
+
+            # Allocate most of the estimate to the rephoto stage.
+            duration = est_seconds * 0.85
+            start_pct = max(self.progress_bar.value(), 30)
+            self.start_progress_animation(start_pct=start_pct, end_pct=99, duration_s=duration, stage="Rephotographing")
+            return
+        # Parse crop count so we can compute an overall % like the wrapper's step model
+        m = __import__("re").search(r"^Cropped face count:\s*(\d+)\s*$", s)
+        if m:
+            n = int(m.group(1))
+            self._progress_crop_count = n
+            self._progress_total_steps = 2 + n  # matches wrapper logic for non-crop-only runs
+            pct = int(round((1 / self._progress_total_steps) * 100))
+            self._set_progress(max(self.progress_bar.value(), pct), f"Crops ready ({n})")
+            return
+
+        # Completion markers
+        if s.startswith("CropOnly requested. Skipping rephoto step."):
+            self._set_progress(100, "Done (crop-only)")
+            return
+
+        if s == "Done.":
+            self._set_progress(100, "Done")
+            return
     def reset_form_defaults(self):
         self.strategy_combo.setCurrentText("all")
         self.crop_only_checkbox.setChecked(False)
@@ -401,18 +584,326 @@ class MainWindow(QMainWindow):
         lyp = ly0 + t * (ly1 - ly0)
         return float(math.exp(lyp))
 
+    def get_hardware_info(self):
+        # CPU
+        cpu_cores = os.cpu_count() or 0
+        cpu_name = platform.processor() or "Unknown CPU"
+
+        # RAM (GB) via Windows API
+        ram_gb = None
+        try:
+            class MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+            stat = MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            ram_gb = round(stat.ullTotalPhys / (1024**3), 1)
+        except Exception:
+            ram_gb = None
+
+        # GPU (best effort)
+        gpu_name = "Unknown GPU"
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, check=True
+            )
+            line = (r.stdout or "").strip().splitlines()
+            if line:
+                gpu_name = line[0].strip()
+        except Exception:
+            pass
+
+        return {
+            "cpu_name": cpu_name,
+            "cpu_cores": cpu_cores,
+            "ram_gb": ram_gb,
+            "gpu_name": gpu_name,
+        }
+
+    def load_local_timing_records(self):
+        if hasattr(self, "results_root_edit"):
+            results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+        else:
+            results_root = self.repo_root / "results"
+        log_path = results_root / "run_timing_log.jsonl"
+
+        if not log_path.exists():
+            return []
+
+        records = []
+        try:
+            import json
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        continue
+                    if not rec.get("success", False):
+                        continue
+                    if rec.get("crop_only", False):
+                        continue
+                    if "elapsed_seconds" not in rec:
+                        continue
+                    records.append(rec)
+        except Exception:
+            return []
+
+        return records
+
+    def estimate_runtime_from_local_history(self, preset_value: int):
+        """
+        Additive local timing model:
+          total ~= base_rephoto_time + enhancement_overhead
+
+        Base time is learned primarily from enhancement=False successful full runs.
+        Enhancement overhead is learned from paired on/off runs on this machine.
+        Returns:
+          (minutes_or_None, source_note)
+        """
+        records = self.load_local_timing_records()
+        if not records:
+            return (None, "No local timing history yet.")
+
+        current_hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
+        current_gpu = (current_hw.get("gpu_name") or "").strip()
+        current_enh = bool(self.use_gfpgan_checkbox.isChecked())
+
+        def parse_preset(rec):
+            p = rec.get("preset")
+            if str(p).lower() == "test":
+                return 750
+            try:
+                return int(p)
+            except Exception:
+                return None
+
+        parsed = []
+        for rec in records:
+            p = parse_preset(rec)
+            if p is None:
+                continue
+            enh = bool(rec.get("enhancement", False))
+            gpu = (rec.get("gpu_name") or "").strip()
+            secs = rec.get("elapsed_seconds")
+            try:
+                secs = float(secs)
+            except Exception:
+                continue
+            if secs <= 0:
+                continue
+            parsed.append((p, secs, gpu, enh))
+
+        if not parsed:
+            return (None, "Local timing history could not be parsed.")
+
+        # ----------------------------
+        # Base runtime: prefer enhancement=False
+        # ----------------------------
+        base_candidates = [(p, s) for (p, s, g, e) in parsed if g == current_gpu and (not e)]
+        if len(base_candidates) < 2:
+            base_candidates = [(p, s) for (p, s, g, e) in parsed if (not e)]
+
+        # Exact base match
+        exact_base = [s for (p, s) in base_candidates if p == preset_value]
+        if exact_base:
+            base_secs = sum(exact_base) / len(exact_base)
+            base_note = f"Exact local base timing from {len(exact_base)} enhancement-off run(s)."
+        else:
+            # Group by preset and interpolate if possible
+            grouped_base = {}
+            for p, s in base_candidates:
+                grouped_base.setdefault(p, []).append(s)
+
+            base_points = sorted((p, sum(vals) / len(vals)) for p, vals in grouped_base.items())
+
+            if len(base_points) >= 2:
+                import math
+
+                if preset_value < base_points[0][0]:
+                    x0, y0 = base_points[0]
+                    x1, y1 = base_points[1]
+                elif preset_value > base_points[-1][0]:
+                    x0, y0 = base_points[-2]
+                    x1, y1 = base_points[-1]
+                else:
+                    for i in range(len(base_points) - 1):
+                        if base_points[i][0] <= preset_value <= base_points[i + 1][0]:
+                            x0, y0 = base_points[i]
+                            x1, y1 = base_points[i + 1]
+                            break
+
+                if x1 != x0:
+                    lx0, ly0 = math.log(x0), math.log(y0)
+                    lx1, ly1 = math.log(x1), math.log(y1)
+                    lxp = math.log(preset_value)
+                    t = (lxp - lx0) / (lx1 - lx0)
+                    lyp = ly0 + t * (ly1 - ly0)
+                    base_secs = math.exp(lyp)
+                    base_note = f"Interpolated local base timing from {len(base_points)} enhancement-off preset point(s)."
+                else:
+                    base_secs = None
+                    base_note = "Duplicate local base presets only; could not interpolate."
+            else:
+                base_secs = None
+                base_note = "Not enough enhancement-off local runs to estimate base timing."
+
+        # If enhancement is OFF, return base directly if available
+        if not current_enh:
+            if base_secs is not None:
+                return (base_secs / 60.0, base_note)
+            return (None, base_note)
+
+        # ----------------------------
+        # Enhancement overhead
+        # Learn overhead from paired on/off runs by preset (same GPU preferred)
+        # ----------------------------
+        same_gpu = [(p, s, e) for (p, s, g, e) in parsed if g == current_gpu]
+        if len(same_gpu) < 2:
+            same_gpu = [(p, s, e) for (p, s, g, e) in parsed]
+
+        from collections import defaultdict
+        by_preset = defaultdict(lambda: {"on": [], "off": []})
+        for p, s, e in same_gpu:
+            if e:
+                by_preset[p]["on"].append(s)
+            else:
+                by_preset[p]["off"].append(s)
+
+        overhead_points = []
+        for p, vals in by_preset.items():
+            if vals["on"] and vals["off"]:
+                on_avg = sum(vals["on"]) / len(vals["on"])
+                off_avg = sum(vals["off"]) / len(vals["off"])
+                overhead = max(0.0, on_avg - off_avg)
+                overhead_points.append((p, overhead))
+
+        overhead_points = sorted(overhead_points, key=lambda t: t[0])
+
+        overhead_secs = None
+        overhead_note = "No paired enhancement on/off local runs yet."
+
+        # Exact overhead for this preset
+        exact_over = [ov for (p, ov) in overhead_points if p == preset_value]
+        if exact_over:
+            overhead_secs = sum(exact_over) / len(exact_over)
+            overhead_note = f"Exact local enhancement overhead from paired run(s) at this preset."
+        elif overhead_points:
+            # Use average known overhead as a practical additive estimate
+            overhead_secs = sum(ov for (_p, ov) in overhead_points) / len(overhead_points)
+            overhead_note = f"Average local enhancement overhead from {len(overhead_points)} paired preset point(s)."
+
+        # Combine
+        if base_secs is not None and overhead_secs is not None:
+            total_secs = base_secs + overhead_secs
+            return (total_secs / 60.0, base_note + " " + overhead_note)
+
+        if base_secs is not None:
+            return (base_secs / 60.0, base_note + " No local enhancement overhead yet, so enhancement was not added.")
+
+        return (None, base_note + " " + overhead_note)
+    def compute_runtime_scale(self, hw):
+        """
+        Returns (scale_factor, note). Scale factor multiplies the baseline minutes.
+        Baseline is your RTX 3060 Laptop measurements.
+        This is intentionally conservative: it adjusts estimates slightly, not wildly.
+        """
+        gpu = (hw.get("gpu_name") or "").lower()
+        ram = hw.get("ram_gb")
+
+        scale = 1.0
+        notes = []
+
+        # GPU heuristic (baseline: RTX 3060 Laptop)
+        if "rtx 3060" in gpu:
+            scale *= 1.0
+        elif "rtx 3050" in gpu:
+            scale *= 1.25
+            notes.append("GPU heuristic: RTX 3050 slower than 3060 baseline.")
+        elif "rtx 3070" in gpu:
+            scale *= 0.85
+            notes.append("GPU heuristic: RTX 3070 faster than 3060 baseline.")
+        elif "rtx 3080" in gpu:
+            scale *= 0.75
+            notes.append("GPU heuristic: RTX 3080 faster than 3060 baseline.")
+        elif "rtx 4060" in gpu:
+            scale *= 0.80
+            notes.append("GPU heuristic: RTX 4060 class faster than 3060 baseline.")
+        elif "rtx 4070" in gpu:
+            scale *= 0.70
+            notes.append("GPU heuristic: RTX 4070 class faster than 3060 baseline.")
+        elif "rtx 4090" in gpu:
+            scale *= 0.40
+            notes.append("GPU heuristic: RTX 4090 far faster than 3060 baseline.")
+        else:
+            notes.append("GPU heuristic: unknown GPU; using baseline scaling.")
+
+        # RAM heuristic (very modest)
+        if isinstance(ram, (int, float)):
+            if ram < 16:
+                scale *= 1.10
+                notes.append("RAM heuristic: <16 GB may slow runs slightly.")
+            elif ram >= 32:
+                scale *= 0.98
+                notes.append("RAM heuristic: >=32 GB may help slightly.")
+
+        return (scale, " ".join(notes))
+
     def update_runtime_label(self):
         preset_val = self.get_selected_preset_value()
-        mins = self.estimate_runtime_minutes(preset_val)
 
-        hours = int(mins // 60)
-        rem = int(round(mins - hours * 60))
+        # First try local machine history
+        local_mins, local_note = self.estimate_runtime_from_local_history(preset_val)
 
-        if hours > 0:
-            self.runtime_label.setText(f"Estimated runtime (approx.): {hours} hr {rem} min (RTX 3060 baseline)")
+        hw = self.get_hardware_info()
+        scale, scale_note = self.compute_runtime_scale(hw)
+
+        if local_mins is not None:
+            est_mins = int(round(local_mins))
+            source_note = local_note
         else:
-            self.runtime_label.setText(f"Estimated runtime (approx.): {rem} min (RTX 3060 baseline)")
+            base_mins = self.estimate_runtime_minutes(preset_val)
+            est_mins = int(round(base_mins * scale))
+            source_note = f"Baseline curve with hardware scaling. {local_note}"
 
+        # Human-friendly duration
+        mins_total = max(0, est_mins)
+        days, rem = divmod(mins_total, 24 * 60)
+        hours, mins = divmod(rem, 60)
+
+        if days > 0:
+            self.runtime_label.setText(f"Est. Processing Time: {days} day {hours} hr {mins} min")
+        elif hours > 0:
+            self.runtime_label.setText(f"Est. Processing Time: {hours} hr {mins} min")
+        else:
+            self.runtime_label.setText(f"Est. Processing Time: {mins} min")
+
+        if hasattr(self, "runtime_info"):
+            ram_txt = f"{hw.get('ram_gb')} GB" if hw.get("ram_gb") is not None else "Unknown"
+            tip = (
+                "Approximate estimate (best-effort).\n"
+                f"Estimate source: {source_note}\n"
+                f"Detected GPU: {hw.get('gpu_name')}\n"
+                f"Detected CPU cores: {hw.get('cpu_cores')}\n"
+                f"Detected RAM: {ram_txt}\n"
+                f"Hardware scale factor: {scale:.2f}\n"
+                f"{scale_note}"
+            )
+            self.runtime_info.setToolTip(tip)
     def validate_numeric_inputs(self):
         det = float(self.det_threshold_edit.value())
 
@@ -605,6 +1096,20 @@ class MainWindow(QMainWindow):
         scaled = self.result_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.result_preview_label.setPixmap(scaled)
 
+    def update_elapsed_label(self):
+        if self.run_started_at is None:
+            self.elapsed_label.setText("Elapsed: 0:00")
+            return
+
+        elapsed = int(time.time() - self.run_started_at)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+
+        if h > 0:
+            self.elapsed_label.setText(f"Elapsed: {h}:{m:02d}:{s:02d}")
+        else:
+            self.elapsed_label.setText(f"Elapsed: {m}:{s:02d}")
+
     def open_result_image_location(self):
         if self.last_result_image_path is None:
             return
@@ -623,6 +1128,7 @@ class MainWindow(QMainWindow):
         if text:
             for line in text.splitlines():
                 self.log_box.append(line)
+                self.update_progress_from_line(line)
 
     def append_stderr_from_process(self):
         if self.process is None:
@@ -631,18 +1137,61 @@ class MainWindow(QMainWindow):
         if text:
             for line in text.splitlines():
                 self.log_box.append(line)
+                self.update_progress_from_line(line)
+
+    def append_timing_log(self, elapsed_seconds: float, success: bool, crop_only: bool):
+        try:
+            if hasattr(self, "results_root_edit"):
+                results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+            else:
+                results_root = self.repo_root / "results"
+            results_root.mkdir(parents=True, exist_ok=True)
+            log_path = results_root / "run_timing_log.jsonl"
+
+            hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
+            preset_val = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
+
+            record = {
+                "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "input_image": self.input_image_edit.text().strip(),
+                "preset": preset_val,
+                "advanced_mode": bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, "advanced_mode_checkbox") else False,
+                "enhancement": bool(self.use_gfpgan_checkbox.isChecked()),
+                "crop_only": bool(crop_only),
+                "success": bool(success),
+                "elapsed_seconds": float(elapsed_seconds),
+                "gpu_name": hw.get("gpu_name", "Unknown GPU"),
+            }
+
+            with open(log_path, "a", encoding="utf-8") as f:
+                import json
+                f.write(json.dumps(record) + "\n")
+
+            self.log_box.append(f"Saved timing log: {log_path}")
+        except Exception as e:
+            self.log_box.append(f"Timing log write failed: {e}")
 
     def process_finished(self, exit_code, exit_status):
+        self.stop_progress_animation()
+        if hasattr(self, "_elapsed_timer"):
+            self._elapsed_timer.stop()
         self.log_box.append(f"Process finished with exit code: {exit_code}")
 
         if exit_code == 0:
+            self._set_progress_direct(100, "Done")
             self.status_label.setText("Status: Backend completed successfully")
+            # Log timing only for successful full runs (not crop-only)
+            if (not self.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
+                self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
 
             if self.crop_only_checkbox.isChecked():
                 self.set_result_preview_image(None)
                 self.log_box.append("Crop-only run: no result image produced.")
             else:
-                results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+                if hasattr(self, "results_root_edit"):
+                    results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+                else:
+                    results_root = self.repo_root / "results"
                 newest = self.find_latest_image(results_root, self.run_started_at)
 
                 if newest is None:
@@ -660,19 +1209,45 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
+        # Progress animation (used for long rephoto stage)
+        self._progress_anim_timer = QTimer(self)
+        self._progress_anim_timer.setInterval(100)
+        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
+        self._progress_anim_active = False
+        self._progress_anim_t0 = 0.0
+        self._progress_anim_duration = 0.0
+        self._progress_anim_start = 0
+        self._progress_anim_end = 0
+        self._progress_anim_stage = ""
     def process_error(self, process_error):
+        self.stop_progress_animation()
+        if hasattr(self, "_elapsed_timer"):
+            self._elapsed_timer.stop()
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
         self.set_controls_for_running(False)
         self.process = None
         self.run_started_at = None
 
+        # Progress animation (used for long rephoto stage)
+        self._progress_anim_timer = QTimer(self)
+        self._progress_anim_timer.setInterval(100)
+        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
+        self._progress_anim_active = False
+        self._progress_anim_t0 = 0.0
+        self._progress_anim_duration = 0.0
+        self._progress_anim_start = 0
+        self._progress_anim_end = 0
+        self._progress_anim_stage = ""
     def cancel_run(self):
         if self.process is None:
             self.log_box.append("No backend process is running.")
             self.status_label.setText("Status: No backend process to cancel")
             return
 
+        self.stop_progress_animation()
+        if hasattr(self, "_elapsed_timer"):
+            self._elapsed_timer.stop()
         self.log_box.append("Cancel requested. Stopping backend process...")
         self.status_label.setText("Status: Cancelling...")
 
@@ -710,6 +1285,7 @@ class MainWindow(QMainWindow):
         if not self.validate_numeric_inputs():
             return
 
+        self.reset_progress_state()
         command = self.build_wrapper_command()
 
         self.log_box.append("Run button clicked.")
@@ -718,14 +1294,20 @@ class MainWindow(QMainWindow):
         self.set_controls_for_running(True)
 
         self.run_started_at = time.time()
+        if hasattr(self, "_elapsed_timer"):
+            self._elapsed_timer.start()
+            self.update_elapsed_label()
 
+        # Create and start QProcess
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(self.repo_root))
         self.process.readyReadStandardOutput.connect(self.append_stdout_from_process)
         self.process.readyReadStandardError.connect(self.append_stderr_from_process)
         self.process.finished.connect(self.process_finished)
         self.process.errorOccurred.connect(self.process_error)
+
         self.process.start(command[0], command[1:])
+
 
 
 app = QApplication(sys.argv)
@@ -733,6 +1315,14 @@ window = MainWindow()
 window.resize(1100, 820)
 window.show()
 sys.exit(app.exec())
+
+
+
+
+
+
+
+
 
 
 
