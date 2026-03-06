@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -19,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QSlider,
+    QSplitter,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -72,7 +74,7 @@ class MainWindow(QMainWindow):
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(["all", "largest"])
         self.strategy_combo.setCurrentText("all")
-        form_layout.addRow("Strategy", self.strategy_combo)
+        form_layout.addRow("Faces to enhance", self.strategy_combo)
 
         self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
         self.crop_only_checkbox.setChecked(False)
@@ -83,18 +85,25 @@ class MainWindow(QMainWindow):
         self.use_gfpgan_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
         form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
-
-        self.det_threshold_edit = QLineEdit("0.9")
-        form_layout.addRow("Face detection sensitivity (0–1)", self.det_threshold_edit)
-
+        self.det_threshold_edit = QDoubleSpinBox()
+        self.det_threshold_edit.setRange(0.0, 1.0)
+        self.det_threshold_edit.setSingleStep(0.01)
+        self.det_threshold_edit.setDecimals(2)
+        self.det_threshold_edit.setValue(0.90)
+        form_layout.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
         # --- Iteration slider + test mode ---
         self.test_preset_checkbox = QCheckBox("Test mode (fast)")
         self.test_preset_checkbox.setChecked(False)
+        self.basic_iter_values = [1500, 3000, 6000, 18000]
+        self.advanced_iter_values = list(range(1000, 100001, 1000))
+        self.iter_values = self.basic_iter_values
         self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
         form_layout.addRow("Preset", self.test_preset_checkbox)
 
         self.iter_slider = QSlider(Qt.Horizontal)
-        self.iter_values = [1500, 3000, 6000, 18000]
+        self.advanced_mode_checkbox = QCheckBox("Advanced")
+        self.advanced_mode_checkbox.setChecked(False)
+        self.advanced_mode_checkbox.toggled.connect(self.update_iteration_mode)
         self.iter_slider.setMinimum(0)
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
         self.iter_slider.setValue(1)  # default 3000
@@ -103,11 +112,18 @@ class MainWindow(QMainWindow):
         self.iter_slider.valueChanged.connect(self.update_iteration_label)
 
         self.iter_label = QLabel("")
+        self.runtime_label = QLabel("")
         self.update_iteration_label()
 
         slider_wrap = QVBoxLayout()
-        slider_wrap.addWidget(self.iter_slider)
+        slider_row = QHBoxLayout()
+        slider_row.addWidget(self.iter_slider)
+        slider_row.addWidget(self.advanced_mode_checkbox)
+        slider_row_widget = QWidget()
+        slider_row_widget.setLayout(slider_row)
+        slider_wrap.addWidget(slider_row_widget)
         slider_wrap.addWidget(self.iter_label)
+        slider_wrap.addWidget(self.runtime_label)
         slider_widget = QWidget()
         slider_widget.setLayout(slider_wrap)
         form_layout.addRow("Iterations", slider_widget)
@@ -196,19 +212,28 @@ class MainWindow(QMainWindow):
         previews_layout.addWidget(input_group)
         previews_layout.addWidget(result_group)
 
-        main_layout.addWidget(previews_group)
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(previews_group)
 
-        # --- Log ---
-        main_layout.addWidget(QLabel("Log Output"))
+        log_container = QWidget()
+        log_layout = QVBoxLayout()
+        log_container.setLayout(log_layout)
+
+        log_layout.addWidget(QLabel("Log Output"))
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
         self.log_box.append("GUI loaded successfully.")
-        main_layout.addWidget(self.log_box)
+        log_layout.addWidget(self.log_box)
 
         self.status_label = QLabel("Status: Ready")
-        main_layout.addWidget(self.status_label)
+        log_layout.addWidget(self.status_label)
 
-        # Initial state
+        splitter.addWidget(log_container)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+
+        main_layout.addWidget(splitter)
+# Initial state
         self.update_mode_controls()
         if not self.gfpgan_is_available():
             self.log_box.append("GFPGAN not found (deps\\GFPGAN). Enhancement is disabled.")
@@ -237,15 +262,35 @@ class MainWindow(QMainWindow):
         if crop_only and self.use_gfpgan_checkbox.isChecked():
             self.use_gfpgan_checkbox.setChecked(False)
 
+    def update_iteration_mode(self):
+        # If test mode is on, slider is disabled anyway.
+        if self.test_preset_checkbox.isChecked():
+            return
+
+        current = self.iter_values[self.iter_slider.value()]
+        self.iter_values = self.advanced_iter_values if self.advanced_mode_checkbox.isChecked() else self.basic_iter_values
+        self.iter_slider.setMaximum(len(self.iter_values) - 1)
+
+        # Snap to the closest available value in the new list.
+        closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - current))
+        self.iter_slider.setValue(closest_index)
+
+        self.update_iteration_label()
+
     def update_iteration_label(self):
         if self.test_preset_checkbox.isChecked():
             self.iter_label.setText("Using preset: test  (wplus_step 250 750)")
             self.iter_slider.setEnabled(False)
+            self.advanced_mode_checkbox.setEnabled(False)
         else:
             self.iter_slider.setEnabled(True)
+            self.advanced_mode_checkbox.setEnabled(True)
             v = self.iter_values[self.iter_slider.value()]
             self.iter_label.setText(f"Using preset: {v}  (wplus_step 250 {v})")
 
+        # Always refresh the estimate (if present)
+        if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
+            self.update_runtime_label()
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
         self.cancel_button.setEnabled(is_running)
@@ -261,6 +306,7 @@ class MainWindow(QMainWindow):
         self.det_threshold_edit.setEnabled(not is_running)
 
         self.test_preset_checkbox.setEnabled(not is_running)
+        self.advanced_mode_checkbox.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
         self.iter_slider.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
 
         self.results_root_edit.setEnabled(not is_running)
@@ -275,9 +321,11 @@ class MainWindow(QMainWindow):
         self.strategy_combo.setCurrentText("all")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
-        self.det_threshold_edit.setText("0.9")
+        self.det_threshold_edit.setValue(0.90)
 
         self.test_preset_checkbox.setChecked(False)
+        self.advanced_mode_checkbox.setChecked(False)
+        self.iter_values = self.basic_iter_values
         self.iter_slider.setValue(1)
         self.update_iteration_label()
 
@@ -307,14 +355,66 @@ class MainWindow(QMainWindow):
             self.results_root_edit.setText(dir_path)
             self.log_box.append(f"Results folder set: {dir_path}")
 
+    def get_selected_preset_value(self):
+        if self.test_preset_checkbox.isChecked():
+            return 750
+        return int(self.iter_values[self.iter_slider.value()])
+
+    def estimate_runtime_minutes(self, preset_value: int):
+        # Baseline observed on RTX 3060 Laptop GPU (approx.)
+        anchors = [
+            (750, 10),
+            (1500, 20),
+            (3000, 38),
+            (6000, 136),
+            (18000, 467),
+        ]
+
+        # If exact anchor, return it
+        for x, y in anchors:
+            if preset_value == x:
+                return float(y)
+
+        # Log-log interpolation between nearest anchors (reasonable for scaling curves)
+        import math
+        anchors_sorted = sorted(anchors, key=lambda t: t[0])
+
+        if preset_value < anchors_sorted[0][0]:
+            x0, y0 = anchors_sorted[0]
+            x1, y1 = anchors_sorted[1]
+        elif preset_value > anchors_sorted[-1][0]:
+            x0, y0 = anchors_sorted[-2]
+            x1, y1 = anchors_sorted[-1]
+        else:
+            for i in range(len(anchors_sorted) - 1):
+                if anchors_sorted[i][0] <= preset_value <= anchors_sorted[i + 1][0]:
+                    x0, y0 = anchors_sorted[i]
+                    x1, y1 = anchors_sorted[i + 1]
+                    break
+
+        lx0, ly0 = math.log(x0), math.log(y0)
+        lx1, ly1 = math.log(x1), math.log(y1)
+        lxp = math.log(preset_value)
+
+        # linear interpolation in log space
+        t = (lxp - lx0) / (lx1 - lx0)
+        lyp = ly0 + t * (ly1 - ly0)
+        return float(math.exp(lyp))
+
+    def update_runtime_label(self):
+        preset_val = self.get_selected_preset_value()
+        mins = self.estimate_runtime_minutes(preset_val)
+
+        hours = int(mins // 60)
+        rem = int(round(mins - hours * 60))
+
+        if hours > 0:
+            self.runtime_label.setText(f"Estimated runtime (approx.): {hours} hr {rem} min (RTX 3060 baseline)")
+        else:
+            self.runtime_label.setText(f"Estimated runtime (approx.): {rem} min (RTX 3060 baseline)")
+
     def validate_numeric_inputs(self):
-        value = self.det_threshold_edit.text().strip()
-        try:
-            det = float(value)
-        except ValueError:
-            self.log_box.append(f"Invalid numeric value for Face detection sensitivity: {value}")
-            self.status_label.setText("Status: Invalid detection value")
-            return False
+        det = float(self.det_threshold_edit.value())
 
         if not (0 <= det <= 1):
             self.log_box.append("Face detection sensitivity must be between 0 and 1.")
@@ -322,7 +422,6 @@ class MainWindow(QMainWindow):
             return False
 
         return True
-
     def append_command_preview(self, command):
         preview = " ".join(f'"{part}"' if " " in part else part for part in command)
         self.log_box.append("Wrapper command:")
@@ -634,3 +733,11 @@ window = MainWindow()
 window.resize(1100, 820)
 window.show()
 sys.exit(app.exec())
+
+
+
+
+
+
+
+
