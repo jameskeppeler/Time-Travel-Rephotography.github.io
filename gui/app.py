@@ -149,24 +149,24 @@ class MainWindow(QMainWindow):
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(["all", "largest"])
         self.strategy_combo.setCurrentText("all")
-        form_layout.addRow("Faces to enhance", self.strategy_combo)
+
 
         self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
         self.crop_only_checkbox.setChecked(False)
         self.crop_only_checkbox.toggled.connect(self.update_mode_controls)
-        form_layout.addRow("Crop Only", self.crop_only_checkbox)
+
 
         self.use_gfpgan_checkbox = QCheckBox("Enable enhancement (GFPGAN)")
         self.use_gfpgan_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
         self.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
-        form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
+
         self.det_threshold_edit = QDoubleSpinBox()
         self.det_threshold_edit.setRange(0.0, 1.0)
         self.det_threshold_edit.setSingleStep(0.01)
         self.det_threshold_edit.setDecimals(2)
         self.det_threshold_edit.setValue(0.90)
-        form_layout.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
+
         # --- Iteration slider + test mode ---
         self.test_preset_checkbox = QCheckBox("Test mode (fast)")
         self.test_preset_checkbox.setChecked(False)
@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         self.advanced_iter_values = list(range(1000, 20001, 1000))
         self.iter_values = self.basic_iter_values
         self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
-        form_layout.addRow("Preset", self.test_preset_checkbox)
+
 
         self.iter_slider = QSlider(Qt.Horizontal)
         self.advanced_mode_checkbox = QCheckBox("Advanced")
@@ -212,7 +212,13 @@ class MainWindow(QMainWindow):
         slider_widget = QWidget()
         slider_widget.setLayout(slider_wrap)
         self.iter_row_label = QLabel("Iterations")
+        form_layout.addRow("Preset", self.test_preset_checkbox)
         form_layout.addRow(self.iter_row_label, slider_widget)
+        form_layout.addRow("Faces to enhance", self.strategy_combo)
+        form_layout.addRow("Crop Only", self.crop_only_checkbox)
+        form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
+        form_layout.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
+
 
         main_layout.addLayout(form_layout)
 
@@ -345,6 +351,43 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
 
         main_layout.addWidget(splitter)
+        # Reorder layout: previews top, controls middle, log bottom
+        controls_container = QWidget()
+        controls_layout = QVBoxLayout()
+        controls_container.setLayout(controls_layout)
+
+        # Move all controls (everything between title and splitter) into controls_container
+        while main_layout.count() > 2:
+            item = main_layout.takeAt(1)
+            if item.widget() is not None:
+                controls_layout.addWidget(item.widget())
+            elif item.layout() is not None:
+                controls_layout.addLayout(item.layout())
+
+        # Move progress directly below the Input Image selector
+        if controls_layout.count() >= 6:
+            progress_item = controls_layout.takeAt(5)
+            if progress_item.widget() is not None:
+                controls_layout.insertWidget(2, progress_item.widget())
+
+        # Remove the old splitter from the main layout
+        main_layout.takeAt(main_layout.count() - 1)
+        splitter.setParent(None)
+
+        # Detach existing preview/log widgets from the old splitter
+        previews_group.setParent(None)
+        log_container.setParent(None)
+
+        # Build the new bottom splitter: controls over log
+        bottom_splitter = QSplitter(Qt.Vertical)
+        bottom_splitter.addWidget(controls_container)
+        bottom_splitter.addWidget(log_container)
+        bottom_splitter.setStretchFactor(0, 3)
+        bottom_splitter.setStretchFactor(1, 2)
+
+        # Final order: title, previews, controls/log splitter
+        main_layout.addWidget(previews_group)
+        main_layout.addWidget(bottom_splitter)
 # Initial state
         self.update_mode_controls()
         if not self.gfpgan_is_available():
@@ -1533,6 +1576,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
