@@ -167,14 +167,10 @@ class MainWindow(QMainWindow):
         self.det_threshold_edit.setDecimals(2)
         self.det_threshold_edit.setValue(0.90)
 
-        # --- Iteration slider + test mode ---
-        self.test_preset_checkbox = QCheckBox("Test mode (fast)")
-        self.test_preset_checkbox.setChecked(False)
-        self.basic_iter_values = [1500, 3000, 6000, 18000]
-        self.advanced_iter_values = list(range(1000, 20001, 1000))
+        # --- Iteration slider ---
+        self.basic_iter_values = [750, 1500, 3000, 6000, 18000]
+        self.advanced_iter_values = [750] + list(range(1000, 20001, 1000))
         self.iter_values = self.basic_iter_values
-        self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
-
 
         self.iter_slider = QSlider(Qt.Horizontal)
         self.advanced_mode_checkbox = QCheckBox("Advanced")
@@ -182,7 +178,7 @@ class MainWindow(QMainWindow):
         self.advanced_mode_checkbox.toggled.connect(self.update_iteration_mode)
         self.iter_slider.setMinimum(0)
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(1)  # default 3000
+        self.iter_slider.setValue(0)  # default 750
         self.iter_slider.setTickPosition(QSlider.TicksBelow)
         self.iter_slider.setTickInterval(1)
         self.iter_slider.valueChanged.connect(self.update_iteration_label)
@@ -198,7 +194,6 @@ class MainWindow(QMainWindow):
         self.runtime_info.setFixedSize(18, 18)
         self.runtime_info.setStyleSheet("QToolButton { color: #1a73e8; border: 1px solid #1a73e8; border-radius: 9px; font-weight: bold; padding: 0px; } QToolButton:hover { background: #e8f0fe; }")
         self.runtime_info.setToolTip("Estimated processing time is approximate.")
-        self.update_iteration_label()
 
         slider_wrap = QVBoxLayout()
         slider_row = QHBoxLayout()
@@ -212,14 +207,14 @@ class MainWindow(QMainWindow):
         slider_widget = QWidget()
         slider_widget.setLayout(slider_wrap)
         self.iter_row_label = QLabel("Iterations")
-        form_layout.addRow("Preset", self.test_preset_checkbox)
         form_layout.addRow(self.iter_row_label, slider_widget)
         form_layout.addRow("Faces to enhance", self.strategy_combo)
         form_layout.addRow("Crop Only", self.crop_only_checkbox)
         form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
         form_layout.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
 
-
+        self.update_iteration_label()
+        
         main_layout.addLayout(form_layout)
 
         # --- Outputs (Results only) ---
@@ -424,32 +419,19 @@ class MainWindow(QMainWindow):
             self.use_gfpgan_checkbox.setChecked(False)
 
     def update_iteration_mode(self):
-        # If test mode is on, slider is disabled anyway.
-        if self.test_preset_checkbox.isChecked():
-            return
-
         current = self.iter_values[self.iter_slider.value()]
         self.iter_values = self.advanced_iter_values if self.advanced_mode_checkbox.isChecked() else self.basic_iter_values
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
 
-        # Snap to the closest available value in the new list.
         closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - current))
         self.iter_slider.setValue(closest_index)
 
         self.update_iteration_label()
 
     def update_iteration_label(self):
-        if self.test_preset_checkbox.isChecked():
-            self.iter_row_label.setText("Iterations: test")
-            self.iter_slider.setEnabled(False)
-            self.advanced_mode_checkbox.setEnabled(False)
-        else:
-            self.iter_slider.setEnabled(True)
-            self.advanced_mode_checkbox.setEnabled(True)
-            v = self.iter_values[self.iter_slider.value()]
-            self.iter_row_label.setText(f"Iterations: {v}")
+        v = self.iter_values[self.iter_slider.value()]
+        self.iter_row_label.setText(f"Iterations: {v}")
 
-        # Always refresh the estimate (if present)
         if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
             self.update_runtime_label()
     def set_controls_for_running(self, is_running):
@@ -466,9 +448,8 @@ class MainWindow(QMainWindow):
         self.crop_only_checkbox.setEnabled(not is_running)
         self.det_threshold_edit.setEnabled(not is_running)
 
-        self.test_preset_checkbox.setEnabled(not is_running)
-        self.advanced_mode_checkbox.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
-        self.iter_slider.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
+        self.advanced_mode_checkbox.setEnabled(not is_running)
+        self.iter_slider.setEnabled(not is_running)
 
         self.results_root_edit.setEnabled(not is_running)
         self.results_browse_button.setEnabled(not is_running)
@@ -640,10 +621,10 @@ class MainWindow(QMainWindow):
         self.use_gfpgan_checkbox.setChecked(False)
         self.det_threshold_edit.setValue(0.90)
 
-        self.test_preset_checkbox.setChecked(False)
         self.advanced_mode_checkbox.setChecked(False)
         self.iter_values = self.basic_iter_values
-        self.iter_slider.setValue(1)
+        self.iter_slider.setMaximum(len(self.iter_values) - 1)
+        self.iter_slider.setValue(0)
         self.update_iteration_label()
 
         self.results_root_edit.setText(str(self.repo_root / "results"))
@@ -682,8 +663,6 @@ class MainWindow(QMainWindow):
     # Runtime estimation / hardware
     # ------------------------------
     def get_selected_preset_value(self):
-        if self.test_preset_checkbox.isChecked():
-            return 750
         return int(self.iter_values[self.iter_slider.value()])
 
     def estimate_runtime_minutes(self, preset_value: int):
@@ -1132,7 +1111,7 @@ class MainWindow(QMainWindow):
         input_image = self.input_image_edit.text().strip()
         results_root = self.results_root_edit.text().strip()
 
-        preset_value = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
+        preset_value = str(self.iter_values[self.iter_slider.value()])
 
         command = [
             "powershell.exe",
@@ -1378,7 +1357,7 @@ class MainWindow(QMainWindow):
             log_path = results_root / "run_timing_log.jsonl"
 
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
-            source_preset = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
+            source_preset = str(self.iter_values[self.iter_slider.value()])
 
             import json
             with open(log_path, "a", encoding="utf-8") as f:
@@ -1414,7 +1393,7 @@ class MainWindow(QMainWindow):
             log_path = results_root / "run_timing_log.jsonl"
 
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
-            preset_val = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
+            preset_val = str(self.iter_values[self.iter_slider.value()])
 
             record = {
                 "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
