@@ -35,7 +35,10 @@
     [ValidateSet("b", "gb", "g")]
     [string]$SpectralSensitivity = "b",
     [double]$Gaussian = 0.75,
-    [double]$VGGFace = 0.3
+    [double]$VGGFace = 0.3,
+    [double]$ColorTransfer = 10000000000.0,
+    [double]$Eye = 0.1,
+    [double]$Contextual = 0.1
 )
 
 $ErrorActionPreference = "Stop"
@@ -418,10 +421,10 @@ try {
             --e4e_size 256 `
             --mix_layer_range 10 18 `
             --coarse_min 32 `
-            --color_transfer 10000000000.0 `
-            --contextual 0.1 `
+            --color_transfer $ColorTransfer `
+            --contextual $Contextual `
             --cx_layers relu3_4 relu2_2 relu1_2 `
-            --eye 0.1 `
+            --eye $Eye `
             --gaussian $Gaussian `
             --spectral_sensitivity $SpectralSensitivity `
             --recon_size 256 `

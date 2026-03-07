@@ -153,6 +153,18 @@ class AdvancedSettingsDialog(QDialog):
         self.identity_preservation_combo.addItems(["Lower", "Default", "Higher"])
         self.identity_preservation_combo.setCurrentText("Default")
 
+        self.tonal_transfer_combo = QComboBox()
+        self.tonal_transfer_combo.addItems(["Lower", "Default", "Higher"])
+        self.tonal_transfer_combo.setCurrentText("Default")
+
+        self.eye_preservation_combo = QComboBox()
+        self.eye_preservation_combo.addItems(["Lower", "Default", "Higher"])
+        self.eye_preservation_combo.setCurrentText("Default")
+
+        self.structure_matching_combo = QComboBox()
+        self.structure_matching_combo.addItems(["Lower", "Default", "Higher"])
+        self.structure_matching_combo.setCurrentText("Default")
+
         form.addRow("Faces to enhance", self.strategy_combo)
         form.addRow("Crop Only", self.crop_only_checkbox)
         form.addRow("Enhancement", self.use_gfpgan_checkbox)
@@ -162,6 +174,9 @@ class AdvancedSettingsDialog(QDialog):
         form.addRow("Spectral sensitivity", self.spectral_sensitivity_combo)
         form.addRow("Gaussian blur", self.gaussian_edit)
         form.addRow("Identity preservation", self.identity_preservation_combo)
+        form.addRow("Tonal transfer", self.tonal_transfer_combo)
+        form.addRow("Eye preservation", self.eye_preservation_combo)
+        form.addRow("Structure matching", self.structure_matching_combo)
 
         self.update_enhancement_controls()
 
@@ -190,6 +205,9 @@ class AdvancedSettingsDialog(QDialog):
         self.spectral_sensitivity_combo.setCurrentText("b — blue-sensitive")
         self.gaussian_edit.setValue(0.75)
         self.identity_preservation_combo.setCurrentText("Default")
+        self.tonal_transfer_combo.setCurrentText("Default")
+        self.eye_preservation_combo.setCurrentText("Default")
+        self.structure_matching_combo.setCurrentText("Default")
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
@@ -260,6 +278,9 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.spectral_sensitivity_combo.setCurrentText("b — blue-sensitive")
         self.advanced_dialog.gaussian_edit.setValue(0.75)
         self.advanced_dialog.identity_preservation_combo.setCurrentText("Default")
+        self.advanced_dialog.tonal_transfer_combo.setCurrentText("Default")
+        self.advanced_dialog.eye_preservation_combo.setCurrentText("Default")
+        self.advanced_dialog.structure_matching_combo.setCurrentText("Default")
 
         self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
@@ -507,6 +528,9 @@ class MainWindow(QMainWindow):
         spectral = self.advanced_dialog.spectral_sensitivity_combo.currentText()
         gaussian = self.advanced_dialog.gaussian_edit.value()
         identity = self.advanced_dialog.identity_preservation_combo.currentText()
+        tonal = self.advanced_dialog.tonal_transfer_combo.currentText()
+        eye = self.advanced_dialog.eye_preservation_combo.currentText()
+        structure = self.advanced_dialog.structure_matching_combo.currentText()
 
         if crop_only:
             mode_text = "crop-only"
@@ -514,7 +538,7 @@ class MainWindow(QMainWindow):
             mode_text = "enhancement on" if enhancement_on else "enhancement off"
 
         self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity}"
+            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity} | tonal {tonal} | eye {eye} | structure {structure}"
         )
     # ------------------------------
     # Qt / window events
@@ -798,6 +822,9 @@ class MainWindow(QMainWindow):
 
         dlg = self.advanced_dialog
 
+        old_tonal = dlg.tonal_transfer_combo.currentText()
+        old_eye = dlg.eye_preservation_combo.currentText()
+        old_structure = dlg.structure_matching_combo.currentText()
         old_strategy = dlg.strategy_combo.currentText()
         old_crop_only = dlg.crop_only_checkbox.isChecked()
         old_use_gfpgan = dlg.use_gfpgan_checkbox.isChecked()
@@ -821,6 +848,9 @@ class MainWindow(QMainWindow):
             dlg.gfpgan_blend_edit.setValue(old_gfpgan_blend)
             dlg.spectral_sensitivity_combo.setCurrentText(old_spectral)
             dlg.gaussian_edit.setValue(old_gaussian)
+            dlg.tonal_transfer_combo.setCurrentText(old_tonal)
+            dlg.eye_preservation_combo.setCurrentText(old_eye)
+            dlg.structure_matching_combo.setCurrentText(old_structure)
             self.update_mode_controls()
             self.update_runtime_label()
             self.update_advanced_summary_label()
@@ -839,6 +869,33 @@ class MainWindow(QMainWindow):
         if preset == "Higher":
             return 0.45
         return 0.30
+
+    def get_tonal_transfer_value(self):
+        preset = self.advanced_dialog.tonal_transfer_combo.currentText()
+
+        if preset == "Lower":
+            return 1e9
+        if preset == "Higher":
+            return 5e10
+        return 1e10
+
+    def get_eye_preservation_value(self):
+        preset = self.advanced_dialog.eye_preservation_combo.currentText()
+
+        if preset == "Lower":
+            return 0.05
+        if preset == "Higher":
+            return 0.20
+        return 0.10
+
+    def get_structure_matching_value(self):
+        preset = self.advanced_dialog.structure_matching_combo.currentText()
+
+        if preset == "Lower":
+            return 0.05
+        if preset == "Higher":
+            return 0.20
+        return 0.10
         
     def get_spectral_sensitivity_value(self):
         label = self.advanced_dialog.spectral_sensitivity_combo.currentText()
@@ -1298,6 +1355,9 @@ class MainWindow(QMainWindow):
         selected_preset = self.iter_values[self.iter_slider.value()]
         preset_value = "test" if selected_preset == 750 else str(selected_preset)
         identity_value = str(self.get_identity_preservation_value())
+        tonal_value = str(self.get_tonal_transfer_value())
+        eye_value = str(self.get_eye_preservation_value())
+        structure_value = str(self.get_structure_matching_value())
         spectral_value = self.get_spectral_sensitivity_value()
         gaussian_value = self.advanced_dialog.gaussian_edit.text().strip()
 
@@ -1323,6 +1383,12 @@ class MainWindow(QMainWindow):
             gaussian_value,
             "-VGGFace",
             identity_value,
+            "-ColorTransfer",
+            tonal_value,
+            "-Eye",
+            eye_value,
+            "-Contextual",
+            structure_value,
             "-ResultsRoot",
             results_root,
         ]
