@@ -119,6 +119,7 @@ class Optimizer:
         max_coarse_size = (2 ** (len(args.wplus_step) - 1)) * args.coarse_min
         noiser = LatentNoiser(generator, noise_ramp=args.noise_ramp, noise_strength=args.noise_strength).to(device)
         latent = latent_init.detach().clone()
+        milestone_hits = set()
         for coarse_level, steps in enumerate(args.wplus_step):
             if criterion.weights["contextual"] > 0:
                 with torch.no_grad():
@@ -138,6 +139,14 @@ class Optimizer:
             for si in pbar:
                 latent = torch.cat((latent_coarse, latent_fine), dim=1)
                 niters = si + np.sum(args.wplus_step[:coarse_level])
+
+                # Emit milestone markers for shorter-run timing reuse
+                completed_iters = niters + 1
+                if completed_iters >= 1000:
+                    current_milestone = (completed_iters // 1000) * 1000
+                    if current_milestone not in milestone_hits and current_milestone < total_steps:
+                        print(f"=== Rephoto milestone === {current_milestone}")
+                        milestone_hits.add(current_milestone)
                 latent_noisy = noiser(latent, niters / total_steps)
                 img_gen, _, rgbs = generator([latent_noisy], input_is_latent=True, noise=noises)
                 # TODO: use coarse_size instead of args.coarse_size for rgb_level
@@ -227,5 +236,6 @@ class Optimizer:
             scale = 2 ** (-(len(rgbs) - ri))
             visual = make_grid(torch.cat((rgb, rgb / scale), dim=-1), nrow=1, normalize=True, value_range=(-1, 1))
             writer.add_image(f"{prefix}to_rbg_{2 ** (ri + 2)}", visual, niters)
+
 
 

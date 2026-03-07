@@ -31,6 +31,67 @@ from PySide6.QtWidgets import (
 )
 
 
+class InputDropLabel(QLabel):
+    def __init__(self, parent_window):
+        super().__init__("Drop or click to choose an input image.")
+        self.parent_window = parent_window
+        self.setAcceptDrops(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumHeight(340)
+        self.setMouseTracking(True)
+        self._set_normal_style()
+
+    def _set_normal_style(self):
+        self.setStyleSheet("border: 1px dashed #999; border-radius: 6px; background-color: transparent;")
+
+    def _set_hover_style(self):
+        self.setStyleSheet("border: 2px solid #1a73e8; border-radius: 6px; background-color: transparent;")
+
+    def _set_drag_style(self):
+        self.setStyleSheet("border: 2px solid #1a73e8; border-radius: 6px; background-color: transparent;")
+
+    def enterEvent(self, event):
+        self._set_hover_style()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._set_normal_style()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.parent_window.browse_for_image()
+            return
+        super().mousePressEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    p = Path(url.toLocalFile())
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}:
+                        self._set_drag_style()
+                        event.acceptProposedAction()
+                        return
+        event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self._set_hover_style()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls():
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    p = Path(url.toLocalFile())
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}:
+                        self.parent_window.set_selected_input_image(str(p))
+                        self._set_hover_style()
+                        event.acceptProposedAction()
+                        return
+        self._set_normal_style()
+        event.ignore()
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -238,7 +299,7 @@ class MainWindow(QMainWindow):
         input_layout = QVBoxLayout()
         input_group.setLayout(input_layout)
 
-        self.input_preview_label = QLabel("No input image yet.")
+        self.input_preview_label = InputDropLabel(self)
         self.input_preview_label.setAlignment(Qt.AlignCenter)
         self.input_preview_label.setMinimumHeight(340)
         self.input_preview_label.setStyleSheet("border: 1px solid #999;")
@@ -421,6 +482,7 @@ class MainWindow(QMainWindow):
         self._progress_crop_count = None
         self._progress_rephoto_done = 0
         self._progress_stage = "Starting"
+        self._pending_milestones = []
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Starting... 0%")
 
@@ -501,6 +563,23 @@ class MainWindow(QMainWindow):
             self._set_progress(max(self.progress_bar.value(), pct), f"Crops ready ({n})")
             return
 
+        # Rephoto milestone markers (captured during run, written only on full success)
+        m = __import__("re").search(r"^=== Rephoto milestone ===\s*(\d+)\s*$", s)
+        if m and self.run_started_at is not None:
+            milestone_val = int(m.group(1))
+            elapsed = max(0.0, time.time() - self.run_started_at)
+
+            if not hasattr(self, "_pending_milestones"):
+                self._pending_milestones = []
+
+            if not any(pm.get("preset") == milestone_val for pm in self._pending_milestones):
+                self._pending_milestones.append({
+                    "preset": milestone_val,
+                    "elapsed_seconds": elapsed,
+                })
+                self.log_box.append(f"Captured milestone timing: {milestone_val} iterations at {elapsed:.1f}s")
+            return
+
         # Completion markers
         if s.startswith("CropOnly requested. Skipping rephoto step."):
             self._set_progress(100, "Done (crop-only)")
@@ -529,6 +608,12 @@ class MainWindow(QMainWindow):
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
+
+    def set_selected_input_image(self, file_path):
+        self.input_image_edit.setText(file_path)
+        self.log_box.append(f"Selected image: {file_path}")
+        self.status_label.setText("Status: Image selected")
+        self.set_input_preview_image(Path(file_path))
 
     def browse_for_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -682,11 +767,15 @@ class MainWindow(QMainWindow):
 
     def estimate_runtime_from_local_history(self, preset_value: int):
         """
-        Additive local timing model:
-          total ~= base_rephoto_time + enhancement_overhead
+        Local timing model with milestone support.
 
-        Base time is learned primarily from enhancement=False successful full runs.
-        Enhancement overhead is learned from paired on/off runs on this machine.
+        Preference:
+        1) Exact local timing for this preset, same GPU, same enhancement
+           (full run or milestone)
+        2) Exact local timing for this preset, same enhancement
+        3) Additive model:
+              total ~= base_rephoto_time + enhancement_overhead
+           using local history
         Returns:
           (minutes_or_None, source_note)
         """
@@ -715,31 +804,54 @@ class MainWindow(QMainWindow):
             enh = bool(rec.get("enhancement", False))
             gpu = (rec.get("gpu_name") or "").strip()
             secs = rec.get("elapsed_seconds")
+            rtype = rec.get("record_type", "full_run")
             try:
                 secs = float(secs)
             except Exception:
                 continue
             if secs <= 0:
                 continue
-            parsed.append((p, secs, gpu, enh))
+            parsed.append((p, secs, gpu, enh, rtype))
 
         if not parsed:
             return (None, "Local timing history could not be parsed.")
 
-        # ----------------------------
-        # Base runtime: prefer enhancement=False
-        # ----------------------------
-        base_candidates = [(p, s) for (p, s, g, e) in parsed if g == current_gpu and (not e)]
-        if len(base_candidates) < 2:
-            base_candidates = [(p, s) for (p, s, g, e) in parsed if (not e)]
+        # -------------------------------------------------
+        # 1) Exact local timing match first (milestones count)
+        # -------------------------------------------------
+        exact_same_gpu_same_enh = [(s, rt) for (p, s, g, e, rt) in parsed if p == preset_value and g == current_gpu and e == current_enh]
+        if exact_same_gpu_same_enh:
+            avg_secs = sum(s for (s, _rt) in exact_same_gpu_same_enh) / len(exact_same_gpu_same_enh)
+            types = sorted(set(rt for (_s, rt) in exact_same_gpu_same_enh))
+            return (
+                avg_secs / 60.0,
+                f"Using exact local timing from {len(exact_same_gpu_same_enh)} same-GPU record(s) at this preset ({', '.join(types)})."
+            )
 
-        # Exact base match
+        exact_same_enh = [(s, rt) for (p, s, g, e, rt) in parsed if p == preset_value and e == current_enh]
+        if exact_same_enh:
+            avg_secs = sum(s for (s, _rt) in exact_same_enh) / len(exact_same_enh)
+            types = sorted(set(rt for (_s, rt) in exact_same_enh))
+            return (
+                avg_secs / 60.0,
+                f"Using exact local timing from {len(exact_same_enh)} record(s) at this preset ({', '.join(types)})."
+            )
+
+        # -------------------------------------------------
+        # 2) Additive model:
+        #    total ~= base_rephoto_time + enhancement_overhead
+        # -------------------------------------------------
+
+        # Base runtime: prefer enhancement=False
+        base_candidates = [(p, s) for (p, s, g, e, rt) in parsed if g == current_gpu and (not e)]
+        if len(base_candidates) < 2:
+            base_candidates = [(p, s) for (p, s, g, e, rt) in parsed if (not e)]
+
         exact_base = [s for (p, s) in base_candidates if p == preset_value]
         if exact_base:
             base_secs = sum(exact_base) / len(exact_base)
-            base_note = f"Exact local base timing from {len(exact_base)} enhancement-off run(s)."
+            base_note = f"Exact local base timing from {len(exact_base)} enhancement-off record(s)."
         else:
-            # Group by preset and interpolate if possible
             grouped_base = {}
             for p, s in base_candidates:
                 grouped_base.setdefault(p, []).append(s)
@@ -775,21 +887,17 @@ class MainWindow(QMainWindow):
                     base_note = "Duplicate local base presets only; could not interpolate."
             else:
                 base_secs = None
-                base_note = "Not enough enhancement-off local runs to estimate base timing."
+                base_note = "Not enough enhancement-off local records to estimate base timing."
 
-        # If enhancement is OFF, return base directly if available
         if not current_enh:
             if base_secs is not None:
                 return (base_secs / 60.0, base_note)
             return (None, base_note)
 
-        # ----------------------------
-        # Enhancement overhead
-        # Learn overhead from paired on/off runs by preset (same GPU preferred)
-        # ----------------------------
-        same_gpu = [(p, s, e) for (p, s, g, e) in parsed if g == current_gpu]
+        # Enhancement overhead from paired on/off timings
+        same_gpu = [(p, s, e) for (p, s, g, e, rt) in parsed if g == current_gpu]
         if len(same_gpu) < 2:
-            same_gpu = [(p, s, e) for (p, s, g, e) in parsed]
+            same_gpu = [(p, s, e) for (p, s, g, e, rt) in parsed]
 
         from collections import defaultdict
         by_preset = defaultdict(lambda: {"on": [], "off": []})
@@ -810,19 +918,16 @@ class MainWindow(QMainWindow):
         overhead_points = sorted(overhead_points, key=lambda t: t[0])
 
         overhead_secs = None
-        overhead_note = "No paired enhancement on/off local runs yet."
+        overhead_note = "No paired enhancement on/off local records yet."
 
-        # Exact overhead for this preset
         exact_over = [ov for (p, ov) in overhead_points if p == preset_value]
         if exact_over:
             overhead_secs = sum(exact_over) / len(exact_over)
-            overhead_note = f"Exact local enhancement overhead from paired run(s) at this preset."
+            overhead_note = "Exact local enhancement overhead from paired record(s) at this preset."
         elif overhead_points:
-            # Use average known overhead as a practical additive estimate
             overhead_secs = sum(ov for (_p, ov) in overhead_points) / len(overhead_points)
             overhead_note = f"Average local enhancement overhead from {len(overhead_points)} paired preset point(s)."
 
-        # Combine
         if base_secs is not None and overhead_secs is not None:
             total_secs = base_secs + overhead_secs
             return (total_secs / 60.0, base_note + " " + overhead_note)
@@ -1163,6 +1268,46 @@ class MainWindow(QMainWindow):
                 self.log_box.append(line)
                 self.update_progress_from_line(line)
 
+    def flush_pending_milestones(self):
+        if not hasattr(self, "_pending_milestones") or not self._pending_milestones:
+            return
+
+        try:
+            if hasattr(self, "results_root_edit"):
+                results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+            else:
+                results_root = self.repo_root / "results"
+
+            results_root.mkdir(parents=True, exist_ok=True)
+            log_path = results_root / "run_timing_log.jsonl"
+
+            hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
+            source_preset = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
+
+            import json
+            with open(log_path, "a", encoding="utf-8") as f:
+                for pm in self._pending_milestones:
+                    record = {
+                        "record_type": "milestone",
+                        "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "input_image": self.input_image_edit.text().strip(),
+                        "preset": str(pm["preset"]),
+                        "source_run_preset": source_preset,
+                        "advanced_mode": bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, "advanced_mode_checkbox") else False,
+                        "enhancement": bool(self.use_gfpgan_checkbox.isChecked()),
+                        "crop_only": False,
+                        "success": True,
+                        "elapsed_seconds": float(pm["elapsed_seconds"]),
+                        "gpu_name": hw.get("gpu_name", "Unknown GPU"),
+                    }
+                    f.write(json.dumps(record) + "\n")
+
+            self.log_box.append(f"Saved {len(self._pending_milestones)} milestone timing record(s).")
+            self._pending_milestones = []
+
+        except Exception as e:
+            self.log_box.append(f"Milestone timing log write failed: {e}")
+
     def append_timing_log(self, elapsed_seconds: float, success: bool, crop_only: bool):
         try:
             if hasattr(self, "results_root_edit"):
@@ -1207,6 +1352,7 @@ class MainWindow(QMainWindow):
             # Log timing only for successful full runs (not crop-only)
             if (not self.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
                 self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
+                self.flush_pending_milestones()
 
             if self.crop_only_checkbox.isChecked():
                 self.set_result_preview_image(None)
@@ -1343,4 +1489,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
 

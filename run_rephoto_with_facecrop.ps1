@@ -406,14 +406,30 @@ try {
         Write-Host "Results: $ThisResultDir"
         Write-Host ""
 
-        conda run -n $RephotoEnvName python $ProjectorScriptPath `
+        conda run --no-capture-output -n $RephotoEnvName python -u $ProjectorScriptPath `
             $ProjectorImagePath `
             --encoder_ckpt $EncoderCkptPath `
-            --color_transfer 0 `
-            --eye 0 `
-            --lr 0.001 `
-            --noise_regularize 0 `
-            --camera_lr 0 `
+            --encoder_size 256 `
+            --e4e_ckpt checkpoint/e4e_ffhq_encode.pt `
+            --e4e_size 256 `
+            --mix_layer_range 10 18 `
+            --coarse_min 32 `
+            --color_transfer 10000000000.0 `
+            --contextual 0.1 `
+            --cx_layers relu3_4 relu2_2 relu1_2 `
+            --eye 0.1 `
+            --gaussian 0.75 `
+            --spectral_sensitivity b `
+            --recon_size 256 `
+            --vgg 1 `
+            --vggface 0.3 `
+            --lr 0.1 `
+            --noise_strength 0.0 `
+            --noise_ramp 0.75 `
+            --noise_regularize 50000 `
+            --camera_lr 0.01 `
+            --log_freq 10 `
+            --log_visual_freq 1000 `
             --wplus_step $W1 $W2 `
             --results_dir $ThisResultDir
 
@@ -446,4 +462,6 @@ Write-Host ""
 Write-Host "Done."
 Write-Host "Crops are in: $CropOutDir"
 Write-Host "Rephoto results are in: $ResultRoot"
+
+
 
