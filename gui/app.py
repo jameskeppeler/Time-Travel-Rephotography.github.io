@@ -113,6 +113,7 @@ class AdvancedSettingsDialog(QDialog):
         self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
 
         self.use_gfpgan_checkbox = QCheckBox("Disable enhancement (GFPGAN)")
+        self.use_gfpgan_checkbox.toggled.connect(self.update_enhancement_controls)
 
         self.det_threshold_edit = QDoubleSpinBox()
         self.det_threshold_edit.setRange(0.0, 1.0)
@@ -120,15 +121,57 @@ class AdvancedSettingsDialog(QDialog):
         self.det_threshold_edit.setDecimals(2)
         self.det_threshold_edit.setValue(0.90)
 
+        self.face_factor_edit = QDoubleSpinBox()
+        self.face_factor_edit.setRange(0.10, 2.00)
+        self.face_factor_edit.setSingleStep(0.01)
+        self.face_factor_edit.setDecimals(2)
+        self.face_factor_edit.setValue(0.65)
+
+        self.gfpgan_blend_edit = QDoubleSpinBox()
+        self.gfpgan_blend_edit.setRange(0.0, 1.0)
+        self.gfpgan_blend_edit.setSingleStep(0.01)
+        self.gfpgan_blend_edit.setDecimals(2)
+        self.gfpgan_blend_edit.setValue(0.35)
+
         form.addRow("Faces to enhance", self.strategy_combo)
         form.addRow("Crop Only", self.crop_only_checkbox)
         form.addRow("Enhancement", self.use_gfpgan_checkbox)
-        form.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
+        form.addRow("Enhancement blend", self.gfpgan_blend_edit)
+        form.addRow("Face detection sensitivity (0–1)", self.det_threshold_edit)
+        form.addRow("Face crop expansion", self.face_factor_edit)
+
+        self.update_enhancement_controls()
+
+        button_row = QHBoxLayout()
+
+        self.restore_defaults_button = QPushButton("Restore Defaults")
+        self.restore_defaults_button.clicked.connect(self.restore_defaults)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
+
+        button_row.addWidget(self.restore_defaults_button)
+        button_row.addStretch()
+        button_row.addWidget(self.button_box)
+
+        layout.addLayout(button_row)
+
+    def restore_defaults(self):
+        self.strategy_combo.setCurrentText("largest")
+        self.crop_only_checkbox.setChecked(False)
+        self.use_gfpgan_checkbox.setChecked(False)
+        self.gfpgan_blend_edit.setValue(0.35)
+        self.det_threshold_edit.setValue(0.90)
+        self.face_factor_edit.setValue(0.65)
+
+    def update_enhancement_controls(self):
+        enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
+        self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
+    
+    def update_enhancement_controls(self):
+        enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
+        self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -150,9 +193,6 @@ class MainWindow(QMainWindow):
         self._progress_anim_start = 0
         self._progress_anim_end = 0
         self._progress_anim_stage = ""
-        # Hidden defaults (not exposed in UI)
-        self.default_face_factor = 0.65
-        self.default_gfpgan_blend = 0.35
 
         # Preview state
         self.input_pixmap = None
@@ -187,8 +227,12 @@ class MainWindow(QMainWindow):
         self.advanced_dialog = AdvancedSettingsDialog(self)
         self.advanced_dialog.strategy_combo.setCurrentText("largest")
         self.advanced_dialog.crop_only_checkbox.setChecked(False)
-        self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
+        self.advanced_dialog.det_threshold_edit.setValue(0.90)
+        self.advanced_dialog.face_factor_edit.setValue(0.65)
+        self.advanced_dialog.gfpgan_blend_edit.setValue(0.35)
+
+        self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
 
@@ -429,6 +473,8 @@ class MainWindow(QMainWindow):
         crop_only = self.advanced_dialog.crop_only_checkbox.isChecked()
         enhancement_on = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
         det = self.advanced_dialog.det_threshold_edit.value()
+        face_factor = self.advanced_dialog.face_factor_edit.value()
+        gfpgan_blend = self.advanced_dialog.gfpgan_blend_edit.value()
 
         if crop_only:
             mode_text = "crop-only"
@@ -436,7 +482,7 @@ class MainWindow(QMainWindow):
             mode_text = "enhancement on" if enhancement_on else "enhancement off"
 
         self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f}"
+            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f}"
         )
     # ------------------------------
     # Qt / window events
@@ -724,6 +770,8 @@ class MainWindow(QMainWindow):
         old_crop_only = dlg.crop_only_checkbox.isChecked()
         old_use_gfpgan = dlg.use_gfpgan_checkbox.isChecked()
         old_det_threshold = dlg.det_threshold_edit.value()
+        old_face_factor = dlg.face_factor_edit.value()
+        old_gfpgan_blend = dlg.gfpgan_blend_edit.value()
 
         if dlg.exec() == QDialog.Accepted:
             self.update_mode_controls()
@@ -735,6 +783,8 @@ class MainWindow(QMainWindow):
             dlg.crop_only_checkbox.setChecked(old_crop_only)
             dlg.use_gfpgan_checkbox.setChecked(old_use_gfpgan)
             dlg.det_threshold_edit.setValue(old_det_threshold)
+            dlg.face_factor_edit.setValue(old_face_factor)
+            dlg.gfpgan_blend_edit.setValue(old_gfpgan_blend)
             self.update_mode_controls()
             self.update_runtime_label()
             self.update_advanced_summary_label()
@@ -1206,14 +1256,12 @@ class MainWindow(QMainWindow):
             "-Strategy",
             self.advanced_dialog.strategy_combo.currentText(),
             "-FaceFactor",
-            str(self.default_face_factor),
+            self.advanced_dialog.face_factor_edit.text().strip(),
             "-DetThreshold",
             self.advanced_dialog.det_threshold_edit.text().strip(),
             "-ResultsRoot",
             results_root,
         ]
-
-
 
         if self.advanced_dialog.crop_only_checkbox.isChecked():
             command.append("-CropOnly")
@@ -1221,7 +1269,7 @@ class MainWindow(QMainWindow):
             command.extend([
                 "-UseGFPGAN",
                 "-GFPGANBlend",
-                str(self.default_gfpgan_blend),
+                self.advanced_dialog.gfpgan_blend_edit.text().strip(),
             ])
 
         return command
