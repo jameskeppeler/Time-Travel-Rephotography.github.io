@@ -12,8 +12,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDialog,
-    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -94,42 +92,6 @@ class InputDropLabel(QLabel):
         self._set_normal_style()
         event.ignore()
 
-class AdvancedSettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Advanced Settings")
-        self.setModal(True)
-        self.setMinimumWidth(420)
-
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        form = QFormLayout()
-        layout.addLayout(form)
-
-        self.strategy_combo = QComboBox()
-        self.strategy_combo.addItems(["all", "largest"])
-
-        self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
-
-        self.use_gfpgan_checkbox = QCheckBox("Disable enhancement (GFPGAN)")
-
-        self.det_threshold_edit = QDoubleSpinBox()
-        self.det_threshold_edit.setRange(0.0, 1.0)
-        self.det_threshold_edit.setSingleStep(0.01)
-        self.det_threshold_edit.setDecimals(2)
-        self.det_threshold_edit.setValue(0.90)
-
-        form.addRow("Faces to enhance", self.strategy_combo)
-        form.addRow("Crop Only", self.crop_only_checkbox)
-        form.addRow("Enhancement", self.use_gfpgan_checkbox)
-        form.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
-
-        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.button_box.accepted.connect(self.accept)
-        self.button_box.rejected.connect(self.reject)
-        layout.addWidget(self.button_box)
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -184,18 +146,35 @@ class MainWindow(QMainWindow):
         # --- Main settings ---
         form_layout = QFormLayout()
 
-        self.advanced_dialog = AdvancedSettingsDialog(self)
-        self.advanced_dialog.strategy_combo.setCurrentText("largest")
-        self.advanced_dialog.crop_only_checkbox.setChecked(False)
-        self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
-        self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
-        self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
-        self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems(["all", "largest"])
+        self.strategy_combo.setCurrentText("all")
+        form_layout.addRow("Faces to enhance", self.strategy_combo)
 
-        # --- Iteration slider ---
-        self.basic_iter_values = [750, 1500, 3000, 6000, 18000]
-        self.advanced_iter_values = [750] + list(range(1000, 20001, 1000))
+        self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
+        self.crop_only_checkbox.setChecked(False)
+        self.crop_only_checkbox.toggled.connect(self.update_mode_controls)
+        form_layout.addRow("Crop Only", self.crop_only_checkbox)
+
+        self.use_gfpgan_checkbox = QCheckBox("Enable enhancement (GFPGAN)")
+        self.use_gfpgan_checkbox.setChecked(False)
+        self.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
+        self.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
+        form_layout.addRow("Enhancement", self.use_gfpgan_checkbox)
+        self.det_threshold_edit = QDoubleSpinBox()
+        self.det_threshold_edit.setRange(0.0, 1.0)
+        self.det_threshold_edit.setSingleStep(0.01)
+        self.det_threshold_edit.setDecimals(2)
+        self.det_threshold_edit.setValue(0.90)
+        form_layout.addRow("Face detection sensitivity (0–1) [0.90 recommended]", self.det_threshold_edit)
+        # --- Iteration slider + test mode ---
+        self.test_preset_checkbox = QCheckBox("Test mode (fast)")
+        self.test_preset_checkbox.setChecked(False)
+        self.basic_iter_values = [1500, 3000, 6000, 18000]
+        self.advanced_iter_values = list(range(1000, 20001, 1000))
         self.iter_values = self.basic_iter_values
+        self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
+        form_layout.addRow("Preset", self.test_preset_checkbox)
 
         self.iter_slider = QSlider(Qt.Horizontal)
         self.advanced_mode_checkbox = QCheckBox("Advanced")
@@ -203,7 +182,7 @@ class MainWindow(QMainWindow):
         self.advanced_mode_checkbox.toggled.connect(self.update_iteration_mode)
         self.iter_slider.setMinimum(0)
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(0)  # default 750
+        self.iter_slider.setValue(1)  # default 3000
         self.iter_slider.setTickPosition(QSlider.TicksBelow)
         self.iter_slider.setTickInterval(1)
         self.iter_slider.valueChanged.connect(self.update_iteration_label)
@@ -219,6 +198,7 @@ class MainWindow(QMainWindow):
         self.runtime_info.setFixedSize(18, 18)
         self.runtime_info.setStyleSheet("QToolButton { color: #1a73e8; border: 1px solid #1a73e8; border-radius: 9px; font-weight: bold; padding: 0px; } QToolButton:hover { background: #e8f0fe; }")
         self.runtime_info.setToolTip("Estimated processing time is approximate.")
+        self.update_iteration_label()
 
         slider_wrap = QVBoxLayout()
         slider_row = QHBoxLayout()
@@ -233,24 +213,6 @@ class MainWindow(QMainWindow):
         slider_widget.setLayout(slider_wrap)
         self.iter_row_label = QLabel("Iterations")
         form_layout.addRow(self.iter_row_label, slider_widget)
-
-        self.advanced_settings_button = QPushButton("Advanced Settings...")
-        self.advanced_settings_button.clicked.connect(self.open_advanced_settings_dialog)
-
-        advanced_wrap = QVBoxLayout()
-        advanced_wrap.setContentsMargins(0, 0, 0, 0)
-        advanced_wrap.setSpacing(4)
-        advanced_wrap.addWidget(self.advanced_settings_button)
-
-        self.advanced_summary_label = QLabel("")
-        advanced_wrap.addWidget(self.advanced_summary_label)
-
-        advanced_widget = QWidget()
-        advanced_widget.setLayout(advanced_wrap)
-
-        form_layout.addRow("Advanced", advanced_widget)
-
-        self.update_iteration_label()
 
         main_layout.addLayout(form_layout)
 
@@ -294,7 +256,6 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.quit_button)
 
         main_layout.addLayout(button_row)
-
         # --- Progress row ---
         progress_row = QHBoxLayout()
 
@@ -306,7 +267,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setFixedHeight(28)
         self.progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
         self.progress_bar.setAutoFillBackground(True)
-
+                # Estimate + info icon kept adjacent (left side)
         runtime_pack = QHBoxLayout()
         runtime_pack.setContentsMargins(0, 0, 0, 0)
         runtime_pack.setSpacing(6)
@@ -328,12 +289,12 @@ class MainWindow(QMainWindow):
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
         self._elapsed_timer.timeout.connect(self.update_elapsed_label)
-
         # --- Previews (Input on left, Result on right) ---
         previews_group = QGroupBox("Previews")
         previews_layout = QHBoxLayout()
         previews_group.setLayout(previews_layout)
 
+        # Input preview
         input_group = QGroupBox("Input Preview")
         input_layout = QVBoxLayout()
         input_group.setLayout(input_layout)
@@ -344,6 +305,7 @@ class MainWindow(QMainWindow):
         self.input_preview_label.setStyleSheet("border: 1px solid #999;")
         input_layout.addWidget(self.input_preview_label)
 
+        # Result preview
         result_group = QGroupBox("Result Preview")
         result_layout = QVBoxLayout()
         result_group.setLayout(result_layout)
@@ -383,61 +345,13 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(1, 2)
 
         main_layout.addWidget(splitter)
-
-        # Reorder layout: previews top, controls middle, log bottom
-        controls_container = QWidget()
-        controls_layout = QVBoxLayout()
-        controls_container.setLayout(controls_layout)
-
-        while main_layout.count() > 2:
-            item = main_layout.takeAt(1)
-            if item.widget() is not None:
-                controls_layout.addWidget(item.widget())
-            elif item.layout() is not None:
-                controls_layout.addLayout(item.layout())
-
-        if controls_layout.count() >= 6:
-            progress_item = controls_layout.takeAt(5)
-            if progress_item.widget() is not None:
-                controls_layout.insertWidget(2, progress_item.widget())
-
-        main_layout.takeAt(main_layout.count() - 1)
-        splitter.setParent(None)
-
-        previews_group.setParent(None)
-        log_container.setParent(None)
-
-        bottom_splitter = QSplitter(Qt.Vertical)
-        bottom_splitter.addWidget(controls_container)
-        bottom_splitter.addWidget(log_container)
-        bottom_splitter.setStretchFactor(0, 3)
-        bottom_splitter.setStretchFactor(1, 2)
-
-        main_layout.addWidget(previews_group)
-        main_layout.addWidget(bottom_splitter)
-
-        # Initial state
+# Initial state
         self.update_mode_controls()
-        self.update_advanced_summary_label()
         if not self.gfpgan_is_available():
             self.log_box.append("GFPGAN not found (deps\\GFPGAN). Enhancement is disabled.")
         else:
             self.log_box.append("GFPGAN found. Enhancement is available.")
 
-    def update_advanced_summary_label(self):
-        strategy = self.advanced_dialog.strategy_combo.currentText()
-        crop_only = self.advanced_dialog.crop_only_checkbox.isChecked()
-        enhancement_on = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
-        det = self.advanced_dialog.det_threshold_edit.value()
-
-        if crop_only:
-            mode_text = "crop-only"
-        else:
-            mode_text = "enhancement on" if enhancement_on else "enhancement off"
-
-        self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f}"
-        )
     # ------------------------------
     # Qt / window events
     # ------------------------------
@@ -452,40 +366,49 @@ class MainWindow(QMainWindow):
     def gfpgan_is_available(self):
         return (self.repo_root / "deps" / "GFPGAN").exists()
 
-    
     def update_mode_controls(self):
-        crop_only = self.advanced_dialog.crop_only_checkbox.isChecked()
+        crop_only = self.crop_only_checkbox.isChecked()
         gfpgan_available = self.gfpgan_is_available()
 
         if not gfpgan_available:
-            if self.advanced_dialog.use_gfpgan_checkbox.isChecked():
-                self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
-            self.advanced_dialog.use_gfpgan_checkbox.setEnabled(False)
+            if self.use_gfpgan_checkbox.isChecked():
+                self.use_gfpgan_checkbox.setChecked(False)
+            self.use_gfpgan_checkbox.setEnabled(False)
             return
 
-        self.advanced_dialog.use_gfpgan_checkbox.setEnabled(not crop_only)
-
-        if crop_only:
-            self.advanced_dialog.use_gfpgan_checkbox.setChecked(True)
+        self.use_gfpgan_checkbox.setEnabled(not crop_only)
+        if crop_only and self.use_gfpgan_checkbox.isChecked():
+            self.use_gfpgan_checkbox.setChecked(False)
 
     def update_iteration_mode(self):
+        # If test mode is on, slider is disabled anyway.
+        if self.test_preset_checkbox.isChecked():
+            return
+
         current = self.iter_values[self.iter_slider.value()]
         self.iter_values = self.advanced_iter_values if self.advanced_mode_checkbox.isChecked() else self.basic_iter_values
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
 
+        # Snap to the closest available value in the new list.
         closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - current))
         self.iter_slider.setValue(closest_index)
 
         self.update_iteration_label()
 
     def update_iteration_label(self):
-        v = self.iter_values[self.iter_slider.value()]
-        self.iter_row_label.setText(f"Iterations: {v}")
+        if self.test_preset_checkbox.isChecked():
+            self.iter_row_label.setText("Iterations: test")
+            self.iter_slider.setEnabled(False)
+            self.advanced_mode_checkbox.setEnabled(False)
+        else:
+            self.iter_slider.setEnabled(True)
+            self.advanced_mode_checkbox.setEnabled(True)
+            v = self.iter_values[self.iter_slider.value()]
+            self.iter_row_label.setText(f"Iterations: {v}")
 
+        # Always refresh the estimate (if present)
         if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
             self.update_runtime_label()
-
-        self.update_advanced_summary_label()
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
         self.cancel_button.setEnabled(is_running)
@@ -496,22 +419,22 @@ class MainWindow(QMainWindow):
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
 
-        self.advanced_dialog.strategy_combo.setEnabled(not is_running)
-        self.advanced_dialog.crop_only_checkbox.setEnabled(not is_running)
-        self.advanced_dialog.det_threshold_edit.setEnabled(not is_running)
+        self.strategy_combo.setEnabled(not is_running)
+        self.crop_only_checkbox.setEnabled(not is_running)
+        self.det_threshold_edit.setEnabled(not is_running)
 
-        self.advanced_mode_checkbox.setEnabled(not is_running)
-        self.iter_slider.setEnabled(not is_running)
+        self.test_preset_checkbox.setEnabled(not is_running)
+        self.advanced_mode_checkbox.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
+        self.iter_slider.setEnabled((not is_running) and (not self.test_preset_checkbox.isChecked()))
 
         self.results_root_edit.setEnabled(not is_running)
         self.results_browse_button.setEnabled(not is_running)
-        self.advanced_settings_button.setEnabled(not is_running)
 
         if is_running:
             # Reset progress UI on each run start
             self.progress_bar.setValue(0)
             self.progress_bar.setFormat("Starting... 0%")
-            self.advanced_dialog.use_gfpgan_checkbox.setEnabled(False)
+            self.use_gfpgan_checkbox.setEnabled(False)
         else:
             self.update_mode_controls()
 
@@ -669,20 +592,19 @@ class MainWindow(QMainWindow):
     # Input / output selection
     # ------------------------------
     def reset_form_defaults(self):
-        self.advanced_dialog.strategy_combo.setCurrentText("largest")
-        self.advanced_dialog.crop_only_checkbox.setChecked(False)
-        self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
-        self.advanced_dialog.det_threshold_edit.setValue(0.90)
+        self.strategy_combo.setCurrentText("all")
+        self.crop_only_checkbox.setChecked(False)
+        self.use_gfpgan_checkbox.setChecked(False)
+        self.det_threshold_edit.setValue(0.90)
 
+        self.test_preset_checkbox.setChecked(False)
         self.advanced_mode_checkbox.setChecked(False)
         self.iter_values = self.basic_iter_values
-        self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(0)
+        self.iter_slider.setValue(1)
         self.update_iteration_label()
 
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
-        self.update_advanced_summary_label()
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -713,36 +635,12 @@ class MainWindow(QMainWindow):
             self.results_root_edit.setText(dir_path)
             self.log_box.append(f"Results folder set: {dir_path}")
 
-    def open_advanced_settings_dialog(self):
-        if self.process is not None:
-            self.log_box.append("Cannot change advanced settings while a run is active.")
-            return
-
-        dlg = self.advanced_dialog
-
-        old_strategy = dlg.strategy_combo.currentText()
-        old_crop_only = dlg.crop_only_checkbox.isChecked()
-        old_use_gfpgan = dlg.use_gfpgan_checkbox.isChecked()
-        old_det_threshold = dlg.det_threshold_edit.value()
-
-        if dlg.exec() == QDialog.Accepted:
-            self.update_mode_controls()
-            self.update_runtime_label()
-            self.update_advanced_summary_label()
-            self.log_box.append("Advanced settings updated.")
-        else:
-            dlg.strategy_combo.setCurrentText(old_strategy)
-            dlg.crop_only_checkbox.setChecked(old_crop_only)
-            dlg.use_gfpgan_checkbox.setChecked(old_use_gfpgan)
-            dlg.det_threshold_edit.setValue(old_det_threshold)
-            self.update_mode_controls()
-            self.update_runtime_label()
-            self.update_advanced_summary_label()
-
     # ------------------------------
     # Runtime estimation / hardware
     # ------------------------------
     def get_selected_preset_value(self):
+        if self.test_preset_checkbox.isChecked():
+            return 750
         return int(self.iter_values[self.iter_slider.value()])
 
     def estimate_runtime_minutes(self, preset_value: int):
@@ -888,7 +786,7 @@ class MainWindow(QMainWindow):
 
         current_hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
         current_gpu = (current_hw.get("gpu_name") or "").strip()
-        current_enh = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
+        current_enh = bool(self.use_gfpgan_checkbox.isChecked())
 
         def parse_preset(rec):
             p = rec.get("preset")
@@ -1174,7 +1072,7 @@ class MainWindow(QMainWindow):
     # Validation / command building
     # ------------------------------
     def validate_numeric_inputs(self):
-        det = float(self.advanced_dialog.det_threshold_edit.value())
+        det = float(self.det_threshold_edit.value())
 
         if not (0 <= det <= 1):
             self.log_box.append("Face detection sensitivity must be between 0 and 1.")
@@ -1191,7 +1089,7 @@ class MainWindow(QMainWindow):
         input_image = self.input_image_edit.text().strip()
         results_root = self.results_root_edit.text().strip()
 
-        preset_value = str(self.iter_values[self.iter_slider.value()])
+        preset_value = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
 
         command = [
             "powershell.exe",
@@ -1204,20 +1102,18 @@ class MainWindow(QMainWindow):
             "-Preset",
             preset_value,
             "-Strategy",
-            self.advanced_dialog.strategy_combo.currentText(),
+            self.strategy_combo.currentText(),
             "-FaceFactor",
             str(self.default_face_factor),
             "-DetThreshold",
-            self.advanced_dialog.det_threshold_edit.text().strip(),
+            self.det_threshold_edit.text().strip(),
             "-ResultsRoot",
             results_root,
         ]
 
-
-
-        if self.advanced_dialog.crop_only_checkbox.isChecked():
+        if self.crop_only_checkbox.isChecked():
             command.append("-CropOnly")
-        elif (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()) and self.gfpgan_is_available():
+        elif self.use_gfpgan_checkbox.isChecked() and self.gfpgan_is_available():
             command.extend([
                 "-UseGFPGAN",
                 "-GFPGANBlend",
@@ -1253,11 +1149,12 @@ class MainWindow(QMainWindow):
                 newest = p
 
         return newest
+
     def simplify_run_folder(self, folder: Path):
         """
         Keep only two images in the run folder:
           - original.*        (baseline/input image; prefers *_blend_g.*)
-          - rephotographed.*  (final projector output; excludes *-init* and *-rand*)
+          - rephotographed.*  (final projector output; prefers *init(*)
         Deletes other image files in that folder.
         Returns (original_path, rephoto_path).
         """
@@ -1269,16 +1166,8 @@ class MainWindow(QMainWindow):
         if not imgs:
             return (None, None)
 
-        final_candidates = [
-            p for p in imgs
-            if ("-init" not in p.stem)
-            and ("_init" not in p.stem)
-            and ("-rand" not in p.stem)
-            and ("original" not in p.stem.lower())
-            and ("rephotographed" not in p.stem.lower())
-        ]
-
-        final = max(final_candidates, key=lambda p: p.stat().st_mtime) if final_candidates else max(imgs, key=lambda p: p.stat().st_mtime)
+        finals = [p for p in imgs if ("-init(" in p.name) or ("_init(" in p.name) or ("init(" in p.name)]
+        final = max(finals, key=lambda p: p.stat().st_mtime) if finals else max(imgs, key=lambda p: p.stat().st_mtime)
 
         remaining = [p for p in imgs if p != final]
         original = None
@@ -1287,13 +1176,8 @@ class MainWindow(QMainWindow):
         if cand:
             original = max(cand, key=lambda p: p.stat().st_mtime)
 
-        if original is None:
-            fallback_originals = [
-                p for p in remaining
-                if ("-rand" not in p.stem)
-            ]
-            if fallback_originals:
-                original = min(fallback_originals, key=lambda p: p.stat().st_mtime)
+        if original is None and remaining:
+            original = min(remaining, key=lambda p: p.stat().st_mtime)
 
         if original is None:
             return (None, final)
@@ -1407,6 +1291,9 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(str(img_path))
         self.log_box.append("Opened containing folder. Image path copied to clipboard.")
 
+    # ------------------------------
+    # Process I/O / lifecycle
+    # ------------------------------
     def append_stdout_from_process(self):
         if self.process is None:
             return
@@ -1439,7 +1326,7 @@ class MainWindow(QMainWindow):
             log_path = results_root / "run_timing_log.jsonl"
 
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
-            source_preset = str(self.iter_values[self.iter_slider.value()])
+            source_preset = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
 
             import json
             with open(log_path, "a", encoding="utf-8") as f:
@@ -1451,7 +1338,7 @@ class MainWindow(QMainWindow):
                         "preset": str(pm["preset"]),
                         "source_run_preset": source_preset,
                         "advanced_mode": bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, "advanced_mode_checkbox") else False,
-                        "enhancement": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
+                        "enhancement": bool(self.use_gfpgan_checkbox.isChecked()),
                         "crop_only": False,
                         "success": True,
                         "elapsed_seconds": float(pm["elapsed_seconds"]),
@@ -1475,14 +1362,14 @@ class MainWindow(QMainWindow):
             log_path = results_root / "run_timing_log.jsonl"
 
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
-            preset_val = str(self.iter_values[self.iter_slider.value()])
+            preset_val = "test" if self.test_preset_checkbox.isChecked() else str(self.iter_values[self.iter_slider.value()])
 
             record = {
                 "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "input_image": self.input_image_edit.text().strip(),
                 "preset": preset_val,
                 "advanced_mode": bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, "advanced_mode_checkbox") else False,
-                "enhancement": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
+                "enhancement": bool(self.use_gfpgan_checkbox.isChecked()),
                 "crop_only": bool(crop_only),
                 "success": bool(success),
                 "elapsed_seconds": float(elapsed_seconds),
@@ -1506,11 +1393,12 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             self._set_progress_direct(100, "Done")
             self.status_label.setText("Status: Backend completed successfully")
-            if (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
+            # Log timing only for successful full runs (not crop-only)
+            if (not self.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
                 self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
                 self.flush_pending_milestones()
 
-            if self.advanced_dialog.crop_only_checkbox.isChecked():
+            if self.crop_only_checkbox.isChecked():
                 self.set_result_preview_image(None)
                 self.log_box.append("Crop-only run: no result image produced.")
             else:
@@ -1527,6 +1415,7 @@ class MainWindow(QMainWindow):
                     run_folder = newest.parent
                     _, rephoto_path = self.simplify_run_folder(run_folder)
                     self.set_result_preview_image(rephoto_path or newest)
+
         else:
             self.status_label.setText("Status: Backend returned an error")
 
@@ -1534,8 +1423,16 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
-        self.reset_progress_state()
-
+        # Progress animation (used for long rephoto stage)
+        self._progress_anim_timer = QTimer(self)
+        self._progress_anim_timer.setInterval(100)
+        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
+        self._progress_anim_active = False
+        self._progress_anim_t0 = 0.0
+        self._progress_anim_duration = 0.0
+        self._progress_anim_start = 0
+        self._progress_anim_end = 0
+        self._progress_anim_stage = ""
     def process_error(self, process_error):
         self.stop_progress_animation()
         if hasattr(self, "_elapsed_timer"):
@@ -1546,8 +1443,16 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
-        self.reset_progress_state()
-
+        # Progress animation (used for long rephoto stage)
+        self._progress_anim_timer = QTimer(self)
+        self._progress_anim_timer.setInterval(100)
+        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
+        self._progress_anim_active = False
+        self._progress_anim_t0 = 0.0
+        self._progress_anim_duration = 0.0
+        self._progress_anim_start = 0
+        self._progress_anim_end = 0
+        self._progress_anim_stage = ""
     def cancel_run(self):
         if self.process is None:
             self.log_box.append("No backend process is running.")
@@ -1578,6 +1483,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Input image not found")
             return
 
+        # Ensure input preview is shown even if the path was typed manually
         self.set_input_preview_image(input_image_path)
 
         if not self.wrapper_script.exists():
@@ -1606,6 +1512,7 @@ class MainWindow(QMainWindow):
             self._elapsed_timer.start()
             self.update_elapsed_label()
 
+        # Create and start QProcess
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(self.repo_root))
         self.process.readyReadStandardOutput.connect(self.append_stdout_from_process)
@@ -1614,6 +1521,8 @@ class MainWindow(QMainWindow):
         self.process.errorOccurred.connect(self.process_error)
 
         self.process.start(command[0], command[1:])
+
+
 
 def main():
     app = QApplication(sys.argv)
@@ -1624,8 +1533,6 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
 
 
