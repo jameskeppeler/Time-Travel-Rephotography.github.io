@@ -142,6 +142,10 @@ class AdvancedSettingsDialog(QDialog):
         self.gaussian_edit.setDecimals(2)
         self.gaussian_edit.setValue(0.75)
 
+        self.identity_preservation_combo = QComboBox()
+        self.identity_preservation_combo.addItems(["Lower", "Default", "Higher"])
+        self.identity_preservation_combo.setCurrentText("Default")
+
         form.addRow("Faces to enhance", self.strategy_combo)
         form.addRow("Crop Only", self.crop_only_checkbox)
         form.addRow("Enhancement", self.use_gfpgan_checkbox)
@@ -150,6 +154,7 @@ class AdvancedSettingsDialog(QDialog):
         form.addRow("Face crop expansion", self.face_factor_edit)
         form.addRow("Spectral sensitivity", self.spectral_sensitivity_combo)
         form.addRow("Gaussian blur", self.gaussian_edit)
+        form.addRow("Identity preservation", self.identity_preservation_combo)
 
         self.update_enhancement_controls()
 
@@ -175,17 +180,14 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setValue(0.35)
         self.det_threshold_edit.setValue(0.90)
         self.face_factor_edit.setValue(0.65)
-        self.spectral_sensitivity_combo.setCurrentText("Blue-Sensitive (b)")
+        self.spectral_sensitivity_combo.setCurrentText("b — blue-sensitive")
         self.gaussian_edit.setValue(0.75)
+        self.identity_preservation_combo.setCurrentText("Default")
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
         self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
     
-    def update_enhancement_controls(self):
-        enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
-        self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -244,6 +246,9 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.det_threshold_edit.setValue(0.90)
         self.advanced_dialog.face_factor_edit.setValue(0.65)
         self.advanced_dialog.gfpgan_blend_edit.setValue(0.35)
+        self.advanced_dialog.spectral_sensitivity_combo.setCurrentText("b — blue-sensitive")
+        self.advanced_dialog.gaussian_edit.setValue(0.75)
+        self.advanced_dialog.identity_preservation_combo.setCurrentText("Default")
 
         self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
@@ -490,6 +495,7 @@ class MainWindow(QMainWindow):
         gfpgan_blend = self.advanced_dialog.gfpgan_blend_edit.value()
         spectral = self.advanced_dialog.spectral_sensitivity_combo.currentText()
         gaussian = self.advanced_dialog.gaussian_edit.value()
+        identity = self.advanced_dialog.identity_preservation_combo.currentText()
 
         if crop_only:
             mode_text = "crop-only"
@@ -497,7 +503,7 @@ class MainWindow(QMainWindow):
             mode_text = "enhancement on" if enhancement_on else "enhancement off"
 
         self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f}"
+            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity}"
         )
     # ------------------------------
     # Qt / window events
@@ -813,6 +819,15 @@ class MainWindow(QMainWindow):
     # ------------------------------
     def get_selected_preset_value(self):
         return int(self.iter_values[self.iter_slider.value()])
+
+    def get_identity_preservation_value(self):
+        preset = self.advanced_dialog.identity_preservation_combo.currentText()
+
+        if preset == "Lower":
+            return 0.20
+        if preset == "Higher":
+            return 0.45
+        return 0.30
 
     def estimate_runtime_minutes(self, preset_value: int):
         # Baseline observed on RTX 3060 Laptop GPU (approx.)
@@ -1260,7 +1275,9 @@ class MainWindow(QMainWindow):
         input_image = self.input_image_edit.text().strip()
         results_root = self.results_root_edit.text().strip()
 
-        preset_value = str(self.iter_values[self.iter_slider.value()])
+        selected_preset = self.iter_values[self.iter_slider.value()]
+        preset_value = "test" if selected_preset == 750 else str(selected_preset)
+        identity_value = str(self.get_identity_preservation_value())
 
         command = [
             "powershell.exe",
@@ -1278,6 +1295,8 @@ class MainWindow(QMainWindow):
             self.advanced_dialog.face_factor_edit.text().strip(),
             "-DetThreshold",
             self.advanced_dialog.det_threshold_edit.text().strip(),
+            "-VGGFace",
+            identity_value,
             "-ResultsRoot",
             results_root,
         ]

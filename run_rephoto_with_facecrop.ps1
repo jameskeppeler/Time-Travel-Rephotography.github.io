@@ -31,8 +31,11 @@
     [string]$ProjectorScriptPath = ".\projector.py",
     [string]$ResultsRoot     = ".\results",
 
-    
-    [double]$GFPGANBlend = 0.35
+    [double]$GFPGANBlend = 0.35,
+    [ValidateSet("b", "gb", "g")]
+    [string]$SpectralSensitivity = "b",
+    [double]$Gaussian = 0.75,
+    [double]$VGGFace = 0.3
 )
 
 $ErrorActionPreference = "Stop"
@@ -184,7 +187,8 @@ if (-not $UseExistingCrops) {
     Write-Host "Input image: $ResolvedInput"
     Write-Host "Temp crop input: $TempInputFile"
     Write-Host "Crop output dir: $CropOutDir"
-    Write-Host "Preset: $Preset  (wplus_step $W1 $W2)"
+    $PresetLabel = if ($Preset -eq "test") { "750" } else { "$Preset" }
+    Write-Host "Preset: $PresetLabel  (wplus_step $W1 $W2)"
     Write-Host ""
 
     # Run face cropping in the facecrop environment.
@@ -418,11 +422,11 @@ try {
             --contextual 0.1 `
             --cx_layers relu3_4 relu2_2 relu1_2 `
             --eye 0.1 `
-            --gaussian 0.75 `
-            --spectral_sensitivity b `
+            --gaussian $Gaussian `
+            --spectral_sensitivity $SpectralSensitivity `
             --recon_size 256 `
             --vgg 1 `
-            --vggface 0.3 `
+            --vggface $VGGFace `
             --lr 0.1 `
             --noise_strength 0.0 `
             --noise_ramp 0.75 `
