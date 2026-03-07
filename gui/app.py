@@ -291,11 +291,17 @@ class MainWindow(QMainWindow):
         else:
             self.log_box.append("GFPGAN found. Enhancement is available.")
 
+    # ------------------------------
+    # Qt / window events
+    # ------------------------------
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
 
+    # ------------------------------
+    # UI state / control updates
+    # ------------------------------
     def gfpgan_is_available(self):
         return (self.repo_root / "deps" / "GFPGAN").exists()
 
@@ -371,6 +377,9 @@ class MainWindow(QMainWindow):
         else:
             self.update_mode_controls()
 
+    # ------------------------------
+    # Progress tracking / animation
+    # ------------------------------
     def start_progress_animation(self, start_pct: int, end_pct: int, duration_s: float, stage: str):
         start_pct = int(max(0, min(100, start_pct)))
         end_pct = int(max(0, min(100, end_pct)))
@@ -500,6 +509,9 @@ class MainWindow(QMainWindow):
         if s == "Done.":
             self._set_progress(100, "Done")
             return
+    # ------------------------------
+    # Input / output selection
+    # ------------------------------
     def reset_form_defaults(self):
         self.strategy_combo.setCurrentText("all")
         self.crop_only_checkbox.setChecked(False)
@@ -538,6 +550,9 @@ class MainWindow(QMainWindow):
             self.results_root_edit.setText(dir_path)
             self.log_box.append(f"Results folder set: {dir_path}")
 
+    # ------------------------------
+    # Runtime estimation / hardware
+    # ------------------------------
     def get_selected_preset_value(self):
         if self.test_preset_checkbox.isChecked():
             return 750
@@ -904,6 +919,9 @@ class MainWindow(QMainWindow):
                 f"{scale_note}"
             )
             self.runtime_info.setToolTip(tip)
+    # ------------------------------
+    # Validation / command building
+    # ------------------------------
     def validate_numeric_inputs(self):
         det = float(self.det_threshold_edit.value())
 
@@ -955,6 +973,9 @@ class MainWindow(QMainWindow):
 
         return command
 
+    # ------------------------------
+    # Result discovery / preview
+    # ------------------------------
     def find_latest_image(self, root: Path, after_epoch: float | None):
         if not root.exists():
             return None
@@ -1121,6 +1142,9 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(str(img_path))
         self.log_box.append("Opened containing folder. Image path copied to clipboard.")
 
+    # ------------------------------
+    # Process I/O / lifecycle
+    # ------------------------------
     def append_stdout_from_process(self):
         if self.process is None:
             return
@@ -1310,24 +1334,13 @@ class MainWindow(QMainWindow):
 
 
 
-app = QApplication(sys.argv)
-window = MainWindow()
-window.resize(1100, 820)
-window.show()
-sys.exit(app.exec())
+def main():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.resize(1100, 820)
+    window.show()
+    sys.exit(app.exec())
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+if __name__ == "__main__":
+    main()
 
