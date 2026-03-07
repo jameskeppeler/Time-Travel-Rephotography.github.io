@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QPushButton,
     QProgressBar,
+    QScrollArea,
     QSlider,
     QSplitter,
     QTextEdit,
@@ -104,8 +105,14 @@ class AdvancedSettingsDialog(QDialog):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        form = QFormLayout()
-        layout.addLayout(form)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+
+        scroll_content = QWidget()
+        form = QFormLayout(scroll_content)
+
+        scroll_area.setWidget(scroll_content)
+        layout.addWidget(scroll_area)
 
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(["all", "largest"])
@@ -214,8 +221,12 @@ class MainWindow(QMainWindow):
         self.result_pixmap = None
         self.last_result_image_path = None
 
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        self.setCentralWidget(scroll_area)
+
         central = QWidget()
-        self.setCentralWidget(central)
+        scroll_area.setWidget(central)
 
         main_layout = QVBoxLayout()
         central.setLayout(main_layout)
@@ -828,6 +839,15 @@ class MainWindow(QMainWindow):
         if preset == "Higher":
             return 0.45
         return 0.30
+        
+    def get_spectral_sensitivity_value(self):
+        label = self.advanced_dialog.spectral_sensitivity_combo.currentText()
+
+        if label.startswith("gb"):
+            return "gb"
+        if label.startswith("g"):
+            return "g"
+        return "b"
 
     def estimate_runtime_minutes(self, preset_value: int):
         # Baseline observed on RTX 3060 Laptop GPU (approx.)
@@ -1278,6 +1298,8 @@ class MainWindow(QMainWindow):
         selected_preset = self.iter_values[self.iter_slider.value()]
         preset_value = "test" if selected_preset == 750 else str(selected_preset)
         identity_value = str(self.get_identity_preservation_value())
+        spectral_value = self.get_spectral_sensitivity_value()
+        gaussian_value = self.advanced_dialog.gaussian_edit.text().strip()
 
         command = [
             "powershell.exe",
@@ -1295,6 +1317,10 @@ class MainWindow(QMainWindow):
             self.advanced_dialog.face_factor_edit.text().strip(),
             "-DetThreshold",
             self.advanced_dialog.det_threshold_edit.text().strip(),
+            "-SpectralSensitivity",
+            spectral_value,
+            "-Gaussian",
+            gaussian_value,
             "-VGGFace",
             identity_value,
             "-ResultsRoot",
