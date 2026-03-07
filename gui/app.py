@@ -1192,12 +1192,11 @@ class MainWindow(QMainWindow):
                 newest = p
 
         return newest
-
     def simplify_run_folder(self, folder: Path):
         """
         Keep only two images in the run folder:
           - original.*        (baseline/input image; prefers *_blend_g.*)
-          - rephotographed.*  (final projector output; prefers *init(*)
+          - rephotographed.*  (final projector output; excludes *-init* and *-rand*)
         Deletes other image files in that folder.
         Returns (original_path, rephoto_path).
         """
@@ -1209,8 +1208,16 @@ class MainWindow(QMainWindow):
         if not imgs:
             return (None, None)
 
-        finals = [p for p in imgs if ("-init(" in p.name) or ("_init(" in p.name) or ("init(" in p.name)]
-        final = max(finals, key=lambda p: p.stat().st_mtime) if finals else max(imgs, key=lambda p: p.stat().st_mtime)
+        final_candidates = [
+            p for p in imgs
+            if ("-init" not in p.stem)
+            and ("_init" not in p.stem)
+            and ("-rand" not in p.stem)
+            and ("original" not in p.stem.lower())
+            and ("rephotographed" not in p.stem.lower())
+        ]
+
+        final = max(final_candidates, key=lambda p: p.stat().st_mtime) if final_candidates else max(imgs, key=lambda p: p.stat().st_mtime)
 
         remaining = [p for p in imgs if p != final]
         original = None
@@ -1219,8 +1226,13 @@ class MainWindow(QMainWindow):
         if cand:
             original = max(cand, key=lambda p: p.stat().st_mtime)
 
-        if original is None and remaining:
-            original = min(remaining, key=lambda p: p.stat().st_mtime)
+        if original is None:
+            fallback_originals = [
+                p for p in remaining
+                if ("-rand" not in p.stem)
+            ]
+            if fallback_originals:
+                original = min(fallback_originals, key=lambda p: p.stat().st_mtime)
 
         if original is None:
             return (None, final)
@@ -1334,9 +1346,6 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(str(img_path))
         self.log_box.append("Opened containing folder. Image path copied to clipboard.")
 
-    # ------------------------------
-    # Process I/O / lifecycle
-    # ------------------------------
     def append_stdout_from_process(self):
         if self.process is None:
             return
@@ -1436,7 +1445,6 @@ class MainWindow(QMainWindow):
         if exit_code == 0:
             self._set_progress_direct(100, "Done")
             self.status_label.setText("Status: Backend completed successfully")
-            # Log timing only for successful full runs (not crop-only)
             if (not self.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
                 self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
                 self.flush_pending_milestones()
@@ -1458,7 +1466,6 @@ class MainWindow(QMainWindow):
                     run_folder = newest.parent
                     _, rephoto_path = self.simplify_run_folder(run_folder)
                     self.set_result_preview_image(rephoto_path or newest)
-
         else:
             self.status_label.setText("Status: Backend returned an error")
 
@@ -1466,16 +1473,8 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
-        # Progress animation (used for long rephoto stage)
-        self._progress_anim_timer = QTimer(self)
-        self._progress_anim_timer.setInterval(100)
-        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
-        self._progress_anim_active = False
-        self._progress_anim_t0 = 0.0
-        self._progress_anim_duration = 0.0
-        self._progress_anim_start = 0
-        self._progress_anim_end = 0
-        self._progress_anim_stage = ""
+        self.reset_progress_state()
+
     def process_error(self, process_error):
         self.stop_progress_animation()
         if hasattr(self, "_elapsed_timer"):
@@ -1486,16 +1485,8 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
-        # Progress animation (used for long rephoto stage)
-        self._progress_anim_timer = QTimer(self)
-        self._progress_anim_timer.setInterval(100)
-        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
-        self._progress_anim_active = False
-        self._progress_anim_t0 = 0.0
-        self._progress_anim_duration = 0.0
-        self._progress_anim_start = 0
-        self._progress_anim_end = 0
-        self._progress_anim_stage = ""
+        self.reset_progress_state()
+
     def cancel_run(self):
         if self.process is None:
             self.log_box.append("No backend process is running.")
@@ -1526,7 +1517,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Input image not found")
             return
 
-        # Ensure input preview is shown even if the path was typed manually
         self.set_input_preview_image(input_image_path)
 
         if not self.wrapper_script.exists():
@@ -1555,7 +1545,6 @@ class MainWindow(QMainWindow):
             self._elapsed_timer.start()
             self.update_elapsed_label()
 
-        # Create and start QProcess
         self.process = QProcess(self)
         self.process.setWorkingDirectory(str(self.repo_root))
         self.process.readyReadStandardOutput.connect(self.append_stdout_from_process)
@@ -1564,8 +1553,6 @@ class MainWindow(QMainWindow):
         self.process.errorOccurred.connect(self.process_error)
 
         self.process.start(command[0], command[1:])
-
-
 
 def main():
     app = QApplication(sys.argv)
