@@ -38,7 +38,8 @@
     [double]$VGGFace = 0.3,
     [double]$ColorTransfer = 10000000000.0,
     [double]$Eye = 0.1,
-    [double]$Contextual = 0.1
+    [double]$Contextual = 0.1,
+    [double]$NoiseRegularize = 50000.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -433,7 +434,7 @@ try {
             --lr 0.1 `
             --noise_strength 0.0 `
             --noise_ramp 0.75 `
-            --noise_regularize 50000 `
+            --noise_regularize $NoiseRegularize `
             --camera_lr 0.01 `
             --log_freq 10 `
             --log_visual_freq 1000 `

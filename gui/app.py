@@ -165,6 +165,12 @@ class AdvancedSettingsDialog(QDialog):
         self.structure_matching_combo.addItems(["Lower", "Default", "Higher"])
         self.structure_matching_combo.setCurrentText("Default")
 
+        self.noise_regularize_edit = QDoubleSpinBox()
+        self.noise_regularize_edit.setRange(0.0, 1000000.0)
+        self.noise_regularize_edit.setSingleStep(1000.0)
+        self.noise_regularize_edit.setDecimals(1)
+        self.noise_regularize_edit.setValue(50000.0)
+
         form.addRow("Faces to enhance", self.strategy_combo)
         form.addRow("Crop Only", self.crop_only_checkbox)
         form.addRow("Enhancement", self.use_gfpgan_checkbox)
@@ -177,6 +183,7 @@ class AdvancedSettingsDialog(QDialog):
         form.addRow("Tonal transfer", self.tonal_transfer_combo)
         form.addRow("Eye preservation", self.eye_preservation_combo)
         form.addRow("Structure matching", self.structure_matching_combo)
+        form.addRow("Noise regularization", self.noise_regularize_edit)
 
         self.update_enhancement_controls()
 
@@ -208,6 +215,7 @@ class AdvancedSettingsDialog(QDialog):
         self.tonal_transfer_combo.setCurrentText("Default")
         self.eye_preservation_combo.setCurrentText("Default")
         self.structure_matching_combo.setCurrentText("Default")
+        self.noise_regularize_edit.setValue(50000.0)
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
@@ -281,6 +289,7 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.tonal_transfer_combo.setCurrentText("Default")
         self.advanced_dialog.eye_preservation_combo.setCurrentText("Default")
         self.advanced_dialog.structure_matching_combo.setCurrentText("Default")
+        self.advanced_dialog.noise_regularize_edit.setValue(50000.0)
 
         self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
@@ -531,6 +540,7 @@ class MainWindow(QMainWindow):
         tonal = self.advanced_dialog.tonal_transfer_combo.currentText()
         eye = self.advanced_dialog.eye_preservation_combo.currentText()
         structure = self.advanced_dialog.structure_matching_combo.currentText()
+        noise_regularize = self.advanced_dialog.noise_regularize_edit.value()
 
         if crop_only:
             mode_text = "crop-only"
@@ -538,7 +548,7 @@ class MainWindow(QMainWindow):
             mode_text = "enhancement on" if enhancement_on else "enhancement off"
 
         self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity} | tonal {tonal} | eye {eye} | structure {structure}"
+            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity} | tonal {tonal} | eye {eye} | structure {structure} | noise {noise_regularize:.1f}"
         )
     # ------------------------------
     # Qt / window events
@@ -823,6 +833,7 @@ class MainWindow(QMainWindow):
         dlg = self.advanced_dialog
 
         old_tonal = dlg.tonal_transfer_combo.currentText()
+        old_noise_regularize = dlg.noise_regularize_edit.value()
         old_eye = dlg.eye_preservation_combo.currentText()
         old_structure = dlg.structure_matching_combo.currentText()
         old_strategy = dlg.strategy_combo.currentText()
@@ -851,6 +862,7 @@ class MainWindow(QMainWindow):
             dlg.tonal_transfer_combo.setCurrentText(old_tonal)
             dlg.eye_preservation_combo.setCurrentText(old_eye)
             dlg.structure_matching_combo.setCurrentText(old_structure)
+            dlg.noise_regularize_edit.setValue(old_noise_regularize)
             self.update_mode_controls()
             self.update_runtime_label()
             self.update_advanced_summary_label()
@@ -1360,6 +1372,7 @@ class MainWindow(QMainWindow):
         structure_value = str(self.get_structure_matching_value())
         spectral_value = self.get_spectral_sensitivity_value()
         gaussian_value = self.advanced_dialog.gaussian_edit.text().strip()
+        noise_regularize_value = self.advanced_dialog.noise_regularize_edit.text().strip()
 
         command = [
             "powershell.exe",
@@ -1389,6 +1402,8 @@ class MainWindow(QMainWindow):
             eye_value,
             "-Contextual",
             structure_value,
+            "-NoiseRegularize",
+            noise_regularize_value,
             "-ResultsRoot",
             results_root,
         ]
