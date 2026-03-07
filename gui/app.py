@@ -171,7 +171,7 @@ class MainWindow(QMainWindow):
         self.test_preset_checkbox = QCheckBox("Test mode (fast)")
         self.test_preset_checkbox.setChecked(False)
         self.basic_iter_values = [1500, 3000, 6000, 18000]
-        self.advanced_iter_values = list(range(1000, 100001, 1000))
+        self.advanced_iter_values = list(range(1000, 20001, 1000))
         self.iter_values = self.basic_iter_values
         self.test_preset_checkbox.toggled.connect(self.update_iteration_label)
         form_layout.addRow("Preset", self.test_preset_checkbox)
@@ -767,13 +767,14 @@ class MainWindow(QMainWindow):
 
     def estimate_runtime_from_local_history(self, preset_value: int):
         """
-        Local timing model with milestone support.
+        Local timing model with milestone support and enhancement fallback.
 
         Preference:
         1) Exact local timing for this preset, same GPU, same enhancement
            (full run or milestone)
         2) Exact local timing for this preset, same enhancement
-        3) Additive model:
+        3) Infer missing enhancement mode from the opposite mode using learned overhead
+        4) Additive model:
               total ~= base_rephoto_time + enhancement_overhead
            using local history
         Returns:
@@ -816,29 +817,106 @@ class MainWindow(QMainWindow):
         if not parsed:
             return (None, "Local timing history could not be parsed.")
 
+        def exact_matches(preset, enh_flag, same_gpu_only=False):
+            out = []
+            for p, s, g, e, rt in parsed:
+                if p == preset and e == enh_flag:
+                    if same_gpu_only and g != current_gpu:
+                        continue
+                    out.append((s, rt))
+            return out
+
+        def avg_secs(matches):
+            return sum(s for s, _rt in matches) / len(matches)
+
         # -------------------------------------------------
-        # 1) Exact local timing match first (milestones count)
+        # 1) Exact local timing match first
         # -------------------------------------------------
-        exact_same_gpu_same_enh = [(s, rt) for (p, s, g, e, rt) in parsed if p == preset_value and g == current_gpu and e == current_enh]
+        exact_same_gpu_same_enh = exact_matches(preset_value, current_enh, same_gpu_only=True)
         if exact_same_gpu_same_enh:
-            avg_secs = sum(s for (s, _rt) in exact_same_gpu_same_enh) / len(exact_same_gpu_same_enh)
             types = sorted(set(rt for (_s, rt) in exact_same_gpu_same_enh))
             return (
-                avg_secs / 60.0,
+                avg_secs(exact_same_gpu_same_enh) / 60.0,
                 f"Using exact local timing from {len(exact_same_gpu_same_enh)} same-GPU record(s) at this preset ({', '.join(types)})."
             )
 
-        exact_same_enh = [(s, rt) for (p, s, g, e, rt) in parsed if p == preset_value and e == current_enh]
+        exact_same_enh = exact_matches(preset_value, current_enh, same_gpu_only=False)
         if exact_same_enh:
-            avg_secs = sum(s for (s, _rt) in exact_same_enh) / len(exact_same_enh)
             types = sorted(set(rt for (_s, rt) in exact_same_enh))
             return (
-                avg_secs / 60.0,
+                avg_secs(exact_same_enh) / 60.0,
                 f"Using exact local timing from {len(exact_same_enh)} record(s) at this preset ({', '.join(types)})."
             )
 
         # -------------------------------------------------
-        # 2) Additive model:
+        # 2) Learn enhancement overhead from paired on/off local timings
+        # -------------------------------------------------
+        from collections import defaultdict
+
+        def build_overhead_points(use_same_gpu):
+            subset = []
+            for p, s, g, e, rt in parsed:
+                if use_same_gpu and g != current_gpu:
+                    continue
+                subset.append((p, s, e))
+
+            by_preset = defaultdict(lambda: {"on": [], "off": []})
+            for p, s, e in subset:
+                if e:
+                    by_preset[p]["on"].append(s)
+                else:
+                    by_preset[p]["off"].append(s)
+
+            overheads = []
+            for p, vals in by_preset.items():
+                if vals["on"] and vals["off"]:
+                    on_avg = sum(vals["on"]) / len(vals["on"])
+                    off_avg = sum(vals["off"]) / len(vals["off"])
+                    overheads.append((p, max(0.0, on_avg - off_avg)))
+            return sorted(overheads, key=lambda t: t[0])
+
+        overhead_points = build_overhead_points(use_same_gpu=True)
+        if not overhead_points:
+            overhead_points = build_overhead_points(use_same_gpu=False)
+
+        overhead_secs = None
+        overhead_note = "No paired enhancement on/off local records yet."
+
+        exact_over = [ov for (p, ov) in overhead_points if p == preset_value]
+        if exact_over:
+            overhead_secs = sum(exact_over) / len(exact_over)
+            overhead_note = "Exact local enhancement overhead from paired record(s) at this preset."
+        elif overhead_points:
+            overhead_secs = sum(ov for (_p, ov) in overhead_points) / len(overhead_points)
+            overhead_note = f"Average local enhancement overhead from {len(overhead_points)} paired preset point(s)."
+
+        # -------------------------------------------------
+        # 3) Infer missing enhancement mode from opposite-mode exact timings
+        # -------------------------------------------------
+        opposite_exact_same_gpu = exact_matches(preset_value, (not current_enh), same_gpu_only=True)
+        if opposite_exact_same_gpu and overhead_secs is not None:
+            opposite_secs = avg_secs(opposite_exact_same_gpu)
+            if current_enh:
+                inferred_secs = opposite_secs + overhead_secs
+                note = "Inferred enhancement-on timing from same-GPU enhancement-off timing plus learned overhead."
+            else:
+                inferred_secs = max(1.0, opposite_secs - overhead_secs)
+                note = "Inferred enhancement-off timing from same-GPU enhancement-on timing minus learned overhead."
+            return (inferred_secs / 60.0, note + " " + overhead_note)
+
+        opposite_exact = exact_matches(preset_value, (not current_enh), same_gpu_only=False)
+        if opposite_exact and overhead_secs is not None:
+            opposite_secs = avg_secs(opposite_exact)
+            if current_enh:
+                inferred_secs = opposite_secs + overhead_secs
+                note = "Inferred enhancement-on timing from enhancement-off timing plus learned overhead."
+            else:
+                inferred_secs = max(1.0, opposite_secs - overhead_secs)
+                note = "Inferred enhancement-off timing from enhancement-on timing minus learned overhead."
+            return (inferred_secs / 60.0, note + " " + overhead_note)
+
+        # -------------------------------------------------
+        # 4) Additive model
         #    total ~= base_rephoto_time + enhancement_overhead
         # -------------------------------------------------
 
@@ -893,40 +971,6 @@ class MainWindow(QMainWindow):
             if base_secs is not None:
                 return (base_secs / 60.0, base_note)
             return (None, base_note)
-
-        # Enhancement overhead from paired on/off timings
-        same_gpu = [(p, s, e) for (p, s, g, e, rt) in parsed if g == current_gpu]
-        if len(same_gpu) < 2:
-            same_gpu = [(p, s, e) for (p, s, g, e, rt) in parsed]
-
-        from collections import defaultdict
-        by_preset = defaultdict(lambda: {"on": [], "off": []})
-        for p, s, e in same_gpu:
-            if e:
-                by_preset[p]["on"].append(s)
-            else:
-                by_preset[p]["off"].append(s)
-
-        overhead_points = []
-        for p, vals in by_preset.items():
-            if vals["on"] and vals["off"]:
-                on_avg = sum(vals["on"]) / len(vals["on"])
-                off_avg = sum(vals["off"]) / len(vals["off"])
-                overhead = max(0.0, on_avg - off_avg)
-                overhead_points.append((p, overhead))
-
-        overhead_points = sorted(overhead_points, key=lambda t: t[0])
-
-        overhead_secs = None
-        overhead_note = "No paired enhancement on/off local records yet."
-
-        exact_over = [ov for (p, ov) in overhead_points if p == preset_value]
-        if exact_over:
-            overhead_secs = sum(exact_over) / len(exact_over)
-            overhead_note = "Exact local enhancement overhead from paired record(s) at this preset."
-        elif overhead_points:
-            overhead_secs = sum(ov for (_p, ov) in overhead_points) / len(overhead_points)
-            overhead_note = f"Average local enhancement overhead from {len(overhead_points)} paired preset point(s)."
 
         if base_secs is not None and overhead_secs is not None:
             total_secs = base_secs + overhead_secs
@@ -1489,6 +1533,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
