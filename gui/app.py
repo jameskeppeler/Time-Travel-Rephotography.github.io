@@ -133,12 +133,23 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setDecimals(2)
         self.gfpgan_blend_edit.setValue(0.35)
 
+        self.spectral_sensitivity_combo = QComboBox()
+        self.spectral_sensitivity_combo.addItems(["b — blue-sensitive", "gb — orthochromatic", "g — panchromatic"])
+
+        self.gaussian_edit = QDoubleSpinBox()
+        self.gaussian_edit.setRange(0.0, 5.0)
+        self.gaussian_edit.setSingleStep(0.05)
+        self.gaussian_edit.setDecimals(2)
+        self.gaussian_edit.setValue(0.75)
+
         form.addRow("Faces to enhance", self.strategy_combo)
         form.addRow("Crop Only", self.crop_only_checkbox)
         form.addRow("Enhancement", self.use_gfpgan_checkbox)
         form.addRow("Enhancement blend", self.gfpgan_blend_edit)
         form.addRow("Face detection sensitivity (0–1)", self.det_threshold_edit)
         form.addRow("Face crop expansion", self.face_factor_edit)
+        form.addRow("Spectral sensitivity", self.spectral_sensitivity_combo)
+        form.addRow("Gaussian blur", self.gaussian_edit)
 
         self.update_enhancement_controls()
 
@@ -164,6 +175,8 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setValue(0.35)
         self.det_threshold_edit.setValue(0.90)
         self.face_factor_edit.setValue(0.65)
+        self.spectral_sensitivity_combo.setCurrentText("Blue-Sensitive (b)")
+        self.gaussian_edit.setValue(0.75)
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
@@ -475,6 +488,8 @@ class MainWindow(QMainWindow):
         det = self.advanced_dialog.det_threshold_edit.value()
         face_factor = self.advanced_dialog.face_factor_edit.value()
         gfpgan_blend = self.advanced_dialog.gfpgan_blend_edit.value()
+        spectral = self.advanced_dialog.spectral_sensitivity_combo.currentText()
+        gaussian = self.advanced_dialog.gaussian_edit.value()
 
         if crop_only:
             mode_text = "crop-only"
@@ -482,7 +497,7 @@ class MainWindow(QMainWindow):
             mode_text = "enhancement on" if enhancement_on else "enhancement off"
 
         self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f}"
+            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f}"
         )
     # ------------------------------
     # Qt / window events
@@ -772,6 +787,8 @@ class MainWindow(QMainWindow):
         old_det_threshold = dlg.det_threshold_edit.value()
         old_face_factor = dlg.face_factor_edit.value()
         old_gfpgan_blend = dlg.gfpgan_blend_edit.value()
+        old_spectral = dlg.spectral_sensitivity_combo.currentText()
+        old_gaussian = dlg.gaussian_edit.value()
 
         if dlg.exec() == QDialog.Accepted:
             self.update_mode_controls()
@@ -785,6 +802,8 @@ class MainWindow(QMainWindow):
             dlg.det_threshold_edit.setValue(old_det_threshold)
             dlg.face_factor_edit.setValue(old_face_factor)
             dlg.gfpgan_blend_edit.setValue(old_gfpgan_blend)
+            dlg.spectral_sensitivity_combo.setCurrentText(old_spectral)
+            dlg.gaussian_edit.setValue(old_gaussian)
             self.update_mode_controls()
             self.update_runtime_label()
             self.update_advanced_summary_label()
