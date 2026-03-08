@@ -123,9 +123,13 @@ if ($PresetNorm -eq "test") {
     $W1 = 250
     $W2 = 750
 }
+elseif ($PresetNorm -eq "375") {
+    $W1 = 125
+    $W2 = 375
+}
 else {
     if (-not ($PresetNorm -match '^\d+$')) {
-        throw "Preset must be 'test' or a number (e.g., 1500, 3000, 6000, 18000). Got: $Preset"
+        throw "Preset must be 'test', 375, or a number (e.g., 1500, 3000, 6000, 18000). Got: $Preset"
     }
 
     $N = [int]$PresetNorm
@@ -134,11 +138,11 @@ else {
         # allowed special-case
     }
     elseif (($N % 1000) -ne 0) {
-        throw "Numeric preset must be 1500 or a multiple of 1000. Got: $N"
+        throw "Numeric preset must be 1500, 375, or a multiple of 1000. Got: $N"
     }
 
     if ($N -lt 1000 -or $N -gt 100000) {
-        throw "Numeric preset must be between 1000 and 100000 (or 1500). Got: $N"
+        throw "Numeric preset must be between 1000 and 100000 (or 1500, 375). Got: $N"
     }
 
     $W1 = 250

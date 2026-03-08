@@ -3,6 +3,7 @@ import sys
 import ctypes
 import platform
 import subprocess
+import shutil
 import time
 from pathlib import Path
 
@@ -164,13 +165,13 @@ class AdvancedSettingsDialog(QDialog):
         self.face_factor_edit.setRange(0.10, 2.00)
         self.face_factor_edit.setSingleStep(0.01)
         self.face_factor_edit.setDecimals(2)
-        self.face_factor_edit.setValue(0.65)
+        self.face_factor_edit.setValue(0.50)
 
         self.gfpgan_blend_edit = QDoubleSpinBox()
         self.gfpgan_blend_edit.setRange(0.0, 1.0)
         self.gfpgan_blend_edit.setSingleStep(0.01)
         self.gfpgan_blend_edit.setDecimals(2)
-        self.gfpgan_blend_edit.setValue(0.35)
+        self.gfpgan_blend_edit.setValue(0.45)
 
         self.gaussian_edit = QDoubleSpinBox()
         self.gaussian_edit.setRange(0.0, 5.0)
@@ -357,9 +358,9 @@ class AdvancedSettingsDialog(QDialog):
         self.strategy_combo.setCurrentText("largest")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
-        self.gfpgan_blend_edit.setValue(0.35)
+        self.gfpgan_blend_edit.setValue(0.45)
         self.det_threshold_edit.setValue(0.90)
-        self.face_factor_edit.setValue(0.65)
+        self.face_factor_edit.setValue(0.50)
         self.gaussian_edit.setValue(0.75)
         self.identity_preservation_combo.setCurrentText("Default")
         self.tonal_transfer_combo.setCurrentText("Default")
@@ -456,8 +457,8 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.crop_only_checkbox.setChecked(False)
         self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
         self.advanced_dialog.det_threshold_edit.setValue(0.90)
-        self.advanced_dialog.face_factor_edit.setValue(0.65)
-        self.advanced_dialog.gfpgan_blend_edit.setValue(0.35)
+        self.advanced_dialog.face_factor_edit.setValue(0.50)
+        self.advanced_dialog.gfpgan_blend_edit.setValue(0.45)
         self.advanced_dialog.gaussian_edit.setValue(0.75)
         self.advanced_dialog.identity_preservation_combo.setCurrentText("Default")
         self.advanced_dialog.tonal_transfer_combo.setCurrentText("Default")
@@ -474,7 +475,7 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
 
         # --- Iteration slider ---
-        self.basic_iter_values = [750, 1500, 3000, 6000, 18000]
+        self.basic_iter_values = [375, 750, 1500, 3000, 6000, 18000]
         self.advanced_iter_values = [750] + list(range(1000, 20001, 1000))
         self.iter_values = self.basic_iter_values
 
@@ -484,7 +485,7 @@ class MainWindow(QMainWindow):
         self.advanced_mode_checkbox.toggled.connect(self.update_iteration_mode)
         self.iter_slider.setMinimum(0)
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(0)  # default 750
+        self.iter_slider.setValue(1)  # default 750 (now at index 1)
         self.iter_slider.setTickPosition(QSlider.TicksBelow)
         self.iter_slider.setTickInterval(1)
         self.iter_slider.valueChanged.connect(self.update_iteration_label)
@@ -735,6 +736,21 @@ class MainWindow(QMainWindow):
         self.result_preview_label.setStyleSheet("border: 1px solid #999;")
         result_layout.addWidget(self.result_preview_label)
 
+        # Stage overlay label for animated stage indicator
+        self.result_stage_overlay = QLabel(self.result_preview_label)
+        self.result_stage_overlay.setVisible(False)
+        self.result_stage_overlay.setAlignment(Qt.AlignLeft | Qt.AlignBottom)
+        self.result_stage_overlay.setStyleSheet(
+            "background-color: rgba(0, 0, 0, 150); color: white; "
+            "padding: 4px 8px; border-radius: 6px; font-size: 12px;"
+        )
+        # Overlay state variables
+        self.result_stage_base_text = ""
+        self.result_stage_dot_count = 0
+        self._result_stage_timer = QTimer(self)
+        self._result_stage_timer.setInterval(450)
+        self._result_stage_timer.timeout.connect(self.update_result_stage_overlay_animation)
+
         self.open_image_location_button = QPushButton("Open Image Location")
         self.open_image_location_button.clicked.connect(self.open_result_image_location)
         self.open_image_location_button.setEnabled(False)
@@ -800,10 +816,6 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(log_container)
 
-        self._elapsed_timer = QTimer(self)
-        self._elapsed_timer.setInterval(500)
-        self._elapsed_timer.timeout.connect(self.update_elapsed_label)
-
         # Initial state
         self.update_mode_controls()
         if not self.gfpgan_is_available():
@@ -818,6 +830,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
+        self.position_result_stage_overlay()
 
     # ------------------------------
     # UI state / control updates
@@ -827,19 +840,29 @@ class MainWindow(QMainWindow):
 
     
     def update_mode_controls(self):
+        """Update UI state based on GFPGAN availability and crop-only mode."""
         crop_only = self.advanced_dialog.crop_only_checkbox.isChecked()
         gfpgan_available = self.gfpgan_is_available()
 
+        # If GFPGAN is not available: enhancement must be disabled
         if not gfpgan_available:
-            if self.advanced_dialog.use_gfpgan_checkbox.isChecked():
-                self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
+            self.advanced_dialog.use_gfpgan_checkbox.setChecked(True)  # Checked = disabled
             self.advanced_dialog.use_gfpgan_checkbox.setEnabled(False)
+            self.advanced_dialog.gfpgan_blend_edit.setEnabled(False)
             return
 
-        self.advanced_dialog.use_gfpgan_checkbox.setEnabled(not crop_only)
-
+        # If crop-only mode: enhancement must be disabled
         if crop_only:
-            self.advanced_dialog.use_gfpgan_checkbox.setChecked(True)
+            self.advanced_dialog.use_gfpgan_checkbox.setChecked(True)  # Checked = disabled
+            self.advanced_dialog.use_gfpgan_checkbox.setEnabled(False)
+            self.advanced_dialog.gfpgan_blend_edit.setEnabled(False)
+            return
+
+        # Otherwise: enhancement can be toggled
+        self.advanced_dialog.use_gfpgan_checkbox.setEnabled(True)
+        # Update blend spinner based on checkbox state
+        enhancement_enabled = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
+        self.advanced_dialog.gfpgan_blend_edit.setEnabled(enhancement_enabled)
 
     def update_iteration_mode(self):
         current = self.iter_values[self.iter_slider.value()]
@@ -866,7 +889,9 @@ class MainWindow(QMainWindow):
 
     def get_effective_rephoto_steps(self):
         preset = self.get_selected_preset_value()
-        if preset == 750:
+        if preset == 375:
+            return (125, 375)
+        elif preset == 750:
             return (250, 750)
         else:
             return (250, preset)
@@ -1052,6 +1077,7 @@ class MainWindow(QMainWindow):
                 self.current_run_phase = "rephoto"
                 self.start_rephoto_progress_tracking()
                 self.set_rephoto_progress(0, "Starting rephoto")
+                self.set_result_stage_overlay("Rephotographing")
             return
 
         # Crop‑only skip notice
@@ -1067,11 +1093,13 @@ class MainWindow(QMainWindow):
             if s.startswith("=== Face crop step"):
                 self.set_preprocess_progress(20, "Cropping faces")
                 self.preprocess_stage = "cropping"
+                self.set_result_stage_overlay("Cropping")
                 return
 
             if s.startswith("=== GFPGAN step"):
                 self.set_preprocess_progress(60, "Enhancing faces")
                 self.preprocess_stage = "enhancing"
+                self.set_result_stage_overlay("Enhancing")
                 return
 
             if s.startswith("=== GPU pre-check"):
@@ -1079,12 +1107,22 @@ class MainWindow(QMainWindow):
                 self.preprocess_stage = "gpu_check"
                 return
 
-            # Parse crop count
+            # Parse crop count and preview crop if found
             m = __import__("re").search(r"^Cropped face count:\s*(\d+)\s*$", s)
             if m:
                 n = int(m.group(1))
                 self.set_preprocess_progress(40, f"Crops ready ({n})")
                 self.preprocess_stage = "crops_ready"
+                crop_image = self.find_latest_crop_output(after_epoch=self.run_started_at)
+                if crop_image:
+                    self.preview_stage_image_if_found(crop_image, "Cropping")
+                return
+
+            # Watch for GFPGAN blended output
+            if "GFPGAN blended faces:" in s or "GFPGAN output:" in s:
+                enhanced_image = self.find_latest_enhanced_output(after_epoch=self.run_started_at)
+                if enhanced_image:
+                    self.preview_stage_image_if_found(enhanced_image, "Enhancing")
                 return
 
         # Rephoto-specific updates (only during rephoto phase)
@@ -1143,7 +1181,7 @@ class MainWindow(QMainWindow):
         self.advanced_mode_checkbox.setChecked(False)
         self.iter_values = self.basic_iter_values
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(0)
+        self.iter_slider.setValue(1)  # default 750
         self.update_iteration_label()
 
         self.photo_type_combo.setCurrentText("Unknown")
@@ -1300,6 +1338,7 @@ class MainWindow(QMainWindow):
     def estimate_runtime_minutes(self, preset_value: int):
         # Baseline observed on RTX 3060 Laptop GPU (approx.)
         anchors = [
+            (375, 5),
             (750, 10),
             (1500, 20),
             (3000, 38),
@@ -1801,12 +1840,15 @@ class MainWindow(QMainWindow):
 
         if self.advanced_dialog.crop_only_checkbox.isChecked():
             command.append("-CropOnly")
-        elif (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()) and self.gfpgan_is_available():
-            command.extend([
-                "-UseGFPGAN",
-                "-GFPGANBlend",
-                self.advanced_dialog.gfpgan_blend_edit.text().strip(),
-            ])
+        else:
+            # Enhancement is enabled only if: checkbox is unchecked (not disabled) AND GFPGAN is available
+            enhancement_enabled = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()) and self.gfpgan_is_available()
+            if enhancement_enabled:
+                command.extend([
+                    "-UseGFPGAN",
+                    "-GFPGANBlend",
+                    self.advanced_dialog.gfpgan_blend_edit.text().strip(),
+                ])
 
         return command
 
@@ -1837,6 +1879,88 @@ class MainWindow(QMainWindow):
                 newest = p
 
         return newest
+
+    def sanitize_name_for_folder(self, text):
+        """
+        Convert text into a filesystem-safe folder name.
+        Replaces invalid path characters with underscores.
+        """
+        if not text:
+            return "output"
+        # Replace invalid path characters with underscore
+        invalid_chars = r'<>:"|?*\x00'
+        result = "".join(c if c not in invalid_chars else "_" for c in text)
+        # Remove excessive leading/trailing underscores
+        result = result.strip("_")
+        # Collapse multiple underscores
+        while "__" in result:
+            result = result.replace("__", "_")
+        return result if result else "output"
+
+    def find_latest_crop_output(self, after_epoch=None):
+        """
+        Find the newest image file in preprocess/face_crops created after the run start time.
+        Returns Path to the newest crop image, or None if not found.
+        """
+        crop_dir = self.repo_root / "preprocess" / "face_crops"
+        if not crop_dir.exists():
+            return None
+
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        newest = None
+        newest_mtime = -1.0
+
+        for p in crop_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if after_epoch is not None and mtime < after_epoch:
+                continue
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest = p
+
+        return newest
+
+    def copy_crop_outputs_to_results_root(self, crop_image_path):
+        """
+        Copy crop-only output into the selected Results root folder.
+        Creates a crop_only_<input_stem> subfolder and copies the crop image there.
+        Returns the destination path, or None if copy failed.
+        """
+        try:
+            crop_path = Path(crop_image_path)
+            if not crop_path.exists():
+                return None
+
+            # Determine results root
+            results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+            if not results_root.exists():
+                results_root.mkdir(parents=True, exist_ok=True)
+
+            # Get input image stem for folder naming
+            input_file = self.input_image_path_edit.text().strip()
+            input_stem = Path(input_file).stem if input_file else "crop_only_output"
+            safe_stem = self.sanitize_name_for_folder(input_stem)
+
+            # Create crop-only output folder
+            crop_out_folder = results_root / f"crop_only_{safe_stem}"
+            crop_out_folder.mkdir(parents=True, exist_ok=True)
+
+            # Copy the crop image
+            dest_path = crop_out_folder / crop_path.name
+            shutil.copy2(crop_path, dest_path)
+            return dest_path
+
+        except Exception as e:
+            self.log_box.append(f"Error copying crop output: {e}")
+            return None
+
     def simplify_run_folder(self, folder: Path):
         """
         Keep only two images in the run folder:
@@ -1949,6 +2073,7 @@ class MainWindow(QMainWindow):
         self.result_pixmap = pix
         self.open_image_location_button.setEnabled(True)
         self.refresh_result_preview_scale()
+        self.position_result_stage_overlay()
 
     def refresh_input_preview_scale(self):
         if self.input_pixmap is None:
@@ -1965,6 +2090,90 @@ class MainWindow(QMainWindow):
         h = max(1, self.result_preview_label.height() - 10)
         scaled = self.result_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.result_preview_label.setPixmap(scaled)
+
+    def position_result_stage_overlay(self):
+        """Position the stage overlay at bottom-left of the result preview."""
+        self.result_stage_overlay.adjustSize()
+        x = 10
+        y = max(0, self.result_preview_label.height() - self.result_stage_overlay.height() - 10)
+        self.result_stage_overlay.move(x, y)
+
+    def set_result_stage_overlay(self, base_text):
+        """Start displaying an animated stage overlay with the given base text."""
+        self.result_stage_base_text = base_text
+        self.result_stage_dot_count = 0
+        self.result_stage_overlay.setVisible(True)
+        self._result_stage_timer.start()
+        self.update_result_stage_overlay_animation()
+
+    def clear_result_stage_overlay(self):
+        """Stop and hide the stage overlay."""
+        self._result_stage_timer.stop()
+        self.result_stage_base_text = ""
+        self.result_stage_overlay.setVisible(False)
+
+    def update_result_stage_overlay_animation(self):
+        """Update the animated dots on the stage overlay."""
+        if not self.result_stage_base_text:
+            return
+        self.result_stage_dot_count = (self.result_stage_dot_count % 3) + 1
+        text = f"{self.result_stage_base_text}{'.' * self.result_stage_dot_count}"
+        self.result_stage_overlay.setText(text)
+        self.position_result_stage_overlay()
+
+    def find_latest_enhanced_output(self, after_epoch=None):
+        """Find the newest enhanced/blended image from GFPGAN output folders."""
+        gfpgan_dir = self.repo_root / "preprocess" / "gfpgan_runs"
+        if not gfpgan_dir.exists():
+            return None
+
+        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+        newest = None
+        newest_mtime = -1.0
+
+        # Search recursively for blended faces preferentially
+        for p in gfpgan_dir.rglob("*"):
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if after_epoch is not None and mtime < after_epoch:
+                continue
+            # Prefer paths containing "blended_faces"
+            if "blended_faces" not in str(p):
+                continue
+            if mtime > newest_mtime:
+                newest_mtime = mtime
+                newest = p
+
+        # Fallback: any gfpgan output image
+        if newest is None:
+            for p in gfpgan_dir.rglob("*"):
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() not in exts:
+                    continue
+                try:
+                    mtime = p.stat().st_mtime
+                except OSError:
+                    continue
+                if after_epoch is not None and mtime < after_epoch:
+                    continue
+                if mtime > newest_mtime:
+                    newest_mtime = mtime
+                    newest = p
+
+        return newest
+
+    def preview_stage_image_if_found(self, image_path, stage_name):
+        """Preview an image if it exists and update stage overlay."""
+        if image_path is not None and image_path.exists():
+            self.set_result_preview_image(image_path)
+            self.set_result_stage_overlay(stage_name)
 
     def update_elapsed_label(self):
         if self.run_started_at is None:
@@ -2099,8 +2308,22 @@ class MainWindow(QMainWindow):
                 self.flush_pending_milestones()
 
             if self.advanced_dialog.crop_only_checkbox.isChecked():
-                self.set_result_preview_image(None)
-                self.log_box.append("Crop-only run: no result image produced.")
+                # Crop-only mode: find and copy crop output
+                crop_image = self.find_latest_crop_output(after_epoch=self.run_started_at)
+                if crop_image is not None:
+                    # Copy crop to results root
+                    copied_path = self.copy_crop_outputs_to_results_root(crop_image)
+                    if copied_path is not None:
+                        self.set_result_preview_image(copied_path)
+                        self.log_box.append(f"Crop-only output copied to: {copied_path.parent}")
+                        self.log_box.append(f"Previewing crop-only result: {copied_path.name}")
+                        self.status_label.setText("Status: Crop-only output ready")
+                    else:
+                        self.log_box.append("Crop-only run: crop was produced but copy to results failed.")
+                        self.set_result_preview_image(crop_image)
+                else:
+                    self.log_box.append("Crop-only run: no crop image was found.")
+                    self.set_result_preview_image(None)
             else:
                 results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
                 newest = self.find_latest_image(results_root, self.run_started_at)
@@ -2111,10 +2334,16 @@ class MainWindow(QMainWindow):
                 else:
                     run_folder = newest.parent
                     _, rephoto_path = self.simplify_run_folder(run_folder)
-                    self.set_result_preview_image(rephoto_path or newest)
+                    final_preview = rephoto_path or newest
+                    self.set_result_preview_image(final_preview)
+                    self.log_box.append(f"Previewing final result: {final_preview.name}")
+
+            # Clear overlay after displaying final preview
+            self.clear_result_stage_overlay()
 
         else:
             self.status_label.setText("Status: Backend returned an error")
+            self.clear_result_stage_overlay()
 
         self.set_controls_for_running(False)
         self.process = None
@@ -2126,6 +2355,7 @@ class MainWindow(QMainWindow):
             self._elapsed_timer.stop()
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
+        self.clear_result_stage_overlay()
         self.set_controls_for_running(False)
         self.process = None
         self.run_started_at = None
@@ -2145,6 +2375,7 @@ class MainWindow(QMainWindow):
             self._elapsed_timer.stop()
         self.log_box.append("Cancel requested. Stopping backend process...")
         self.status_label.setText("Status: Cancelling...")
+        self.clear_result_stage_overlay()
 
         self.process.terminate()
         if not self.process.waitForFinished(2000):
@@ -2179,6 +2410,7 @@ class MainWindow(QMainWindow):
         if not self.validate_numeric_inputs():
             return
 
+        self.clear_result_stage_overlay()
         self.reset_progress_bars()
         # start in preprocessing phase with minimal indicator
         self.current_run_phase = "preprocess"
