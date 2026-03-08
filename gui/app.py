@@ -172,9 +172,6 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setDecimals(2)
         self.gfpgan_blend_edit.setValue(0.35)
 
-        self.spectral_sensitivity_combo = QComboBox()
-        self.spectral_sensitivity_combo.addItems(["b — blue-sensitive", "gb — orthochromatic", "g — panchromatic"])
-
         self.gaussian_edit = QDoubleSpinBox()
         self.gaussian_edit.setRange(0.0, 5.0)
         self.gaussian_edit.setSingleStep(0.05)
@@ -265,13 +262,6 @@ class AdvancedSettingsDialog(QDialog):
                 "Controls how much area around the detected face is included in the crop. Larger values include more surrounding context such as hair and edges of the head."
             ),
             self.face_factor_edit,
-        )
-        core_form.addRow(
-            self.make_label_with_info(
-                "Spectral sensitivity",
-                "Models how the photographic process responds to light. Blue-sensitive, orthochromatic, and panchromatic settings can change how historically plausible tones are rendered."
-            ),
-            self.spectral_sensitivity_combo,
         )
         core_form.addRow(
             self.make_label_with_info(
@@ -370,7 +360,6 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setValue(0.35)
         self.det_threshold_edit.setValue(0.90)
         self.face_factor_edit.setValue(0.65)
-        self.spectral_sensitivity_combo.setCurrentText("b — blue-sensitive")
         self.gaussian_edit.setValue(0.75)
         self.identity_preservation_combo.setCurrentText("Default")
         self.tonal_transfer_combo.setCurrentText("Default")
@@ -385,8 +374,28 @@ class AdvancedSettingsDialog(QDialog):
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
         self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
-    
+
 class MainWindow(QMainWindow):
+    def make_label_with_info(self, label_text, tooltip_text):
+        label_widget = QWidget()
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        label_widget.setLayout(row)
+
+        label = QLabel(label_text)
+
+        info_button = QToolButton()
+        info_button.setText("ⓘ")
+        info_button.setAutoRaise(True)
+        info_button.setToolTip(tooltip_text)
+        info_button.setCursor(Qt.PointingHandCursor)
+
+        row.addWidget(label)
+        row.addWidget(info_button)
+        row.addStretch()
+
+        return label_widget
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Time-Travel Rephotography")
@@ -439,9 +448,6 @@ class MainWindow(QMainWindow):
         input_row.addWidget(self.input_image_edit)
         input_row.addWidget(self.browse_button)
 
-        main_layout.addWidget(QLabel("Input Image"))
-        main_layout.addLayout(input_row)
-
         # --- Main settings ---
         form_layout = QFormLayout()
 
@@ -452,7 +458,6 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.det_threshold_edit.setValue(0.90)
         self.advanced_dialog.face_factor_edit.setValue(0.65)
         self.advanced_dialog.gfpgan_blend_edit.setValue(0.35)
-        self.advanced_dialog.spectral_sensitivity_combo.setCurrentText("b — blue-sensitive")
         self.advanced_dialog.gaussian_edit.setValue(0.75)
         self.advanced_dialog.identity_preservation_combo.setCurrentText("Default")
         self.advanced_dialog.tonal_transfer_combo.setCurrentText("Default")
@@ -484,39 +489,187 @@ class MainWindow(QMainWindow):
         self.iter_slider.setTickInterval(1)
         self.iter_slider.valueChanged.connect(self.update_iteration_label)
 
-        self.iter_label = QLabel("")
-        self.iter_row_label = QLabel("Iterations")
-        self.iter_row_label = QLabel("Iterations")
+        # --- Quality row ---
+        self.quality_label = QLabel("Quality:")
+
+        self.quality_value_label = QLabel("750")
+        self.quality_value_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+        self.quality_default_label = QLabel("(default)")
+        self.quality_default_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+
+        self.quality_info = QToolButton()
+        self.quality_info.setText("ⓘ")
+        self.quality_info.setAutoRaise(True)
+        self.quality_info.setCursor(Qt.PointingHandCursor)
+        self.quality_info.setFixedSize(18, 18)
+        self.quality_info.setToolTip(
+            "Controls reconstruction quality and runtime. "
+            "Higher values usually improve results but take longer. "
+            "750 is the default starting point for a quicker run."
+        )
+
         self.runtime_label = QLabel("")
         self.runtime_info = QToolButton()
         self.runtime_info.setText("ⓘ")
         self.runtime_info.setAutoRaise(True)
         self.runtime_info.setCursor(Qt.PointingHandCursor)
-        self.runtime_info.setFixedSize(18, 18)
-        self.runtime_info.setStyleSheet("QToolButton { color: #1a73e8; border: 1px solid #1a73e8; border-radius: 9px; font-weight: bold; padding: 0px; } QToolButton:hover { background: #e8f0fe; }")
         self.runtime_info.setToolTip("Estimated processing time is approximate.")
 
-        slider_wrap = QVBoxLayout()
-        slider_row = QHBoxLayout()
-        slider_row.addWidget(self.iter_slider)
-        slider_row.addWidget(self.advanced_mode_checkbox)
-        slider_row_widget = QWidget()
-        slider_row_widget.setLayout(slider_row)
-        slider_wrap.addWidget(slider_row_widget)
-        self.iter_label.setVisible(False)
-        slider_wrap.addWidget(self.iter_label)
-        slider_widget = QWidget()
-        slider_widget.setLayout(slider_wrap)
-        self.iter_row_label = QLabel("Iterations")
-        form_layout.addRow(self.iter_row_label, slider_widget)
+        self.runtime_prefix_label = QLabel("Est.")
+        self.elapsed_label = QLabel("Elapsed: 0:00")
+
+        quality_header_row = QHBoxLayout()
+        quality_header_row.setContentsMargins(0, 0, 0, 0)
+        quality_header_row.setSpacing(6)
+        quality_header_row.addWidget(self.quality_label)
+        quality_header_row.addWidget(self.quality_value_label)
+        quality_header_row.addWidget(self.quality_default_label)
+        quality_header_row.addWidget(self.quality_info)
+        quality_header_row.addStretch(1)
+
+        quality_slider_row = QHBoxLayout()
+        quality_slider_row.setContentsMargins(0, 0, 0, 0)
+        quality_slider_row.setSpacing(6)
+        quality_slider_row.addSpacing(0)
+        quality_slider_row.addWidget(self.iter_slider, 1)
+        quality_slider_row.addWidget(self.advanced_mode_checkbox, 0, Qt.AlignVCenter)
+
+        self.quality_widget = QWidget()
+        quality_layout = QVBoxLayout()
+        quality_layout.setContentsMargins(0, 2, 0, 2)
+        quality_layout.setSpacing(2)
+        self.quality_widget.setLayout(quality_layout)
+
+        quality_layout.addLayout(quality_header_row)
+        quality_layout.addLayout(quality_slider_row)
+
+        # --- Spectral sensitivity inputs ---
+        self.photo_type_combo = QComboBox()
+        self.photo_type_combo.addItems([
+            "Unknown",
+            "Daguerreotype",
+            "Ambrotype",
+            "Tintype / Ferrotype",
+            "Carte de visite (CDV)",
+            "Cabinet card",
+            "Late cabinet card / dry plate studio portrait",
+            "Early gelatin silver print",
+            "Black-and-white snapshot / roll-film print",
+        ])
+
+        self.approx_date_edit = QLineEdit()
+        self.approx_date_edit.setPlaceholderText("e.g. 1865, 1890s, circa 1910")
+
+        self.spectral_mode_combo = QComboBox()
+        self.spectral_mode_combo.addItems(["Auto", "Manual"])
+
+        self.spectral_sensitivity_combo = QComboBox()
+        self.spectral_sensitivity_combo.addItems(["Blue-sensitive", "Orthochromatic", "Panchromatic"])
+
+        # Connect signals for spectral sensitivity inference
+        self.spectral_mode_combo.currentTextChanged.connect(self.update_spectral_sensitivity_ui)
+        self.photo_type_combo.currentTextChanged.connect(self.update_spectral_sensitivity_ui)
+        self.approx_date_edit.textChanged.connect(self.update_spectral_sensitivity_ui)
+
+        form_layout.addRow(
+            self.make_label_with_info(
+                "Photographic process / photo type",
+                "Historical process or presentation format hint. Used to help infer spectral sensitivity automatically."
+            ),
+            self.photo_type_combo,
+        )
+        form_layout.addRow(
+            self.make_label_with_info(
+                "Approximate date",
+                "Optional year/decade (e.g. 1865, 1890s, circa 1910) used to refine automatic spectral sensitivity choice."
+            ),
+            self.approx_date_edit,
+        )
+        form_layout.addRow(
+            self.make_label_with_info(
+                "Spectral sensitivity mode",
+                "Auto recalculates spectral sensitivity based on photo type and date; Manual preserves explicit user choice."
+            ),
+            self.spectral_mode_combo,
+        )
+        form_layout.addRow(
+            self.make_label_with_info(
+                "Spectral sensitivity",
+                "The historical spectral sensitivity model used by the pipeline. In Auto mode, this is computed from process type and date."
+            ),
+            self.spectral_sensitivity_combo,
+        )
 
         self.advanced_settings_button = QPushButton("Advanced Settings...")
         self.advanced_settings_button.clicked.connect(self.open_advanced_settings_dialog)
         form_layout.addRow("Advanced", self.advanced_settings_button)
 
+        # Add Quality row as proper form row
+        form_layout.addRow(self.quality_widget)
+
+        # Initialize spectral sensitivity widgets with defaults
+        self.photo_type_combo.setCurrentText("Unknown")
+        self.approx_date_edit.setText("")
+        self.spectral_mode_combo.setCurrentText("Auto")
+        self.update_spectral_sensitivity_ui()
+
         self.update_iteration_label()
 
         main_layout.addLayout(form_layout)
+
+        # --- Progress row ---
+        progress_section = QVBoxLayout()
+
+        self.preprocess_progress_label = QLabel("Preprocessing")
+        self.rephoto_progress_label = QLabel("Processing")
+        self.preprocess_progress_label.setFixedWidth(110)
+        self.rephoto_progress_label.setFixedWidth(110)
+
+        preprocess_row = QHBoxLayout()
+        preprocess_row.addWidget(self.preprocess_progress_label)
+        self.preprocess_progress_bar = QProgressBar()
+        self.preprocess_progress_bar.setRange(0, 100)
+        self.preprocess_progress_bar.setValue(0)
+        self.preprocess_progress_bar.setVisible(True)
+        self.preprocess_progress_bar.setFormat("Ready... %p%")
+        self.preprocess_progress_bar.setFixedHeight(28)
+        self.preprocess_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.preprocess_progress_bar.setAutoFillBackground(True)
+        preprocess_row.addWidget(self.preprocess_progress_bar, 1)
+
+        rephoto_row = QHBoxLayout()
+        rephoto_row.addWidget(self.rephoto_progress_label)
+        rephoto_row.addSpacing(12)
+        # Add estimated time on left side
+        rephoto_row.addWidget(self.runtime_prefix_label)
+        rephoto_row.addWidget(self.runtime_label)
+        rephoto_row.addWidget(self.runtime_info)
+        rephoto_row.addSpacing(12)
+        # Progress bar centered and stretched
+        self.rephoto_progress_bar = QProgressBar()
+        self.rephoto_progress_bar.setRange(0, 100)
+        self.rephoto_progress_bar.setValue(0)
+        self.rephoto_progress_bar.setVisible(True)
+        self.rephoto_progress_bar.setFormat("Waiting... %p%")
+        self.rephoto_progress_bar.setFixedHeight(28)
+        self.rephoto_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.rephoto_progress_bar.setAutoFillBackground(True)
+        rephoto_row.addWidget(self.rephoto_progress_bar, 1)
+        rephoto_row.addSpacing(12)
+        # Elapsed time on right side
+        rephoto_row.addWidget(self.elapsed_label)
+
+        progress_section.addLayout(preprocess_row)
+        progress_section.addLayout(rephoto_row)
+
+        progress_widget = QWidget()
+        progress_widget.setLayout(progress_section)
+        main_layout.addWidget(progress_widget)
+
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(500)
+        self._elapsed_timer.timeout.connect(self.update_elapsed_label)
 
         # --- Outputs (Results only) ---
         outputs_group = QGroupBox("Outputs")
@@ -557,63 +710,6 @@ class MainWindow(QMainWindow):
         button_row.addWidget(self.reset_button)
         button_row.addWidget(self.quit_button)
 
-        main_layout.addLayout(button_row)
-
-        # --- Progress row ---
-        progress_section = QVBoxLayout()
-
-        self.preprocess_progress_label = QLabel("Preprocessing")
-        self.rephoto_progress_label = QLabel("Processing")
-        self.preprocess_progress_label.setFixedWidth(110)
-        self.rephoto_progress_label.setFixedWidth(110)
-
-        preprocess_row = QHBoxLayout()
-        preprocess_row.addWidget(self.preprocess_progress_label)
-        self.preprocess_progress_bar = QProgressBar()
-        self.preprocess_progress_bar.setRange(0, 100)
-        self.preprocess_progress_bar.setValue(0)
-        self.preprocess_progress_bar.setVisible(True)
-        self.preprocess_progress_bar.setFormat("Ready... %p%")
-        self.preprocess_progress_bar.setFixedHeight(28)
-        self.preprocess_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
-        self.preprocess_progress_bar.setAutoFillBackground(True)
-        preprocess_row.addWidget(self.preprocess_progress_bar, 1)
-
-        rephoto_row = QHBoxLayout()
-        rephoto_row.addWidget(self.rephoto_progress_label)
-        self.rephoto_progress_bar = QProgressBar()
-        self.rephoto_progress_bar.setRange(0, 100)
-        self.rephoto_progress_bar.setValue(0)
-        self.rephoto_progress_bar.setVisible(True)
-        self.rephoto_progress_bar.setFormat("Waiting... %p%")
-        self.rephoto_progress_bar.setFixedHeight(28)
-        self.rephoto_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
-        self.rephoto_progress_bar.setAutoFillBackground(True)
-        rephoto_row.addWidget(self.rephoto_progress_bar, 1)
-
-        progress_section.addLayout(preprocess_row)
-        progress_section.addLayout(rephoto_row)
-
-        runtime_pack = QHBoxLayout()
-        runtime_pack.setContentsMargins(0, 0, 0, 0)
-        runtime_pack.setSpacing(6)
-        runtime_pack.addWidget(self.runtime_label)
-        runtime_pack.addWidget(self.runtime_info)
-        runtime_widget = QWidget()
-        runtime_widget.setLayout(runtime_pack)
-        progress_section.addWidget(runtime_widget)
-
-        self.elapsed_label = QLabel("Elapsed: 0:00")
-        progress_section.addWidget(self.elapsed_label)
-
-        progress_widget = QWidget()
-        progress_widget.setLayout(progress_section)
-        main_layout.addWidget(progress_widget)
-
-        self._elapsed_timer = QTimer(self)
-        self._elapsed_timer.setInterval(500)
-        self._elapsed_timer.timeout.connect(self.update_elapsed_label)
-
         # --- Previews (Input on left, Result on right) ---
         previews_group = QGroupBox("Previews")
         previews_layout = QHBoxLayout()
@@ -647,9 +743,34 @@ class MainWindow(QMainWindow):
         previews_layout.addWidget(input_group)
         previews_layout.addWidget(result_group)
 
-        splitter = QSplitter(Qt.Vertical)
-        splitter.addWidget(previews_group)
+        # --- Build clean main layout in explicit order ---
+        # (Clear and rebuild to avoid the old reordering hack)
+        
+        # Save references to widgets that were already added
+        # Title and input are already in main_layout, so we clear and rebuild from scratch
+        
+        # Clear main_layout but keep scroll_area structure intact
+        while main_layout.count() > 0:
+            main_layout.takeAt(0)
+        
+        # Rebuild in correct order
+        main_layout.addWidget(title_label)
+        main_layout.addWidget(previews_group)
+        
+        # Settings section with input image and form layout
+        settings_container = QWidget()
+        settings_layout = QVBoxLayout()
+        settings_container.setLayout(settings_layout)
+        settings_layout.addWidget(QLabel("Input Image"))
+        settings_layout.addLayout(input_row)
+        settings_layout.addLayout(form_layout)
+        main_layout.addWidget(settings_container)
+        
+        main_layout.addWidget(progress_widget)
+        main_layout.addWidget(outputs_group)
+        main_layout.addLayout(button_row)
 
+        # --- Log container ---
         log_container = QWidget()
         log_layout = QVBoxLayout()
         log_container.setLayout(log_layout)
@@ -677,38 +798,11 @@ class MainWindow(QMainWindow):
         self.expand_log_button.clicked.connect(self.toggle_log_size)
         self.toggle_log_button.clicked.connect(self.toggle_log_visibility)
 
-        splitter.addWidget(log_container)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-
-        main_layout.addWidget(splitter)
-
-        # Reorder layout: previews top, controls middle, log bottom
-        controls_container = QWidget()
-        controls_layout = QVBoxLayout()
-        controls_container.setLayout(controls_layout)
-
-        while main_layout.count() > 2:
-            item = main_layout.takeAt(1)
-            if item.widget() is not None:
-                controls_layout.addWidget(item.widget())
-            elif item.layout() is not None:
-                controls_layout.addLayout(item.layout())
-
-        if controls_layout.count() >= 6:
-            progress_item = controls_layout.takeAt(5)
-            if progress_item.widget() is not None:
-                controls_layout.insertWidget(2, progress_item.widget())
-
-        main_layout.takeAt(main_layout.count() - 1)
-        splitter.setParent(None)
-
-        previews_group.setParent(None)
-        log_container.setParent(None)
-
-        main_layout.addWidget(previews_group)
-        main_layout.addWidget(controls_container)
         main_layout.addWidget(log_container)
+
+        self._elapsed_timer = QTimer(self)
+        self._elapsed_timer.setInterval(500)
+        self._elapsed_timer.timeout.connect(self.update_elapsed_label)
 
         # Initial state
         self.update_mode_controls()
@@ -815,10 +909,110 @@ class MainWindow(QMainWindow):
 
     def update_iteration_label(self):
         v = self.iter_values[self.iter_slider.value()]
-        self.iter_row_label.setText(f"Iterations: {v}")
+        self.quality_value_label.setText(str(v))
+        # Show default notation only if value is 750
+        if v == 750:
+            self.quality_default_label.setText("(default)")
+            self.quality_default_label.setVisible(True)
+        else:
+            self.quality_default_label.setVisible(False)
 
         if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
             self.update_runtime_label()
+
+    def parse_approximate_year(self, text):
+        """Convert flexible user date text into an approximate integer year, or None."""
+        text = text.strip().lower()
+        if not text:
+            return None
+
+        # Check for 4-digit year
+        m = __import__("re").search(r"\b(\d{4})", text)
+        if m:
+            year = int(m.group(1))
+            # If pattern like "1890s", convert to midpoint
+            if "s" in text[m.end():m.end()+1]:
+                return year + 5
+            return year
+        return None
+
+    def is_true_process_type(self, photo_type):
+        """Return True only for actual photographic processes."""
+        return photo_type in ("Daguerreotype", "Ambrotype", "Tintype / Ferrotype")
+
+    def infer_spectral_sensitivity(self):
+        """Infer spectral sensitivity based on photo type and date. Returns one of:
+        'Blue-sensitive', 'Orthochromatic', 'Panchromatic'
+        """
+        photo_type = self.photo_type_combo.currentText()
+        approx_year = self.parse_approximate_year(self.approx_date_edit.text())
+
+        # PRIORITY 2: True photographic processes
+        if self.is_true_process_type(photo_type):
+            return "Blue-sensitive"
+
+        # PRIORITY 3: Format-based types
+        if photo_type == "Carte de visite (CDV)":
+            return "Blue-sensitive"
+
+        if photo_type == "Cabinet card":
+            if approx_year is None:
+                return "Blue-sensitive"
+            if approx_year < 1890:
+                return "Blue-sensitive"
+            else:  # 1890 <= year
+                return "Orthochromatic"
+
+        if photo_type == "Late cabinet card / dry plate studio portrait":
+            if approx_year is None:
+                return "Orthochromatic"
+            if approx_year < 1880:
+                return "Blue-sensitive"
+            elif approx_year <= 1919:
+                return "Orthochromatic"
+            else:  # >= 1920
+                return "Panchromatic"
+
+        if photo_type == "Early gelatin silver print":
+            if approx_year is None:
+                return "Orthochromatic"
+            if approx_year < 1920:
+                return "Orthochromatic"
+            else:  # >= 1920
+                return "Panchromatic"
+
+        if photo_type == "Black-and-white snapshot / roll-film print":
+            if approx_year is None:
+                return "Panchromatic"
+            if approx_year < 1920:
+                return "Orthochromatic"
+            else:  # >= 1920
+                return "Panchromatic"
+
+        # PRIORITY 4: Unknown with date-only logic
+        if approx_year is not None:
+            if approx_year < 1880:
+                return "Blue-sensitive"
+            elif approx_year <= 1919:
+                return "Orthochromatic"
+            else:  # >= 1920
+                return "Panchromatic"
+
+        # PRIORITY 5: Fallback
+        return "Orthochromatic"
+
+    def update_spectral_sensitivity_ui(self):
+        """Update spectral sensitivity combo based on mode and infer if Auto."""
+        mode = self.spectral_mode_combo.currentText()
+
+        if mode == "Auto":
+            self.spectral_sensitivity_combo.setEnabled(False)
+            inferred = self.infer_spectral_sensitivity()
+            self.spectral_sensitivity_combo.setCurrentText(inferred)
+        else:  # Manual
+            self.spectral_sensitivity_combo.setEnabled(True)
+            # do not overwrite user choice
+
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
         self.cancel_button.setEnabled(is_running)
@@ -952,6 +1146,11 @@ class MainWindow(QMainWindow):
         self.iter_slider.setValue(0)
         self.update_iteration_label()
 
+        self.photo_type_combo.setCurrentText("Unknown")
+        self.approx_date_edit.setText("")
+        self.spectral_mode_combo.setCurrentText("Auto")
+        self.update_spectral_sensitivity_ui()
+
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
 
@@ -1005,8 +1204,12 @@ class MainWindow(QMainWindow):
         old_det_threshold = dlg.det_threshold_edit.value()
         old_face_factor = dlg.face_factor_edit.value()
         old_gfpgan_blend = dlg.gfpgan_blend_edit.value()
-        old_spectral = dlg.spectral_sensitivity_combo.currentText()
         old_gaussian = dlg.gaussian_edit.value()
+        # Save main window spectral widgets
+        old_photo_type = self.photo_type_combo.currentText()
+        old_approx_date = self.approx_date_edit.text()
+        old_spectral_mode = self.spectral_mode_combo.currentText()
+        old_spectral = self.spectral_sensitivity_combo.currentText()
 
         if dlg.exec() == QDialog.Accepted:
             self.update_mode_controls()
@@ -1019,8 +1222,12 @@ class MainWindow(QMainWindow):
             dlg.det_threshold_edit.setValue(old_det_threshold)
             dlg.face_factor_edit.setValue(old_face_factor)
             dlg.gfpgan_blend_edit.setValue(old_gfpgan_blend)
-            dlg.spectral_sensitivity_combo.setCurrentText(old_spectral)
             dlg.gaussian_edit.setValue(old_gaussian)
+            # Restore main window spectral widgets
+            self.photo_type_combo.setCurrentText(old_photo_type)
+            self.approx_date_edit.setText(old_approx_date)
+            self.spectral_mode_combo.setCurrentText(old_spectral_mode)
+            self.spectral_sensitivity_combo.setCurrentText(old_spectral)
             dlg.tonal_transfer_combo.setCurrentText(old_tonal)
             dlg.eye_preservation_combo.setCurrentText(old_eye)
             dlg.structure_matching_combo.setCurrentText(old_structure)
@@ -1029,6 +1236,8 @@ class MainWindow(QMainWindow):
             dlg.camera_lr_edit.setValue(old_camera_lr)
             dlg.mix_layer_start_edit.setValue(old_mix_layer_start)
             dlg.mix_layer_end_edit.setValue(old_mix_layer_end)
+            dlg.gaussian_edit.setValue(old_gaussian)
+            self.update_spectral_sensitivity_ui()
             self.update_mode_controls()
             self.update_runtime_label()
 
@@ -1075,13 +1284,18 @@ class MainWindow(QMainWindow):
         return 0.10
         
     def get_spectral_sensitivity_value(self):
-        label = self.advanced_dialog.spectral_sensitivity_combo.currentText()
-
-        if label.startswith("gb"):
+        label = self.spectral_sensitivity_combo.currentText()
+        
+        # Map UI labels to backend codes
+        if label == "Blue-sensitive":
+            return "b"
+        elif label == "Orthochromatic":
             return "gb"
-        if label.startswith("g"):
+        elif label == "Panchromatic":
             return "g"
-        return "b"
+        else:
+            # Fallback
+            return "gb"
 
     def estimate_runtime_minutes(self, preset_value: int):
         # Baseline observed on RTX 3060 Laptop GPU (approx.)
@@ -1490,11 +1704,11 @@ class MainWindow(QMainWindow):
         hours, mins = divmod(rem, 60)
 
         if days > 0:
-            self.runtime_label.setText(f"Est. Processing Time: {days} day {hours} hr {mins} min")
+            self.runtime_label.setText(f"{days} day {hours} hr {mins} min")
         elif hours > 0:
-            self.runtime_label.setText(f"Est. Processing Time: {hours} hr {mins} min")
+            self.runtime_label.setText(f"{hours} hr {mins} min")
         else:
-            self.runtime_label.setText(f"Est. Processing Time: {mins} min")
+            self.runtime_label.setText(f"{mins} min")
 
         if hasattr(self, "runtime_info"):
             ram_txt = f"{hw.get('ram_gb')} GB" if hw.get("ram_gb") is not None else "Unknown"
