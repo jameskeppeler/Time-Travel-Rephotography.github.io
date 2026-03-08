@@ -39,7 +39,8 @@
     [double]$ColorTransfer = 10000000000.0,
     [double]$Eye = 0.1,
     [double]$Contextual = 0.1,
-    [double]$NoiseRegularize = 50000.0
+    [double]$NoiseRegularize = 50000.0,
+    [double]$LR = 0.1
 )
 
 $ErrorActionPreference = "Stop"
@@ -431,7 +432,7 @@ try {
             --recon_size 256 `
             --vgg 1 `
             --vggface $VGGFace `
-            --lr 0.1 `
+            --lr $LR `
             --noise_strength 0.0 `
             --noise_ramp 0.75 `
             --noise_regularize $NoiseRegularize `
