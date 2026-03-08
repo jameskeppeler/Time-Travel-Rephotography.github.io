@@ -396,19 +396,20 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
+        self.preprocess_stage = "idle"
+        self.rephoto_stage = None
+        self.rephoto_stage_name = None
+        self.rephoto_stage_current = 0
+        self.rephoto_stage_total = 0
+        self.rephoto_total_done_before_stage = 0
+        self.rephoto_total_work = 0
+        self.rephoto_step_pair = (250, 750)
+
+        # run phase state for gating progress bars
+        self.current_run_phase = "idle"  # idle, preprocess, rephoto, done, cancelled, crop_only_done
+
         self.log_expanded = False
         self.log_visible = True
-
-        # Progress animation (used for long rephoto stage)
-        self._progress_anim_timer = QTimer(self)
-        self._progress_anim_timer.setInterval(100)
-        self._progress_anim_timer.timeout.connect(self.on_progress_anim_tick)
-        self._progress_anim_active = False
-        self._progress_anim_t0 = 0.0
-        self._progress_anim_duration = 0.0
-        self._progress_anim_start = 0
-        self._progress_anim_end = 0
-        self._progress_anim_stage = ""
 
         # Preview state
         self.input_pixmap = None
@@ -559,16 +560,39 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(button_row)
 
         # --- Progress row ---
-        progress_row = QHBoxLayout()
+        progress_section = QVBoxLayout()
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setFormat("Ready... %p%")
-        self.progress_bar.setFixedHeight(28)
-        self.progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
-        self.progress_bar.setAutoFillBackground(True)
+        self.preprocess_progress_label = QLabel("Preprocessing")
+        self.rephoto_progress_label = QLabel("Processing")
+        self.preprocess_progress_label.setFixedWidth(110)
+        self.rephoto_progress_label.setFixedWidth(110)
+
+        preprocess_row = QHBoxLayout()
+        preprocess_row.addWidget(self.preprocess_progress_label)
+        self.preprocess_progress_bar = QProgressBar()
+        self.preprocess_progress_bar.setRange(0, 100)
+        self.preprocess_progress_bar.setValue(0)
+        self.preprocess_progress_bar.setVisible(True)
+        self.preprocess_progress_bar.setFormat("Ready... %p%")
+        self.preprocess_progress_bar.setFixedHeight(28)
+        self.preprocess_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.preprocess_progress_bar.setAutoFillBackground(True)
+        preprocess_row.addWidget(self.preprocess_progress_bar, 1)
+
+        rephoto_row = QHBoxLayout()
+        rephoto_row.addWidget(self.rephoto_progress_label)
+        self.rephoto_progress_bar = QProgressBar()
+        self.rephoto_progress_bar.setRange(0, 100)
+        self.rephoto_progress_bar.setValue(0)
+        self.rephoto_progress_bar.setVisible(True)
+        self.rephoto_progress_bar.setFormat("Waiting... %p%")
+        self.rephoto_progress_bar.setFixedHeight(28)
+        self.rephoto_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.rephoto_progress_bar.setAutoFillBackground(True)
+        rephoto_row.addWidget(self.rephoto_progress_bar, 1)
+
+        progress_section.addLayout(preprocess_row)
+        progress_section.addLayout(rephoto_row)
 
         runtime_pack = QHBoxLayout()
         runtime_pack.setContentsMargins(0, 0, 0, 0)
@@ -577,15 +601,13 @@ class MainWindow(QMainWindow):
         runtime_pack.addWidget(self.runtime_info)
         runtime_widget = QWidget()
         runtime_widget.setLayout(runtime_pack)
-        progress_row.addWidget(runtime_widget)
-
-        progress_row.addWidget(self.progress_bar, 1)
+        progress_section.addWidget(runtime_widget)
 
         self.elapsed_label = QLabel("Elapsed: 0:00")
-        progress_row.addWidget(self.elapsed_label)
+        progress_section.addWidget(self.elapsed_label)
 
         progress_widget = QWidget()
-        progress_widget.setLayout(progress_row)
+        progress_widget.setLayout(progress_section)
         main_layout.addWidget(progress_widget)
 
         self._elapsed_timer = QTimer(self)
@@ -733,6 +755,62 @@ class MainWindow(QMainWindow):
         closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - current))
         self.iter_slider.setValue(closest_index)
 
+    def reset_progress_bars(self):
+        self.preprocess_progress_bar.setValue(0)
+        self.preprocess_progress_bar.setFormat("Ready... %p%")
+        self.rephoto_progress_bar.setValue(0)
+        self.rephoto_progress_bar.setFormat("Waiting... %p%")
+        self.preprocess_stage = "idle"
+        self.rephoto_stage = None
+        self.rephoto_stage_name = None
+        self.rephoto_stage_current = 0
+        self.rephoto_stage_total = 0
+        self.rephoto_total_done_before_stage = 0
+        self.rephoto_total_work = 0
+        self.rephoto_step_pair = (250, 750)
+        self.current_run_phase = "idle"
+
+    def get_effective_rephoto_steps(self):
+        preset = self.get_selected_preset_value()
+        if preset == 750:
+            return (250, 750)
+        else:
+            return (250, preset)
+
+    def set_preprocess_progress(self, value, text=None):
+        value = max(0, min(100, value))
+        self.preprocess_progress_bar.setValue(value)
+        if text:
+            self.preprocess_progress_bar.setFormat(f"{text} %p%")
+
+    def set_rephoto_progress(self, value, text=None):
+        value = max(0, min(100, value))
+        self.rephoto_progress_bar.setValue(value)
+        if text:
+            self.rephoto_progress_bar.setFormat(f"{text} %p%")
+
+    def start_rephoto_progress_tracking(self):
+        self.rephoto_step_pair = self.get_effective_rephoto_steps()
+        self.rephoto_total_work = self.rephoto_step_pair[0] + self.rephoto_step_pair[1]
+        self.rephoto_stage = None
+        self.rephoto_stage_name = None
+        self.rephoto_stage_current = 0
+        self.rephoto_stage_total = 0
+        self.rephoto_total_done_before_stage = 0
+
+    def update_rephoto_progress_from_iteration(self, current_iter, total_iter):
+        if not self.rephoto_stage_name:
+            return
+        if self.rephoto_stage_name == "32x32":
+            self.rephoto_total_done_before_stage = 0
+            self.rephoto_stage_total = self.rephoto_step_pair[0]
+        elif self.rephoto_stage_name == "64x64":
+            self.rephoto_total_done_before_stage = self.rephoto_step_pair[0]
+            self.rephoto_stage_total = self.rephoto_step_pair[1]
+        overall_done = self.rephoto_total_done_before_stage + current_iter
+        percent = round(100 * overall_done / self.rephoto_total_work)
+        self.set_rephoto_progress(percent, "Processing")
+
         self.update_iteration_label()
 
     def update_iteration_label(self):
@@ -746,7 +824,6 @@ class MainWindow(QMainWindow):
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.quit_button.setEnabled(not is_running)
-        self.progress_bar.setVisible(True)
 
         self.browse_button.setEnabled(not is_running)
         self.input_image_edit.setEnabled(not is_running)
@@ -763,162 +840,102 @@ class MainWindow(QMainWindow):
         self.advanced_settings_button.setEnabled(not is_running)
 
         if is_running:
-            # Reset progress UI on each run start
-            self.progress_bar.setValue(0)
-            self.progress_bar.setFormat("Starting... 0%")
             self.advanced_dialog.use_gfpgan_checkbox.setEnabled(False)
         else:
             self.update_mode_controls()
 
     # ------------------------------
-    # Progress tracking / animation
+    # Progress tracking
     # ------------------------------
-    def start_progress_animation(self, start_pct: int, end_pct: int, duration_s: float, stage: str):
-        start_pct = int(max(0, min(100, start_pct)))
-        end_pct = int(max(0, min(100, end_pct)))
-        duration_s = float(max(0.3, duration_s))
-
-        self._progress_anim_active = True
-        self._progress_anim_t0 = time.time()
-        self._progress_anim_duration = duration_s
-        self._progress_anim_start = start_pct
-        self._progress_anim_end = end_pct
-        self._progress_anim_stage = stage
-
-        # Set initial stage text immediately (direct)
-        self._set_progress_direct(start_pct, stage)
-
-        if not self._progress_anim_timer.isActive():
-            self._progress_anim_timer.start()
-    def stop_progress_animation(self):
-        self._progress_anim_active = False
-        if hasattr(self, "_progress_anim_timer") and self._progress_anim_timer.isActive():
-            self._progress_anim_timer.stop()
-
-    def on_progress_anim_tick(self):
-        if not self._progress_anim_active:
-            return
-
-        elapsed = time.time() - self._progress_anim_t0
-        t = min(1.0, max(0.0, elapsed / self._progress_anim_duration))
-        pct = int(round(self._progress_anim_start + t * (self._progress_anim_end - self._progress_anim_start)))
-
-        # Direct set to avoid triggering nested animations
-        self._set_progress_direct(pct, self._progress_anim_stage)
-
-        if t >= 1.0:
-            self.stop_progress_animation()
-    def reset_progress_state(self):
-        self.stop_progress_animation()
-        self._progress_total_steps = None
-        self._progress_crop_count = None
-        self._progress_rephoto_done = 0
-        self._progress_stage = "Starting"
-        self._pending_milestones = []
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Starting... 0%")
-
-    def _set_progress_direct(self, percent: int, stage: str):
-        percent = max(0, min(100, int(percent)))
-        self._progress_stage = stage
-        self.progress_bar.setValue(percent)
-        self.progress_bar.setFormat(f"{stage}... {percent}%")
-
-    def _set_progress(self, percent: int, stage: str, smooth: bool = True):
-        percent = max(0, min(100, int(percent)))
-
-        # If an animation is already running (e.g., rephoto stage), do direct updates
-        if (not smooth) or getattr(self, "_progress_anim_active", False):
-            self._set_progress_direct(percent, stage)
-            return
-
-        cur = int(self.progress_bar.value())
-
-        # If moving backwards or no change, update directly
-        if percent <= cur:
-            self._set_progress_direct(percent, stage)
-            return
-
-        # Smooth short jumps between stages (e.g., 5% -> 15% -> 25%)
-        delta = percent - cur
-        duration = max(0.6, min(1.6, (delta / 100.0) * 1.2 + 0.4))
-        self.start_progress_animation(start_pct=cur, end_pct=percent, duration_s=duration, stage=stage)
     def update_progress_from_line(self, line: str):
         s = (line or "").strip()
 
-        # Stage markers (from the PowerShell wrapper output)
-        if s.startswith("=== Face crop step"):
-            self._set_progress(5, "Cropping faces")
-            return
-
-        if s.startswith("=== GFPGAN step"):
-            # Enhancement happens before GPU pre-check; show progress movement even though wrapper doesn't count it as a step.
-            if self._progress_total_steps:
-                pct = int(round((1.5 / self._progress_total_steps) * 100))
-                self._set_progress(max(self.progress_bar.value(), pct), "Enhancing faces")
-            else:
-                self._set_progress(max(self.progress_bar.value(), 15), "Enhancing faces")
-            return
-
-        if s.startswith("=== GPU pre-check"):
-            # Step 2 of TotalSteps
-            if self._progress_total_steps:
-                pct = int(round((2 / self._progress_total_steps) * 100))
-                self._set_progress(max(self.progress_bar.value(), pct), "GPU pre-check")
-            else:
-                self._set_progress(max(self.progress_bar.value(), 25), "GPU pre-check")
-            return
+        # === Rephoto start marker, switch phases ===
         if s.startswith("=== Rephoto step"):
-            # Start a continuous progress animation for the long projector stage.
-            # We animate toward 99% based on the current estimate.
-            try:
-                preset_val = self.get_selected_preset_value()
-                base_mins = self.estimate_runtime_minutes(preset_val)
-                hw = self.get_hardware_info()
-                scale, _note = self.compute_runtime_scale(hw)
-                est_seconds = max(30.0, float(base_mins) * 60.0 * float(scale))
-            except Exception:
-                est_seconds = 600.0  # fallback
-
-            # Allocate most of the estimate to the rephoto stage.
-            duration = est_seconds * 0.85
-            start_pct = max(self.progress_bar.value(), 30)
-            self.start_progress_animation(start_pct=start_pct, end_pct=99, duration_s=duration, stage="Rephotographing")
-            return
-        # Parse crop count so we can compute an overall % like the wrapper's step model
-        m = __import__("re").search(r"^Cropped face count:\s*(\d+)\s*$", s)
-        if m:
-            n = int(m.group(1))
-            self._progress_crop_count = n
-            self._progress_total_steps = 2 + n  # matches wrapper logic for non-crop-only runs
-            pct = int(round((1 / self._progress_total_steps) * 100))
-            self._set_progress(max(self.progress_bar.value(), pct), f"Crops ready ({n})")
+            if self.current_run_phase == "preprocess":
+                self.set_preprocess_progress(100, "Preprocessing complete")
+                self.preprocess_stage = "complete"
+                self.current_run_phase = "rephoto"
+                self.start_rephoto_progress_tracking()
+                self.set_rephoto_progress(0, "Starting rephoto")
             return
 
-        # Rephoto milestone markers (captured during run, written only on full success)
-        m = __import__("re").search(r"^=== Rephoto milestone ===\s*(\d+)\s*$", s)
-        if m and self.run_started_at is not None:
-            milestone_val = int(m.group(1))
-            elapsed = max(0.0, time.time() - self.run_started_at)
-
-            if not hasattr(self, "_pending_milestones"):
-                self._pending_milestones = []
-
-            if not any(pm.get("preset") == milestone_val for pm in self._pending_milestones):
-                self._pending_milestones.append({
-                    "preset": milestone_val,
-                    "elapsed_seconds": elapsed,
-                })
-                self.log_box.append(f"Captured milestone timing: {milestone_val} iterations at {elapsed:.1f}s")
-            return
-
-        # Completion markers
+        # Crop‑only skip notice
         if s.startswith("CropOnly requested. Skipping rephoto step."):
-            self._set_progress(100, "Done (crop-only)")
+            # finalize preprocessing and leave rephoto untouched
+            self.set_preprocess_progress(100, "Preprocessing complete")
+            self.set_rephoto_progress(0, "Skipped")
+            self.current_run_phase = "crop_only_done"
             return
 
+        # Preprocessing stage updates (only before rephoto begins)
+        if self.current_run_phase == "preprocess":
+            if s.startswith("=== Face crop step"):
+                self.set_preprocess_progress(20, "Cropping faces")
+                self.preprocess_stage = "cropping"
+                return
+
+            if s.startswith("=== GFPGAN step"):
+                self.set_preprocess_progress(60, "Enhancing faces")
+                self.preprocess_stage = "enhancing"
+                return
+
+            if s.startswith("=== GPU pre-check"):
+                self.set_preprocess_progress(80, "GPU pre-check")
+                self.preprocess_stage = "gpu_check"
+                return
+
+            # Parse crop count
+            m = __import__("re").search(r"^Cropped face count:\s*(\d+)\s*$", s)
+            if m:
+                n = int(m.group(1))
+                self.set_preprocess_progress(40, f"Crops ready ({n})")
+                self.preprocess_stage = "crops_ready"
+                return
+
+        # Rephoto-specific updates (only during rephoto phase)
+        if self.current_run_phase == "rephoto":
+            if "Optimizing 32x32" in s:
+                self.rephoto_stage = "32x32"
+                self.rephoto_stage_name = "32x32"
+                self.rephoto_stage_current = 0
+                self.rephoto_stage_total = self.rephoto_step_pair[0]
+                return
+
+            if "Optimizing 64x64" in s:
+                self.rephoto_stage = "64x64"
+                self.rephoto_stage_name = "64x64"
+                self.rephoto_stage_current = 0
+                self.rephoto_stage_total = self.rephoto_step_pair[1]
+                return
+
+            m = __import__("re").search(r"(\d+)/(\d+)", s)
+            if m:
+                current = int(m.group(1))
+                total = int(m.group(2))
+
+                allowed_totals = {self.rephoto_step_pair[0], self.rephoto_step_pair[1]}
+                if total not in allowed_totals:
+                    return
+
+                if total == self.rephoto_step_pair[0]:
+                    self.rephoto_stage = "32x32"
+                    self.rephoto_stage_name = "32x32"
+                elif total == self.rephoto_step_pair[1]:
+                    self.rephoto_stage = "64x64"
+                    self.rephoto_stage_name = "64x64"
+
+                self.rephoto_stage_total = total
+                self.update_rephoto_progress_from_iteration(current, total)
+                return
+
+        # Completion marker
         if s == "Done.":
-            self._set_progress(100, "Done")
+            if self.current_run_phase == "rephoto":
+                self.set_rephoto_progress(100, "Done")
+            elif self.current_run_phase == "crop_only_done":
+                self.set_rephoto_progress(0, "Skipped")
+            self.current_run_phase = "done"
             return
     # ------------------------------
     # Input / output selection
@@ -1851,13 +1868,17 @@ class MainWindow(QMainWindow):
             self.log_box.append(f"Timing log write failed: {e}")
 
     def process_finished(self, exit_code, exit_status):
-        self.stop_progress_animation()
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
         self.log_box.append(f"Process finished with exit code: {exit_code}")
 
         if exit_code == 0:
-            self._set_progress_direct(100, "Done")
+            # finalize bars according to phase
+            if self.current_run_phase == "rephoto":
+                self.set_rephoto_progress(100, "Complete")
+            elif self.current_run_phase == "crop_only_done":
+                self.set_rephoto_progress(0, "Skipped")
+            self.current_run_phase = "done"
             self.status_label.setText("Status: Backend completed successfully")
             if (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
                 self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
@@ -1867,10 +1888,7 @@ class MainWindow(QMainWindow):
                 self.set_result_preview_image(None)
                 self.log_box.append("Crop-only run: no result image produced.")
             else:
-                if hasattr(self, "results_root_edit"):
-                    results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
-                else:
-                    results_root = self.repo_root / "results"
+                results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
                 newest = self.find_latest_image(results_root, self.run_started_at)
 
                 if newest is None:
@@ -1880,6 +1898,7 @@ class MainWindow(QMainWindow):
                     run_folder = newest.parent
                     _, rephoto_path = self.simplify_run_folder(run_folder)
                     self.set_result_preview_image(rephoto_path or newest)
+
         else:
             self.status_label.setText("Status: Backend returned an error")
 
@@ -1887,10 +1906,8 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
-        self.reset_progress_state()
 
     def process_error(self, process_error):
-        self.stop_progress_animation()
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
         self.log_box.append(f"Process launch error: {process_error}")
@@ -1899,7 +1916,6 @@ class MainWindow(QMainWindow):
         self.process = None
         self.run_started_at = None
 
-        self.reset_progress_state()
 
     def cancel_run(self):
         if self.process is None:
@@ -1907,7 +1923,10 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: No backend process to cancel")
             return
 
-        self.stop_progress_animation()
+        # preserve current bar values but note cancel
+        self.current_run_phase = "cancelled"
+        self.preprocess_progress_bar.setFormat(self.preprocess_progress_bar.format() + " (cancelled)")
+        self.rephoto_progress_bar.setFormat(self.rephoto_progress_bar.format() + " (cancelled)")
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
         self.log_box.append("Cancel requested. Stopping backend process...")
@@ -1946,7 +1965,11 @@ class MainWindow(QMainWindow):
         if not self.validate_numeric_inputs():
             return
 
-        self.reset_progress_state()
+        self.reset_progress_bars()
+        # start in preprocessing phase with minimal indicator
+        self.current_run_phase = "preprocess"
+        self.set_preprocess_progress(5, "Starting...")
+        self.set_rephoto_progress(0, "Waiting...")
         command = self.build_wrapper_command()
 
         self.log_box.append("Run button clicked.")
