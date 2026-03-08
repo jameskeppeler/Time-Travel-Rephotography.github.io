@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QSpinBox,
+    QTabWidget,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -97,24 +98,54 @@ class InputDropLabel(QLabel):
         event.ignore()
 
 class AdvancedSettingsDialog(QDialog):
+    def make_label_with_info(self, label_text, tooltip_text):
+        label_widget = QWidget()
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(4)
+        label_widget.setLayout(row)
+
+        label = QLabel(label_text)
+
+        info_button = QToolButton()
+        info_button.setText("ⓘ")
+        info_button.setAutoRaise(True)
+        info_button.setToolTip(tooltip_text)
+        info_button.setCursor(Qt.PointingHandCursor)
+
+        row.addWidget(label)
+        row.addWidget(info_button)
+        row.addStretch()
+
+        return label_widget
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Advanced Settings")
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(600)
 
         layout = QVBoxLayout()
         self.setLayout(layout)
 
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
+        tab_widget = QTabWidget()
 
-        scroll_content = QWidget()
-        form = QFormLayout(scroll_content)
+        core_tab = QWidget()
+        core_form = QFormLayout(core_tab)
 
-        scroll_area.setWidget(scroll_content)
-        layout.addWidget(scroll_area)
+        refine_tab = QWidget()
+        refine_form = QFormLayout(refine_tab)
 
+        exp_tab = QWidget()
+        exp_form = QFormLayout(exp_tab)
+
+        tab_widget.addTab(core_tab, "Core Historical")
+        tab_widget.addTab(refine_tab, "Refinement")
+        tab_widget.addTab(exp_tab, "Experimental")
+
+        layout.addWidget(tab_widget)
+
+        # build widgets
         self.strategy_combo = QComboBox()
         self.strategy_combo.addItems(["all", "largest"])
 
@@ -192,23 +223,128 @@ class AdvancedSettingsDialog(QDialog):
         self.mix_layer_end_edit.setRange(0, 18)
         self.mix_layer_end_edit.setValue(18)
 
-        form.addRow("Faces to enhance", self.strategy_combo)
-        form.addRow("Crop Only", self.crop_only_checkbox)
-        form.addRow("Enhancement", self.use_gfpgan_checkbox)
-        form.addRow("Enhancement blend", self.gfpgan_blend_edit)
-        form.addRow("Face detection sensitivity (0–1)", self.det_threshold_edit)
-        form.addRow("Face crop expansion", self.face_factor_edit)
-        form.addRow("Spectral sensitivity", self.spectral_sensitivity_combo)
-        form.addRow("Gaussian blur", self.gaussian_edit)
-        form.addRow("Identity preservation", self.identity_preservation_combo)
-        form.addRow("Tonal transfer", self.tonal_transfer_combo)
-        form.addRow("Eye preservation", self.eye_preservation_combo)
-        form.addRow("Structure matching", self.structure_matching_combo)
-        form.addRow("Noise regularization", self.noise_regularize_edit)
-        form.addRow("Learning rate", self.lr_edit)
-        form.addRow("Camera learning rate", self.camera_lr_edit)
-        form.addRow("Mix layer start", self.mix_layer_start_edit)
-        form.addRow("Mix layer end", self.mix_layer_end_edit)
+        # populate tabs with labels containing info icons
+        core_form.addRow(
+            self.make_label_with_info(
+                "Faces to enhance",
+                "Chooses which detected faces to process. 'largest' usually focuses on the main subject, while 'all' processes every detected face."
+            ),
+            self.strategy_combo,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Crop Only",
+                "Runs only the face-detection and cropping step, without enhancement or rephotography. Useful for debugging inputs."
+            ),
+            self.crop_only_checkbox,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Enhancement",
+                "Turns face enhancement on or off before rephotography. Enhancement can improve damaged or blurry faces, but may also introduce modern-looking details."
+            ),
+            self.use_gfpgan_checkbox,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Enhancement blend",
+                "Controls how strongly the enhancement result is blended into the face crop. Lower values preserve more of the original image; higher values use more of the enhanced result."
+            ),
+            self.gfpgan_blend_edit,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Face detection sensitivity (0–1)",
+                "Controls how strict face detection is. Higher values are more selective and may reduce false detections; lower values may detect weaker faces but can also pick up mistakes."
+            ),
+            self.det_threshold_edit,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Face crop expansion",
+                "Controls how much area around the detected face is included in the crop. Larger values include more surrounding context such as hair and edges of the head."
+            ),
+            self.face_factor_edit,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Spectral sensitivity",
+                "Models how the photographic process responds to light. Blue-sensitive, orthochromatic, and panchromatic settings can change how historically plausible tones are rendered."
+            ),
+            self.spectral_sensitivity_combo,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Gaussian blur",
+                "Applies blur during reconstruction setup. This can help stabilize optimization and reduce harsh detail, but too much blur can soften important features."
+            ),
+            self.gaussian_edit,
+        )
+
+        refine_form.addRow(
+            self.make_label_with_info(
+                "Identity preservation",
+                "Controls how strongly the reconstruction tries to preserve the person’s facial identity. Higher values usually hold closer to the source face."
+            ),
+            self.identity_preservation_combo,
+        )
+        refine_form.addRow(
+            self.make_label_with_info(
+                "Tonal transfer",
+                "Controls how strongly tonal relationships from the source image are transferred. Higher values can better preserve historical light-dark structure, but may constrain reconstruction more strongly."
+            ),
+            self.tonal_transfer_combo,
+        )
+        refine_form.addRow(
+            self.make_label_with_info(
+                "Eye preservation",
+                "Controls how strongly the eye region is preserved. Higher values can help maintain gaze and eye shape, but may reduce flexibility in reconstruction."
+            ),
+            self.eye_preservation_combo,
+        )
+        refine_form.addRow(
+            self.make_label_with_info(
+                "Structure matching",
+                "Controls how strongly broader image structure and perceptual similarity are matched. Higher values can preserve composition and facial arrangement more strongly."
+            ),
+            self.structure_matching_combo,
+        )
+
+        exp_form.addRow(
+            self.make_label_with_info(
+                "Noise regularization",
+                "Penalizes noisy or unstable latent/image patterns during optimization. Higher values usually suppress artifacts, but may also reduce fine detail."
+            ),
+            self.noise_regularize_edit,
+        )
+        exp_form.addRow(
+            self.make_label_with_info(
+                "Learning rate",
+                "Controls the main optimization step size. Higher values move faster but can become unstable; lower values are slower but often safer."
+            ),
+            self.lr_edit,
+        )
+        exp_form.addRow(
+            self.make_label_with_info(
+                "Camera learning rate",
+                "Controls the optimization step size for camera-related adjustments. Higher values change viewpoint parameters more quickly."
+            ),
+            self.camera_lr_edit,
+        )
+        exp_form.addRow(
+            self.make_label_with_info(
+                "Mix layer start",
+                "Sets the first layer in the latent-mixing range. This affects which levels of facial structure/style are influenced during initialization."
+            ),
+            self.mix_layer_start_edit,
+        )
+        exp_form.addRow(
+            self.make_label_with_info(
+                "Mix layer end",
+                "Sets the last layer in the latent-mixing range. Together with Mix layer start, this defines the layer span used for mixing."
+            ),
+            self.mix_layer_end_edit,
+        )
 
         self.update_enhancement_controls()
 
@@ -259,6 +395,9 @@ class MainWindow(QMainWindow):
         self.wrapper_script = self.repo_root / "run_rephoto_with_facecrop.ps1"
         self.process = None
         self.run_started_at = None
+
+        self.log_expanded = False
+        self.log_visible = True
 
         # Progress animation (used for long rephoto stage)
         self._progress_anim_timer = QTimer(self)
@@ -372,19 +511,7 @@ class MainWindow(QMainWindow):
 
         self.advanced_settings_button = QPushButton("Advanced Settings...")
         self.advanced_settings_button.clicked.connect(self.open_advanced_settings_dialog)
-
-        advanced_wrap = QVBoxLayout()
-        advanced_wrap.setContentsMargins(0, 0, 0, 0)
-        advanced_wrap.setSpacing(4)
-        advanced_wrap.addWidget(self.advanced_settings_button)
-
-        self.advanced_summary_label = QLabel("")
-        advanced_wrap.addWidget(self.advanced_summary_label)
-
-        advanced_widget = QWidget()
-        advanced_widget.setLayout(advanced_wrap)
-
-        form_layout.addRow("Advanced", advanced_widget)
+        form_layout.addRow("Advanced", self.advanced_settings_button)
 
         self.update_iteration_label()
 
@@ -505,14 +632,28 @@ class MainWindow(QMainWindow):
         log_layout = QVBoxLayout()
         log_container.setLayout(log_layout)
 
-        log_layout.addWidget(QLabel("Log Output"))
+        log_header_row = QHBoxLayout()
+        log_header_row.addWidget(QLabel("Log Output"))
+        log_header_row.addStretch()
+        self.expand_log_button = QPushButton("Expand Log")
+        self.toggle_log_button = QPushButton("Hide Log")
+        log_header_row.addWidget(self.expand_log_button)
+        log_header_row.addWidget(self.toggle_log_button)
+
+        log_layout.addLayout(log_header_row)
+
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
+        self.log_box.setMinimumHeight(180)
+        self.log_box.setMaximumHeight(180)
         self.log_box.append("GUI loaded successfully.")
         log_layout.addWidget(self.log_box)
 
         self.status_label = QLabel("Status: Ready")
         log_layout.addWidget(self.status_label)
+
+        self.expand_log_button.clicked.connect(self.toggle_log_size)
+        self.toggle_log_button.clicked.connect(self.toggle_log_visibility)
 
         splitter.addWidget(log_container)
         splitter.setStretchFactor(0, 3)
@@ -543,50 +684,16 @@ class MainWindow(QMainWindow):
         previews_group.setParent(None)
         log_container.setParent(None)
 
-        bottom_splitter = QSplitter(Qt.Vertical)
-        bottom_splitter.addWidget(controls_container)
-        bottom_splitter.addWidget(log_container)
-        bottom_splitter.setStretchFactor(0, 3)
-        bottom_splitter.setStretchFactor(1, 2)
-
         main_layout.addWidget(previews_group)
-        main_layout.addWidget(bottom_splitter)
+        main_layout.addWidget(controls_container)
+        main_layout.addWidget(log_container)
 
         # Initial state
         self.update_mode_controls()
-        self.update_advanced_summary_label()
         if not self.gfpgan_is_available():
             self.log_box.append("GFPGAN not found (deps\\GFPGAN). Enhancement is disabled.")
         else:
             self.log_box.append("GFPGAN found. Enhancement is available.")
-
-    def update_advanced_summary_label(self):
-        strategy = self.advanced_dialog.strategy_combo.currentText()
-        crop_only = self.advanced_dialog.crop_only_checkbox.isChecked()
-        enhancement_on = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
-        det = self.advanced_dialog.det_threshold_edit.value()
-        face_factor = self.advanced_dialog.face_factor_edit.value()
-        gfpgan_blend = self.advanced_dialog.gfpgan_blend_edit.value()
-        spectral = self.advanced_dialog.spectral_sensitivity_combo.currentText()
-        gaussian = self.advanced_dialog.gaussian_edit.value()
-        identity = self.advanced_dialog.identity_preservation_combo.currentText()
-        tonal = self.advanced_dialog.tonal_transfer_combo.currentText()
-        eye = self.advanced_dialog.eye_preservation_combo.currentText()
-        structure = self.advanced_dialog.structure_matching_combo.currentText()
-        noise_regularize = self.advanced_dialog.noise_regularize_edit.value()
-        lr = self.advanced_dialog.lr_edit.value()
-        camera_lr = self.advanced_dialog.camera_lr_edit.value()
-        mix_start = self.advanced_dialog.mix_layer_start_edit.value()
-        mix_end = self.advanced_dialog.mix_layer_end_edit.value()
-
-        if crop_only:
-            mode_text = "crop-only"
-        else:
-            mode_text = "enhancement on" if enhancement_on else "enhancement off"
-
-        self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity} | tonal {tonal} | eye {eye} | structure {structure} | noise {noise_regularize:.1f} | lr {lr:.4f} | cam_lr {camera_lr:.4f} | mix {mix_start}-{mix_end}"
-        )
 
     # ------------------------------
     # Qt / window events
@@ -634,8 +741,6 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
             self.update_runtime_label()
-
-        self.update_advanced_summary_label()
     def set_controls_for_running(self, is_running):
         self.run_button.setEnabled(not is_running)
         self.cancel_button.setEnabled(is_running)
@@ -832,7 +937,6 @@ class MainWindow(QMainWindow):
 
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
-        self.update_advanced_summary_label()
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -890,7 +994,6 @@ class MainWindow(QMainWindow):
         if dlg.exec() == QDialog.Accepted:
             self.update_mode_controls()
             self.update_runtime_label()
-            self.update_advanced_summary_label()
             self.log_box.append("Advanced settings updated.")
         else:
             dlg.strategy_combo.setCurrentText(old_strategy)
@@ -911,7 +1014,6 @@ class MainWindow(QMainWindow):
             dlg.mix_layer_end_edit.setValue(old_mix_layer_end)
             self.update_mode_controls()
             self.update_runtime_label()
-            self.update_advanced_summary_label()
 
     # ------------------------------
     # Runtime estimation / hardware
@@ -1865,6 +1967,30 @@ class MainWindow(QMainWindow):
         self.process.errorOccurred.connect(self.process_error)
 
         self.process.start(command[0], command[1:])
+
+    def toggle_log_visibility(self):
+        self.log_visible = not self.log_visible
+        self.log_box.setVisible(self.log_visible)
+        self.status_label.setVisible(self.log_visible)
+
+        if self.log_visible:
+            self.toggle_log_button.setText("Hide Log")
+            self.expand_log_button.setEnabled(True)
+        else:
+            self.toggle_log_button.setText("Show Log")
+            self.expand_log_button.setEnabled(False)
+
+    def toggle_log_size(self):
+        self.log_expanded = not self.log_expanded
+
+        if self.log_expanded:
+            self.log_box.setMinimumHeight(360)
+            self.log_box.setMaximumHeight(360)
+            self.expand_log_button.setText("Compact Log")
+        else:
+            self.log_box.setMinimumHeight(180)
+            self.log_box.setMaximumHeight(180)
+            self.expand_log_button.setText("Expand Log")
 
 def main():
     app = QApplication(sys.argv)
