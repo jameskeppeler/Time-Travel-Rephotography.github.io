@@ -177,6 +177,12 @@ class AdvancedSettingsDialog(QDialog):
         self.lr_edit.setDecimals(4)
         self.lr_edit.setValue(0.1)
 
+        self.camera_lr_edit = QDoubleSpinBox()
+        self.camera_lr_edit.setRange(0.0001, 1.0)
+        self.camera_lr_edit.setSingleStep(0.001)
+        self.camera_lr_edit.setDecimals(4)
+        self.camera_lr_edit.setValue(0.01)
+
         form.addRow("Faces to enhance", self.strategy_combo)
         form.addRow("Crop Only", self.crop_only_checkbox)
         form.addRow("Enhancement", self.use_gfpgan_checkbox)
@@ -191,6 +197,7 @@ class AdvancedSettingsDialog(QDialog):
         form.addRow("Structure matching", self.structure_matching_combo)
         form.addRow("Noise regularization", self.noise_regularize_edit)
         form.addRow("Learning rate", self.lr_edit)
+        form.addRow("Camera learning rate", self.camera_lr_edit)
 
         self.update_enhancement_controls()
 
@@ -224,6 +231,7 @@ class AdvancedSettingsDialog(QDialog):
         self.structure_matching_combo.setCurrentText("Default")
         self.noise_regularize_edit.setValue(50000.0)
         self.lr_edit.setValue(0.1)
+        self.camera_lr_edit.setValue(0.01)
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
@@ -299,6 +307,7 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.structure_matching_combo.setCurrentText("Default")
         self.advanced_dialog.noise_regularize_edit.setValue(50000.0)
         self.advanced_dialog.lr_edit.setValue(0.1)
+        self.advanced_dialog.camera_lr_edit.setValue(0.01)
 
         self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
@@ -551,6 +560,7 @@ class MainWindow(QMainWindow):
         structure = self.advanced_dialog.structure_matching_combo.currentText()
         noise_regularize = self.advanced_dialog.noise_regularize_edit.value()
         lr = self.advanced_dialog.lr_edit.value()
+        camera_lr = self.advanced_dialog.camera_lr_edit.value()
 
         if crop_only:
             mode_text = "crop-only"
@@ -558,7 +568,7 @@ class MainWindow(QMainWindow):
             mode_text = "enhancement on" if enhancement_on else "enhancement off"
 
         self.advanced_summary_label.setText(
-            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity} | tonal {tonal} | eye {eye} | structure {structure} | noise {noise_regularize:.1f} | lr {lr:.4f}"
+            f"Current: {strategy} | {mode_text} | det {det:.2f} | face {face_factor:.2f} | blend {gfpgan_blend:.2f} | spectral {spectral} | blur {gaussian:.2f} | identity {identity} | tonal {tonal} | eye {eye} | structure {structure} | noise {noise_regularize:.1f} | lr {lr:.4f} | cam_lr {camera_lr:.4f}"
         )
 
     # ------------------------------
@@ -848,6 +858,7 @@ class MainWindow(QMainWindow):
         old_eye = dlg.eye_preservation_combo.currentText()
         old_structure = dlg.structure_matching_combo.currentText()
         old_lr = dlg.lr_edit.value()
+        old_camera_lr = dlg.camera_lr_edit.value()
         old_strategy = dlg.strategy_combo.currentText()
         old_crop_only = dlg.crop_only_checkbox.isChecked()
         old_use_gfpgan = dlg.use_gfpgan_checkbox.isChecked()
@@ -876,6 +887,7 @@ class MainWindow(QMainWindow):
             dlg.structure_matching_combo.setCurrentText(old_structure)
             dlg.noise_regularize_edit.setValue(old_noise_regularize)
             dlg.lr_edit.setValue(old_lr)
+            dlg.camera_lr_edit.setValue(old_camera_lr)
             self.update_mode_controls()
             self.update_runtime_label()
             self.update_advanced_summary_label()
@@ -1387,6 +1399,7 @@ class MainWindow(QMainWindow):
         gaussian_value = self.advanced_dialog.gaussian_edit.text().strip()
         noise_regularize_value = self.advanced_dialog.noise_regularize_edit.text().strip()
         lr_value = self.advanced_dialog.lr_edit.text().strip()
+        camera_lr_value = self.advanced_dialog.camera_lr_edit.text().strip()
 
         command = [
             "powershell.exe",
@@ -1420,6 +1433,8 @@ class MainWindow(QMainWindow):
             noise_regularize_value,
             "-LR",
             lr_value,
+            "-CameraLR",
+            camera_lr_value,
             "-ResultsRoot",
             results_root,
         ]

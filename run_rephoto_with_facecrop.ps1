@@ -40,7 +40,8 @@
     [double]$Eye = 0.1,
     [double]$Contextual = 0.1,
     [double]$NoiseRegularize = 50000.0,
-    [double]$LR = 0.1
+    [double]$LR = 0.1,
+    [double]$CameraLR = 0.01
 )
 
 $ErrorActionPreference = "Stop"
@@ -436,7 +437,7 @@ try {
             --noise_strength 0.0 `
             --noise_ramp 0.75 `
             --noise_regularize $NoiseRegularize `
-            --camera_lr 0.01 `
+            --camera_lr $CameraLR `
             --log_freq 10 `
             --log_visual_freq 1000 `
             --wplus_step $W1 $W2 `
