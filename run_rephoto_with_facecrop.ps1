@@ -41,7 +41,9 @@
     [double]$Contextual = 0.1,
     [double]$NoiseRegularize = 50000.0,
     [double]$LR = 0.1,
-    [double]$CameraLR = 0.01
+    [double]$CameraLR = 0.01,
+    [int]$MixLayerStart = 10,
+    [int]$MixLayerEnd = 18
 )
 
 $ErrorActionPreference = "Stop"
@@ -422,7 +424,7 @@ try {
             --encoder_size 256 `
             --e4e_ckpt checkpoint/e4e_ffhq_encode.pt `
             --e4e_size 256 `
-            --mix_layer_range 10 18 `
+            --mix_layer_range $MixLayerStart $MixLayerEnd `
             --coarse_min 32 `
             --color_transfer $ColorTransfer `
             --contextual $Contextual `
