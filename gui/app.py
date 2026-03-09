@@ -9,10 +9,11 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QBoxLayout,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -33,6 +34,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSplitter,
     QSizePolicy,
+    QTextBrowser,
     QTextEdit,
     QToolButton,
     QToolTip,
@@ -49,6 +51,7 @@ from PySide6.QtWidgets import (
 DEFAULT_BASIC_ITER_VALUES = [375, 750, 1500, 3000, 6000, 18000]
 DEFAULT_ADVANCED_ITER_VALUES = [750] + list(range(1000, 20001, 1000))
 DEFAULT_ITERATION = 750
+WIDE_LAYOUT_MIN_WIDTH = 1500
 
 # Enhancement / face detection
 DEFAULT_FACE_FACTOR = 0.65
@@ -486,6 +489,270 @@ class MainWindow(QMainWindow):
         row.addStretch()
 
         return label_widget
+
+    def _main_parameters_help_html(self):
+        return """
+<h3>Main Window Parameters</h3>
+<p>
+  This section covers only the primary tuning controls shown on the main form.
+  Runtime/log controls and action buttons are intentionally omitted.
+</p>
+<ul>
+  <li>
+    <b>Photo type / process</b><br/>
+    This is a historical context hint. It helps the app choose a more realistic spectral model for early photographic materials and presentation formats.
+    If you know the process class (for example Daguerreotype, Ambrotype, or early gelatin silver), setting it correctly usually improves tonal behavior more than trying random refinement tweaks.
+  </li>
+  <li>
+    <b>Approximate date</b><br/>
+    Date is used as a second cue for spectral inference and historical rendering assumptions.
+    A rough decade is enough. For many portraits, entering a plausible period (for example 1860s, 1890s, 1910s) helps avoid modern-looking color/contrast biases by steering the degradation model toward era-appropriate sensitivity.
+  </li>
+  <li>
+    <b>Spectral sensitivity</b><br/>
+    This selects the channel-response model used by the historical degradation component.
+    It strongly affects skin/background balance and perceived age of the render. Blue-sensitive and orthochromatic behavior can produce noticeably different facial tonality, so this control has high visual impact even when other settings stay fixed.
+  </li>
+  <li>
+    <b>Quality</b><br/>
+    Quality controls optimization effort (step count/schedule), not a simple post-filter.
+    Higher values generally improve fidelity and identity stability, but with diminishing returns and longer runtime.
+    For iteration speed, start at moderate values, validate crop/spectral behavior, then increase quality only after baseline appearance looks correct.
+  </li>
+</ul>
+"""
+
+    def _advanced_parameters_help_html(self):
+        return """
+<h3>Advanced Settings Parameters</h3>
+<h4>Core Historical</h4>
+<ul>
+  <li>
+    <b>Faces to enhance</b><br/>
+    Chooses whether enhancement targets only the largest detected face or every detected face in frame.
+    <b>largest</b> is safer for portraits and reduces accidental edits to background faces. <b>all</b> is useful for group photos but can introduce inconsistent quality across subjects.
+  </li>
+  <li>
+    <b>Crop Only</b><br/>
+    Stops after detection/cropping so you can validate framing before expensive optimization.
+    This is primarily a diagnostic workflow and is useful when results look wrong due to composition rather than model settings.
+  </li>
+  <li>
+    <b>Enhancement</b><br/>
+    Controls the pre-pass restoration stage (GFPGAN). It can recover structure in damaged/soft faces but may also inject modern priors.
+    If outputs become stylized or over-smoothed, compare runs with enhancement disabled to isolate whether the issue originates before projector optimization.
+  </li>
+  <li>
+    <b>Enhancement blend</b><br/>
+    Sets how strongly restored pixels are blended into the face crop before rephoto.
+    Lower blend preserves more authentic source texture; higher blend can improve damaged regions but risks synthetic facial surfaces.
+    This parameter is often a key lever when balancing realism versus preservation.
+  </li>
+  <li>
+    <b>Face detection sensitivity</b><br/>
+    Higher values are stricter and reduce false detections; lower values are more permissive for difficult photos.
+    If the crop misses a face, lower this slightly. If it picks up incorrect regions, raise it.
+  </li>
+  <li>
+    <b>Face crop expansion</b><br/>
+    Expands context around the detected face box (hairline, jawline, ears, and border context).
+    Too tight can cause identity/style drift; too loose may introduce distracting background influence.
+    This is one of the highest-impact controls for natural-looking output and should be stabilized early.
+  </li>
+  <li>
+    <b>Gaussian blur</b><br/>
+    Models historical softness in the degradation pipeline.
+    Moderate blur can better match period optics and film characteristics; too much can flatten facial detail and make identity weaker.
+  </li>
+</ul>
+<h4>Refinement</h4>
+<ul>
+  <li>
+    <b>Identity preservation</b><br/>
+    Increases pressure to keep reconstructed facial identity consistent with the source portrait.
+    Higher settings help protect facial geometry, but can also resist useful corrections when the source is heavily degraded.
+  </li>
+  <li>
+    <b>Tonal transfer</b><br/>
+    Governs how strongly tonal relationships from the source are preserved.
+    This is important for period mood and lighting continuity, but overly strong transfer can lock in undesirable exposure or contrast artifacts.
+  </li>
+  <li>
+    <b>Eye preservation</b><br/>
+    Adds extra emphasis on eye-region stability (gaze, lids, and local structure).
+    Useful when identity drift appears mostly in eyes. Excessive emphasis can occasionally overconstrain expression.
+  </li>
+  <li>
+    <b>Structure matching</b><br/>
+    Controls broader perceptual structure constraints beyond exact pixel agreement.
+    Increasing it can preserve composition and facial arrangement, but if too strong it may limit creative recovery from noisy artifacts.
+  </li>
+  <li>
+    <b>VGG appearance matching</b><br/>
+    Applies additional perceptual appearance guidance.
+    Useful for texture/style coherence, but can sometimes introduce color/style drift if set too aggressively for historical inputs.
+  </li>
+</ul>
+<h4>Experimental</h4>
+<ul>
+  <li>
+    <b>Noise regularization</b><br/>
+    Penalizes optimization shortcuts that hide artifacts in noise maps.
+    Raising it usually improves stability and suppresses synthetic texture speckle, but extremely high values may reduce fine detail recovery.
+  </li>
+  <li>
+    <b>Learning rate</b><br/>
+    Main optimizer step size for latent refinement.
+    Higher values converge faster but can overshoot and destabilize; lower values are steadier but slower.
+  </li>
+  <li>
+    <b>Camera learning rate</b><br/>
+    Separate step size for degradation/camera parameter optimization.
+    This affects how quickly viewpoint and imaging-model terms adapt relative to face latent updates.
+  </li>
+  <li>
+    <b>Mix layer start / end</b><br/>
+    Defines the latent layer span used during initialization mixing between encoders.
+    Lower layers affect coarse structure; higher layers affect finer style/detail. Narrow or shifted ranges can materially change identity/style balance.
+  </li>
+</ul>
+"""
+
+    def show_parameter_help_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Parameter Help")
+        dialog.setMinimumSize(860, 620)
+
+        layout = QVBoxLayout(dialog)
+        guide = QTextBrowser()
+        guide.setOpenExternalLinks(True)
+        guide.setHtml(
+            self._main_parameters_help_html()
+            + "<hr/>"
+            + self._advanced_parameters_help_html()
+        )
+        layout.addWidget(guide)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
+
+    def show_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("About Time-Travel Rephotography")
+        dialog.setMinimumSize(720, 520)
+
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setHtml(
+            """
+<h2>Time-Travel Rephotography</h2>
+<p>Local desktop workflow for historical portrait restoration and rephotography.</p>
+<p><b>Original Project Website:</b> <a href="https://time-travel-rephotography.github.io/">time-travel-rephotography.github.io</a></p>
+<p><b>Original Upstream Repository:</b> <a href="https://github.com/caojiezhang/Time-Travel-Rephotography">github.com/caojiezhang/Time-Travel-Rephotography</a></p>
+<p><b>Paper:</b> <a href="https://arxiv.org/abs/2012.12261">Time-Travel Rephotography (SIGGRAPH Asia 2021)</a></p>
+<h3>Major Open-Source Projects Used</h3>
+<ul>
+  <li><a href="https://github.com/NVlabs/stylegan2">NVIDIA StyleGAN2</a></li>
+  <li><a href="https://github.com/omertov/encoder4editing">encoder4editing (e4e)</a></li>
+  <li><a href="https://github.com/TencentARC/GFPGAN">GFPGAN</a></li>
+  <li><a href="https://github.com/xinntao/facexlib">facexlib</a></li>
+  <li><a href="https://github.com/zllrunning/face-parsing.PyTorch">face-parsing.PyTorch</a></li>
+  <li><a href="https://doc.qt.io/qtforpython/">PySide6 / Qt for Python</a></li>
+</ul>
+<h3>Notes</h3>
+<ul>
+  <li>Outputs are highly sensitive to crop framing, spectral mode, and refinement settings.</li>
+  <li>Runtime depends on quality preset, GPU class, and enhancement options.</li>
+  <li>Use Help -> Parameter Guide for control-by-control explanations.</li>
+</ul>
+<p>Licensing files in this repo: <code>LICENSE</code>, <code>LICENSE-NVIDIA</code>, <code>LICENSE-STYLEGAN2</code>.</p>
+"""
+        )
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
+
+    def open_results_root_folder(self):
+        results_path = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+        try:
+            results_path.mkdir(parents=True, exist_ok=True)
+            os.startfile(str(results_path.resolve()))
+        except Exception as e:
+            self.log_box.append(f"Could not open results folder: {e}")
+
+    def open_project_readme(self):
+        readme_path = self.repo_root / "README.md"
+        if not readme_path.exists():
+            self.log_box.append("README.md not found.")
+            return
+        try:
+            os.startfile(str(readme_path.resolve()))
+        except Exception as e:
+            self.log_box.append(f"Could not open README.md: {e}")
+
+    def setup_menu_bar(self):
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("&File")
+        open_image_action = QAction("Open Image...", self)
+        open_image_action.setShortcut("Ctrl+O")
+        open_image_action.triggered.connect(self.browse_for_image)
+        file_menu.addAction(open_image_action)
+
+        open_results_action = QAction("Open Results Folder", self)
+        open_results_action.triggered.connect(self.open_results_root_folder)
+        file_menu.addAction(open_results_action)
+        file_menu.addSeparator()
+
+        exit_action = QAction("Exit", self)
+        exit_action.setShortcut("Ctrl+Q")
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+
+        view_menu = menu_bar.addMenu("&View")
+        self.menu_toggle_log_action = QAction("", self)
+        self.menu_toggle_log_action.setShortcut("Ctrl+L")
+        self.menu_toggle_log_action.triggered.connect(self.toggle_log_visibility)
+        view_menu.addAction(self.menu_toggle_log_action)
+
+        self.menu_expand_log_action = QAction("", self)
+        self.menu_expand_log_action.setShortcut("Ctrl+Shift+L")
+        self.menu_expand_log_action.triggered.connect(self.toggle_log_size)
+        view_menu.addAction(self.menu_expand_log_action)
+
+        help_menu = menu_bar.addMenu("&Help")
+        parameter_help_action = QAction("Parameter Guide", self)
+        parameter_help_action.setShortcut("F1")
+        parameter_help_action.triggered.connect(self.show_parameter_help_dialog)
+        help_menu.addAction(parameter_help_action)
+
+        readme_action = QAction("Open Project README", self)
+        readme_action.triggered.connect(self.open_project_readme)
+        help_menu.addAction(readme_action)
+
+        help_menu.addSeparator()
+        about_action = QAction("About", self)
+        about_action.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(about_action)
+
+        self.update_view_menu_actions()
+
+    def update_view_menu_actions(self):
+        if hasattr(self, "menu_toggle_log_action"):
+            self.menu_toggle_log_action.setText("Hide Log" if self.log_visible else "Show Log")
+        if hasattr(self, "menu_expand_log_action"):
+            self.menu_expand_log_action.setText("Compact Log" if self.log_expanded else "Expand Log")
+            self.menu_expand_log_action.setEnabled(self.log_visible)
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Time-Travel Rephotography")
@@ -550,6 +817,7 @@ class MainWindow(QMainWindow):
 
         # --- Main settings ---
         form_layout = QFormLayout()
+        self.form_layout = form_layout
         form_layout.setVerticalSpacing(6)
         form_layout.setHorizontalSpacing(10)
         form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -722,14 +990,13 @@ class MainWindow(QMainWindow):
 
         self.update_iteration_label()
 
-        main_layout.addLayout(form_layout)
-
         # --- Progress row ---
         progress_row = QHBoxLayout()
         progress_row.setContentsMargins(0, 0, 0, 0)
         progress_row.setSpacing(4)
 
         progress_bars_layout = QVBoxLayout()
+        self.progress_bars_layout = progress_bars_layout
         progress_bars_layout.setContentsMargins(0, 0, 0, 0)
         progress_bars_layout.setSpacing(1)
 
@@ -765,7 +1032,6 @@ class MainWindow(QMainWindow):
         progress_widget = QWidget()
         progress_widget.setLayout(progress_row)
         progress_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
-        main_layout.addWidget(progress_widget)
 
         self._elapsed_timer = QTimer(self)
         self._elapsed_timer.setInterval(500)
@@ -774,6 +1040,7 @@ class MainWindow(QMainWindow):
         # --- Outputs (Results only) ---
         outputs_group = QGroupBox("Outputs")
         outputs_layout = QFormLayout()
+        self.outputs_layout = outputs_layout
         outputs_layout.setVerticalSpacing(3)
         outputs_layout.setContentsMargins(6, 4, 6, 3)
         outputs_group.setLayout(outputs_layout)
@@ -791,8 +1058,6 @@ class MainWindow(QMainWindow):
         results_widget = QWidget()
         results_widget.setLayout(results_row)
         outputs_layout.addRow("Results folder", results_widget)
-
-        main_layout.addWidget(outputs_group)
 
         # --- Buttons ---
         button_row = QHBoxLayout()
@@ -932,34 +1197,28 @@ class MainWindow(QMainWindow):
         previews_layout.addWidget(input_group)
         previews_layout.addWidget(result_group)
 
-        # --- Build clean main layout in explicit order ---
-        # (Clear and rebuild to avoid the old reordering hack)
-        
-        # Save references to widgets that were already added
-        # Title and input are already in main_layout, so we clear and rebuild from scratch
-        
-        # Clear main_layout but keep scroll_area structure intact
-        while main_layout.count() > 0:
-            main_layout.takeAt(0)
-        
-        # Rebuild in correct order
-        main_layout.addWidget(previews_group)
-        
         # Settings section with input image and form layout
         settings_container = QWidget()
         settings_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         settings_layout = QVBoxLayout()
+        self.settings_layout = settings_layout
         settings_layout.setSpacing(6)
         settings_layout.setContentsMargins(0, 0, 0, 0)
         settings_container.setLayout(settings_layout)
         settings_layout.addWidget(QLabel("Input Image"))
         settings_layout.addLayout(input_row)
         settings_layout.addLayout(form_layout)
-        main_layout.addWidget(settings_container)
-        
-        main_layout.addWidget(progress_widget)
-        main_layout.addWidget(outputs_group)
-        main_layout.addLayout(button_row)
+
+        self.controls_container = QWidget()
+        controls_layout = QVBoxLayout()
+        self.controls_layout = controls_layout
+        controls_layout.setSpacing(8)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        self.controls_container.setLayout(controls_layout)
+        controls_layout.addWidget(settings_container)
+        controls_layout.addWidget(progress_widget)
+        controls_layout.addWidget(outputs_group)
+        controls_layout.addLayout(button_row)
 
         # --- Log container ---
         self.log_container = QWidget()
@@ -994,8 +1253,20 @@ class MainWindow(QMainWindow):
 
         self.expand_log_button.setEnabled(self.log_visible)
         self.log_container.setVisible(self.log_visible)
+        controls_layout.addWidget(self.log_container)
+        controls_layout.addStretch(1)
 
-        main_layout.addWidget(self.log_container)
+        self.setup_menu_bar()
+
+        # --- Responsive page layout ---
+        self.previews_group = previews_group
+        self.previews_split_layout = previews_layout
+        self.content_layout = QBoxLayout(QBoxLayout.TopToBottom)
+        self.content_layout.setContentsMargins(0, 0, 0, 0)
+        self.content_layout.setSpacing(8)
+        main_layout.addLayout(self.content_layout)
+        self._wide_layout_active = None
+        self.apply_responsive_layout(force=True)
 
         # Initial state
         self.update_mode_controls()
@@ -1009,9 +1280,93 @@ class MainWindow(QMainWindow):
     # ------------------------------
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        self.apply_responsive_layout()
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
         self.position_result_stage_overlay()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.WindowStateChange:
+            QTimer.singleShot(0, self.apply_responsive_layout)
+
+    def apply_responsive_layout(self, force=False):
+        if not hasattr(self, "content_layout"):
+            return
+
+        use_wide_layout = self.isFullScreen() or self.width() >= WIDE_LAYOUT_MIN_WIDTH
+        if not force and self._wide_layout_active == use_wide_layout:
+            return
+        self._wide_layout_active = use_wide_layout
+
+        while self.content_layout.count() > 0:
+            self.content_layout.takeAt(0)
+
+        if use_wide_layout:
+            preview_side = self._compute_wide_preview_side()
+            preview_pane_width = preview_side + 56
+            preview_pane_height = (2 * preview_side) + 112
+
+            self.content_layout.setDirection(QBoxLayout.LeftToRight)
+            self.previews_split_layout.setDirection(QBoxLayout.TopToBottom)
+            self.input_preview_label.setFixedSize(preview_side, preview_side)
+            self.input_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.result_preview_label.setFixedSize(preview_side, preview_side)
+            self.result_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.controls_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
+            self.previews_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
+            self.previews_group.setMinimumWidth(preview_pane_width)
+            self.previews_group.setMaximumWidth(preview_pane_width)
+            self.previews_group.setMinimumHeight(preview_pane_height)
+            self.previews_group.setMaximumHeight(preview_pane_height)
+            self.content_layout.addWidget(self.controls_container, 6, Qt.AlignTop)
+            self.content_layout.addWidget(self.previews_group, 4, Qt.AlignTop)
+        else:
+            self.content_layout.setDirection(QBoxLayout.TopToBottom)
+            self.previews_split_layout.setDirection(QBoxLayout.LeftToRight)
+            self.input_preview_label.setMinimumWidth(0)
+            self.input_preview_label.setMaximumWidth(16777215)
+            self.input_preview_label.setFixedHeight(300)
+            self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.result_preview_label.setMinimumWidth(0)
+            self.result_preview_label.setMaximumWidth(16777215)
+            self.result_preview_label.setFixedHeight(300)
+            self.result_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.controls_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.previews_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.previews_group.setMinimumWidth(0)
+            self.previews_group.setMaximumWidth(16777215)
+            self.previews_group.setMinimumHeight(0)
+            self.previews_group.setMaximumHeight(16777215)
+            self.content_layout.addWidget(self.previews_group, 0)
+            self.content_layout.addWidget(self.controls_container, 0)
+
+        self._apply_mode_layout_profile(use_wide_layout)
+        self.refresh_input_preview_scale()
+        self.refresh_result_preview_scale()
+
+    def _compute_wide_preview_side(self):
+        # Keep square previews while constraining right pane height and width in wide mode.
+        side_by_height = int((self.height() - 280) / 2)
+        side_by_width = int((self.width() * 0.38) - 56)
+        side = min(side_by_height, side_by_width)
+        return max(220, min(380, side))
+
+    def _apply_mode_layout_profile(self, use_wide_layout):
+        if use_wide_layout:
+            self.controls_layout.setSpacing(6)
+            self.settings_layout.setSpacing(4)
+            self.form_layout.setVerticalSpacing(5)
+            self.progress_bars_layout.setSpacing(1)
+            self.outputs_layout.setVerticalSpacing(2)
+            self.outputs_layout.setContentsMargins(6, 3, 6, 3)
+        else:
+            self.controls_layout.setSpacing(8)
+            self.settings_layout.setSpacing(6)
+            self.form_layout.setVerticalSpacing(6)
+            self.progress_bars_layout.setSpacing(1)
+            self.outputs_layout.setVerticalSpacing(3)
+            self.outputs_layout.setContentsMargins(6, 4, 6, 3)
 
     # ------------------------------
     # UI state / control updates
@@ -2679,6 +3034,7 @@ class MainWindow(QMainWindow):
         else:
             self.toggle_log_button.setText("Show Log")
             self.expand_log_button.setEnabled(False)
+        self.update_view_menu_actions()
 
     def toggle_log_size(self):
         self.log_expanded = not self.log_expanded
@@ -2691,6 +3047,7 @@ class MainWindow(QMainWindow):
             self.log_box.setMinimumHeight(150)
             self.log_box.setMaximumHeight(150)
             self.expand_log_button.setText("Expand Log")
+        self.update_view_menu_actions()
 
 def main():
     app = QApplication(sys.argv)
