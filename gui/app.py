@@ -1,4 +1,5 @@
-﻿import os
+import os
+import re
 import sys
 import ctypes
 import platform
@@ -7,7 +8,7 @@ import shutil
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt, QTimer
+from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -32,9 +33,74 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTextEdit,
     QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
+
+
+# ============================================================================
+# SHARED DEFAULTS & CONFIGURATION CONSTANTS
+# ============================================================================
+
+# Quality/iteration presets
+DEFAULT_BASIC_ITER_VALUES = [375, 750, 1500, 3000, 6000, 18000]
+DEFAULT_ADVANCED_ITER_VALUES = [750] + list(range(1000, 20001, 1000))
+DEFAULT_ITERATION = 750
+
+# Enhancement / face detection
+DEFAULT_FACE_FACTOR = 0.65
+DEFAULT_GFPGAN_BLEND = 0.45
+DEFAULT_DET_THRESHOLD = 0.90
+
+# ML parameters
+DEFAULT_GAUSSIAN = 0.75
+DEFAULT_NOISE_REGULARIZE = 50000.0
+DEFAULT_LR = 0.1
+DEFAULT_CAMERA_LR = 0.01
+DEFAULT_MIX_LAYER_START = 10
+DEFAULT_MIX_LAYER_END = 18
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+
+# Hot-path regexes for stdout progress parsing
+CROPPED_FACE_COUNT_RE = re.compile(r"^Cropped face count:\s*(\d+)\s*$")
+ITER_PROGRESS_RE = re.compile(r"(\d+)/(\d+)")
+YEAR_RE = re.compile(r"\b(\d{4})")
+
+# ============================================================================
+# INSTANT TOOLTIP BUTTON (for minimal responsiveness)
+# ============================================================================
+
+class InstantToolButton(QToolButton):
+    """QToolButton that shows tooltip immediately on hover without delay."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
+
+    def _show_tooltip(self):
+        if self.toolTip() and self.isEnabled() and self.isVisible():
+            pos = self.mapToGlobal(self.rect().bottomLeft())
+            QToolTip.showText(pos, self.toolTip(), self, self.rect())
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        self._show_tooltip()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self._show_tooltip()
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def event(self, event):
+        if event.type() == QEvent.ToolTip:
+            self._show_tooltip()
+            event.accept()
+            return True
+        return super().event(event)
 
 
 class InputDropLabel(QLabel):
@@ -103,14 +169,15 @@ class AdvancedSettingsDialog(QDialog):
         label_widget = QWidget()
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        row.setSpacing(3)
         label_widget.setLayout(row)
 
         label = QLabel(label_text)
 
-        info_button = QToolButton()
+        info_button = InstantToolButton()
         info_button.setText("ⓘ")
         info_button.setAutoRaise(True)
+        info_button.setFixedSize(16, 16)
         info_button.setToolTip(tooltip_text)
         info_button.setCursor(Qt.PointingHandCursor)
 
@@ -165,7 +232,7 @@ class AdvancedSettingsDialog(QDialog):
         self.face_factor_edit.setRange(0.10, 2.00)
         self.face_factor_edit.setSingleStep(0.01)
         self.face_factor_edit.setDecimals(2)
-        self.face_factor_edit.setValue(0.50)
+        self.face_factor_edit.setValue(DEFAULT_FACE_FACTOR)
 
         self.gfpgan_blend_edit = QDoubleSpinBox()
         self.gfpgan_blend_edit.setRange(0.0, 1.0)
@@ -180,20 +247,24 @@ class AdvancedSettingsDialog(QDialog):
         self.gaussian_edit.setValue(0.75)
 
         self.identity_preservation_combo = QComboBox()
-        self.identity_preservation_combo.addItems(["Lower", "Default", "Higher"])
+        self.identity_preservation_combo.addItems(["Off", "Lower", "Default", "Higher"])
         self.identity_preservation_combo.setCurrentText("Default")
 
         self.tonal_transfer_combo = QComboBox()
-        self.tonal_transfer_combo.addItems(["Lower", "Default", "Higher"])
+        self.tonal_transfer_combo.addItems(["Off", "Lower", "Default", "Higher"])
         self.tonal_transfer_combo.setCurrentText("Default")
 
         self.eye_preservation_combo = QComboBox()
-        self.eye_preservation_combo.addItems(["Lower", "Default", "Higher"])
+        self.eye_preservation_combo.addItems(["Off", "Lower", "Default", "Higher"])
         self.eye_preservation_combo.setCurrentText("Default")
 
         self.structure_matching_combo = QComboBox()
-        self.structure_matching_combo.addItems(["Lower", "Default", "Higher"])
+        self.structure_matching_combo.addItems(["Off", "Lower", "Default", "Higher"])
         self.structure_matching_combo.setCurrentText("Default")
+
+        self.vgg_appearance_combo = QComboBox()
+        self.vgg_appearance_combo.addItems(["Off", "Lower", "Default", "Higher"])
+        self.vgg_appearance_combo.setCurrentText("Default")
 
         self.noise_regularize_edit = QDoubleSpinBox()
         self.noise_regularize_edit.setRange(0.0, 1000000.0)
@@ -300,6 +371,13 @@ class AdvancedSettingsDialog(QDialog):
             ),
             self.structure_matching_combo,
         )
+        refine_form.addRow(
+            self.make_label_with_info(
+                "VGG appearance matching",
+                "Controls VGG perceptual appearance loss strength. Lower/off can reduce stylistic color drift from model priors."
+            ),
+            self.vgg_appearance_combo,
+        )
 
         exp_form.addRow(
             self.make_label_with_info(
@@ -358,19 +436,20 @@ class AdvancedSettingsDialog(QDialog):
         self.strategy_combo.setCurrentText("largest")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
-        self.gfpgan_blend_edit.setValue(0.45)
-        self.det_threshold_edit.setValue(0.90)
-        self.face_factor_edit.setValue(0.50)
-        self.gaussian_edit.setValue(0.75)
+        self.gfpgan_blend_edit.setValue(DEFAULT_GFPGAN_BLEND)
+        self.det_threshold_edit.setValue(DEFAULT_DET_THRESHOLD)
+        self.face_factor_edit.setValue(DEFAULT_FACE_FACTOR)
+        self.gaussian_edit.setValue(DEFAULT_GAUSSIAN)
         self.identity_preservation_combo.setCurrentText("Default")
         self.tonal_transfer_combo.setCurrentText("Default")
         self.eye_preservation_combo.setCurrentText("Default")
         self.structure_matching_combo.setCurrentText("Default")
-        self.noise_regularize_edit.setValue(50000.0)
-        self.lr_edit.setValue(0.1)
-        self.camera_lr_edit.setValue(0.01)
-        self.mix_layer_start_edit.setValue(10)
-        self.mix_layer_end_edit.setValue(18)
+        self.vgg_appearance_combo.setCurrentText("Default")
+        self.noise_regularize_edit.setValue(DEFAULT_NOISE_REGULARIZE)
+        self.lr_edit.setValue(DEFAULT_LR)
+        self.camera_lr_edit.setValue(DEFAULT_CAMERA_LR)
+        self.mix_layer_start_edit.setValue(DEFAULT_MIX_LAYER_START)
+        self.mix_layer_end_edit.setValue(DEFAULT_MIX_LAYER_END)
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
@@ -381,14 +460,15 @@ class MainWindow(QMainWindow):
         label_widget = QWidget()
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(4)
+        row.setSpacing(3)
         label_widget.setLayout(row)
 
         label = QLabel(label_text)
 
-        info_button = QToolButton()
+        info_button = InstantToolButton()
         info_button.setText("ⓘ")
         info_button.setAutoRaise(True)
+        info_button.setFixedSize(16, 16)
         info_button.setToolTip(tooltip_text)
         info_button.setCursor(Qt.PointingHandCursor)
 
@@ -418,8 +498,19 @@ class MainWindow(QMainWindow):
         # run phase state for gating progress bars
         self.current_run_phase = "idle"  # idle, preprocess, rephoto, done, cancelled, crop_only_done
 
+        # Path tracking from stdout to avoid recursive folder scans
+        self.current_crop_output_dir = None
+        self.current_gfpgan_output_dir = None
+        self.current_blended_faces_dir = None
+        self.current_results_dir = None
+        self.current_manifest_path = None
+
+        # Stage timing instrumentation
+        self.stage_started_at = {}  # {"crop": timestamp, "enhance": timestamp, ...}
+        self.stage_elapsed = {}    # {"crop": seconds, "enhance": seconds, ...}
+
         self.log_expanded = False
-        self.log_visible = True
+        self.log_visible = False
 
         # Preview state
         self.input_pixmap = None
@@ -434,10 +525,8 @@ class MainWindow(QMainWindow):
         scroll_area.setWidget(central)
 
         main_layout = QVBoxLayout()
+        main_layout.setSpacing(5)
         central.setLayout(main_layout)
-
-        title_label = QLabel("Time-Travel Rephotography")
-        main_layout.addWidget(title_label)
 
         # --- Input image ---
         input_row = QHBoxLayout()
@@ -451,19 +540,21 @@ class MainWindow(QMainWindow):
 
         # --- Main settings ---
         form_layout = QFormLayout()
+        form_layout.setVerticalSpacing(8)
 
         self.advanced_dialog = AdvancedSettingsDialog(self)
         self.advanced_dialog.strategy_combo.setCurrentText("largest")
         self.advanced_dialog.crop_only_checkbox.setChecked(False)
         self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
         self.advanced_dialog.det_threshold_edit.setValue(0.90)
-        self.advanced_dialog.face_factor_edit.setValue(0.50)
+        self.advanced_dialog.face_factor_edit.setValue(DEFAULT_FACE_FACTOR)
         self.advanced_dialog.gfpgan_blend_edit.setValue(0.45)
         self.advanced_dialog.gaussian_edit.setValue(0.75)
         self.advanced_dialog.identity_preservation_combo.setCurrentText("Default")
         self.advanced_dialog.tonal_transfer_combo.setCurrentText("Default")
         self.advanced_dialog.eye_preservation_combo.setCurrentText("Default")
         self.advanced_dialog.structure_matching_combo.setCurrentText("Default")
+        self.advanced_dialog.vgg_appearance_combo.setCurrentText("Default")
         self.advanced_dialog.noise_regularize_edit.setValue(50000.0)
         self.advanced_dialog.lr_edit.setValue(0.1)
         self.advanced_dialog.camera_lr_edit.setValue(0.01)
@@ -475,8 +566,8 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
 
         # --- Iteration slider ---
-        self.basic_iter_values = [375, 750, 1500, 3000, 6000, 18000]
-        self.advanced_iter_values = [750] + list(range(1000, 20001, 1000))
+        self.basic_iter_values = DEFAULT_BASIC_ITER_VALUES
+        self.advanced_iter_values = DEFAULT_ADVANCED_ITER_VALUES
         self.iter_values = self.basic_iter_values
 
         self.iter_slider = QSlider(Qt.Horizontal)
@@ -499,7 +590,7 @@ class MainWindow(QMainWindow):
         self.quality_default_label = QLabel("(default)")
         self.quality_default_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
 
-        self.quality_info = QToolButton()
+        self.quality_info = InstantToolButton()
         self.quality_info.setText("ⓘ")
         self.quality_info.setAutoRaise(True)
         self.quality_info.setCursor(Qt.PointingHandCursor)
@@ -511,10 +602,11 @@ class MainWindow(QMainWindow):
         )
 
         self.runtime_label = QLabel("")
-        self.runtime_info = QToolButton()
+        self.runtime_info = InstantToolButton()
         self.runtime_info.setText("ⓘ")
         self.runtime_info.setAutoRaise(True)
         self.runtime_info.setCursor(Qt.PointingHandCursor)
+        self.runtime_info.setFixedSize(16, 16)
         self.runtime_info.setToolTip("Estimated processing time is approximate.")
 
         self.runtime_prefix_label = QLabel("Est.")
@@ -538,7 +630,7 @@ class MainWindow(QMainWindow):
 
         self.quality_widget = QWidget()
         quality_layout = QVBoxLayout()
-        quality_layout.setContentsMargins(0, 2, 0, 2)
+        quality_layout.setContentsMargins(0, 3, 0, 2)
         quality_layout.setSpacing(2)
         self.quality_widget.setLayout(quality_layout)
 
@@ -575,7 +667,7 @@ class MainWindow(QMainWindow):
 
         form_layout.addRow(
             self.make_label_with_info(
-                "Photographic process / photo type",
+                "Photo type / process",
                 "Historical process or presentation format hint. Used to help infer spectral sensitivity automatically."
             ),
             self.photo_type_combo,
@@ -621,6 +713,8 @@ class MainWindow(QMainWindow):
 
         # --- Progress row ---
         progress_section = QVBoxLayout()
+        progress_section.setContentsMargins(0, 0, 0, 0)
+        progress_section.setSpacing(4)
 
         self.preprocess_progress_label = QLabel("Preprocessing")
         self.rephoto_progress_label = QLabel("Processing")
@@ -628,6 +722,8 @@ class MainWindow(QMainWindow):
         self.rephoto_progress_label.setFixedWidth(110)
 
         preprocess_row = QHBoxLayout()
+        preprocess_row.setContentsMargins(0, 0, 0, 0)
+        preprocess_row.setSpacing(6)
         preprocess_row.addWidget(self.preprocess_progress_label)
         self.preprocess_progress_bar = QProgressBar()
         self.preprocess_progress_bar.setRange(0, 100)
@@ -640,14 +736,21 @@ class MainWindow(QMainWindow):
         preprocess_row.addWidget(self.preprocess_progress_bar, 1)
 
         rephoto_row = QHBoxLayout()
+        rephoto_row.setContentsMargins(0, 0, 0, 0)
+        rephoto_row.setSpacing(6)
         rephoto_row.addWidget(self.rephoto_progress_label)
-        rephoto_row.addSpacing(12)
-        # Add estimated time on left side
-        rephoto_row.addWidget(self.runtime_prefix_label)
-        rephoto_row.addWidget(self.runtime_label)
-        rephoto_row.addWidget(self.runtime_info)
-        rephoto_row.addSpacing(12)
-        # Progress bar centered and stretched
+
+        runtime_cluster = QWidget()
+        runtime_cluster_layout = QHBoxLayout()
+        runtime_cluster_layout.setContentsMargins(0, 0, 0, 0)
+        runtime_cluster_layout.setSpacing(3)
+        runtime_cluster.setLayout(runtime_cluster_layout)
+        runtime_cluster_layout.addWidget(self.runtime_prefix_label)
+        runtime_cluster_layout.addWidget(self.runtime_label)
+        runtime_cluster_layout.addWidget(self.runtime_info)
+
+        rephoto_row.addWidget(runtime_cluster, 0, Qt.AlignVCenter)
+
         self.rephoto_progress_bar = QProgressBar()
         self.rephoto_progress_bar.setRange(0, 100)
         self.rephoto_progress_bar.setValue(0)
@@ -657,9 +760,7 @@ class MainWindow(QMainWindow):
         self.rephoto_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
         self.rephoto_progress_bar.setAutoFillBackground(True)
         rephoto_row.addWidget(self.rephoto_progress_bar, 1)
-        rephoto_row.addSpacing(12)
-        # Elapsed time on right side
-        rephoto_row.addWidget(self.elapsed_label)
+        rephoto_row.addWidget(self.elapsed_label, 0, Qt.AlignVCenter)
 
         progress_section.addLayout(preprocess_row)
         progress_section.addLayout(rephoto_row)
@@ -675,9 +776,13 @@ class MainWindow(QMainWindow):
         # --- Outputs (Results only) ---
         outputs_group = QGroupBox("Outputs")
         outputs_layout = QFormLayout()
+        outputs_layout.setVerticalSpacing(2)
+        outputs_layout.setContentsMargins(6, 2, 6, 2)
         outputs_group.setLayout(outputs_layout)
 
         results_row = QHBoxLayout()
+        results_row.setContentsMargins(0, 0, 0, 0)
+        results_row.setSpacing(6)
         self.results_root_edit = QLineEdit(str(self.repo_root / "results"))
         self.results_browse_button = QPushButton("Browse...")
         self.results_browse_button.clicked.connect(self.browse_results_root)
@@ -695,6 +800,11 @@ class MainWindow(QMainWindow):
 
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.run_wrapper)
+        self.run_button.setMinimumHeight(36)
+        self.run_button.setStyleSheet(
+            "QPushButton { font-weight: bold; background-color: #1a73e8; color: white; border: none; border-radius: 4px; } "
+            "QPushButton:hover { background-color: #1455c0; } QPushButton:pressed { background-color: #0d47a1; }"
+        )
 
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel_run)
@@ -722,7 +832,7 @@ class MainWindow(QMainWindow):
 
         self.input_preview_label = InputDropLabel(self)
         self.input_preview_label.setAlignment(Qt.AlignCenter)
-        self.input_preview_label.setMinimumHeight(340)
+        self.input_preview_label.setMinimumHeight(270)
         self.input_preview_label.setStyleSheet("border: 1px solid #999;")
         input_layout.addWidget(self.input_preview_label)
 
@@ -732,7 +842,7 @@ class MainWindow(QMainWindow):
 
         self.result_preview_label = QLabel("No result image yet.")
         self.result_preview_label.setAlignment(Qt.AlignCenter)
-        self.result_preview_label.setMinimumHeight(340)
+        self.result_preview_label.setMinimumHeight(270)
         self.result_preview_label.setStyleSheet("border: 1px solid #999;")
         result_layout.addWidget(self.result_preview_label)
 
@@ -770,12 +880,13 @@ class MainWindow(QMainWindow):
             main_layout.takeAt(0)
         
         # Rebuild in correct order
-        main_layout.addWidget(title_label)
         main_layout.addWidget(previews_group)
         
         # Settings section with input image and form layout
         settings_container = QWidget()
         settings_layout = QVBoxLayout()
+        settings_layout.setSpacing(8)
+        settings_layout.setContentsMargins(0, 0, 0, 0)
         settings_container.setLayout(settings_layout)
         settings_layout.addWidget(QLabel("Input Image"))
         settings_layout.addLayout(input_row)
@@ -795,7 +906,7 @@ class MainWindow(QMainWindow):
         log_header_row.addWidget(QLabel("Log Output"))
         log_header_row.addStretch()
         self.expand_log_button = QPushButton("Expand Log")
-        self.toggle_log_button = QPushButton("Hide Log")
+        self.toggle_log_button = QPushButton("Hide Log" if self.log_visible else "Show Log")
         log_header_row.addWidget(self.expand_log_button)
         log_header_row.addWidget(self.toggle_log_button)
 
@@ -803,8 +914,8 @@ class MainWindow(QMainWindow):
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMinimumHeight(180)
-        self.log_box.setMaximumHeight(180)
+        self.log_box.setMinimumHeight(150)
+        self.log_box.setMaximumHeight(150)
         self.log_box.append("GUI loaded successfully.")
         log_layout.addWidget(self.log_box)
 
@@ -813,6 +924,10 @@ class MainWindow(QMainWindow):
 
         self.expand_log_button.clicked.connect(self.toggle_log_size)
         self.toggle_log_button.clicked.connect(self.toggle_log_visibility)
+
+        self.log_box.setVisible(self.log_visible)
+        self.status_label.setVisible(self.log_visible)
+        self.expand_log_button.setEnabled(self.log_visible)
 
         main_layout.addWidget(log_container)
 
@@ -935,8 +1050,8 @@ class MainWindow(QMainWindow):
     def update_iteration_label(self):
         v = self.iter_values[self.iter_slider.value()]
         self.quality_value_label.setText(str(v))
-        # Show default notation only if value is 750
-        if v == 750:
+        # Show default notation only if value matches DEFAULT_ITERATION
+        if v == DEFAULT_ITERATION:
             self.quality_default_label.setText("(default)")
             self.quality_default_label.setVisible(True)
         else:
@@ -952,7 +1067,7 @@ class MainWindow(QMainWindow):
             return None
 
         # Check for 4-digit year
-        m = __import__("re").search(r"\b(\d{4})", text)
+        m = YEAR_RE.search(text)
         if m:
             year = int(m.group(1))
             # If pattern like "1890s", convert to midpoint
@@ -1069,6 +1184,35 @@ class MainWindow(QMainWindow):
     def update_progress_from_line(self, line: str):
         s = (line or "").strip()
 
+        # === Path tracking from stdout ===
+        if "Crop output dir:" in s:
+            self.current_crop_output_dir = s.split("Crop output dir:")[-1].strip()
+        if "GFPGAN output:" in s:
+            self.current_gfpgan_output_dir = s.split("GFPGAN output:")[-1].strip()
+        if "GFPGAN blended faces:" in s:
+            self.current_blended_faces_dir = s.split("GFPGAN blended faces:")[-1].strip()
+        if "Results:" in s and "Manifest:" not in s:
+            self.current_results_dir = s.split("Results:")[-1].strip()
+        if "Manifest:" in s:
+            self.current_manifest_path = s.split("Manifest:")[-1].strip()
+
+        # === Stage timing instrumentation ===
+        current_time = time.time()
+        
+        # Record when stages start
+        if "=== Face crop step" in s and "crop" not in self.stage_started_at:
+            self.stage_started_at["crop"] = current_time
+        if "=== GFPGAN step" in s and "enhance" not in self.stage_started_at:
+            self.stage_started_at["enhance"] = current_time
+        if "=== Rephoto step" in s and "rephoto" not in self.stage_started_at:
+            self.stage_started_at["rephoto"] = current_time
+        
+        # Record when stages end and compute elapsed time
+        if s.startswith("Cropped face count:") and "crop" in self.stage_started_at and "crop" not in self.stage_elapsed:
+            self.stage_elapsed["crop"] = current_time - self.stage_started_at["crop"]
+        if "GFPGAN blended faces:" in s and "enhance" in self.stage_started_at and "enhance" not in self.stage_elapsed:
+            self.stage_elapsed["enhance"] = current_time - self.stage_started_at["enhance"]
+
         # === Rephoto start marker, switch phases ===
         if s.startswith("=== Rephoto step"):
             if self.current_run_phase == "preprocess":
@@ -1108,7 +1252,7 @@ class MainWindow(QMainWindow):
                 return
 
             # Parse crop count and preview crop if found
-            m = __import__("re").search(r"^Cropped face count:\s*(\d+)\s*$", s)
+            m = CROPPED_FACE_COUNT_RE.search(s)
             if m:
                 n = int(m.group(1))
                 self.set_preprocess_progress(40, f"Crops ready ({n})")
@@ -1141,7 +1285,7 @@ class MainWindow(QMainWindow):
                 self.rephoto_stage_total = self.rephoto_step_pair[1]
                 return
 
-            m = __import__("re").search(r"(\d+)/(\d+)", s)
+            m = ITER_PROGRESS_RE.search(s)
             if m:
                 current = int(m.group(1))
                 total = int(m.group(2))
@@ -1173,15 +1317,13 @@ class MainWindow(QMainWindow):
     # Input / output selection
     # ------------------------------
     def reset_form_defaults(self):
-        self.advanced_dialog.strategy_combo.setCurrentText("largest")
-        self.advanced_dialog.crop_only_checkbox.setChecked(False)
-        self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
-        self.advanced_dialog.det_threshold_edit.setValue(0.90)
+        # Reset all advanced-settings values to their defaults.
+        self.advanced_dialog.restore_defaults()
 
         self.advanced_mode_checkbox.setChecked(False)
         self.iter_values = self.basic_iter_values
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
-        self.iter_slider.setValue(1)  # default 750
+        self.iter_slider.setValue(self.basic_iter_values.index(DEFAULT_ITERATION))
         self.update_iteration_label()
 
         self.photo_type_combo.setCurrentText("Unknown")
@@ -1191,6 +1333,7 @@ class MainWindow(QMainWindow):
 
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
+        self.update_runtime_label()
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -1232,6 +1375,7 @@ class MainWindow(QMainWindow):
         old_noise_regularize = dlg.noise_regularize_edit.value()
         old_eye = dlg.eye_preservation_combo.currentText()
         old_structure = dlg.structure_matching_combo.currentText()
+        old_vgg_appearance = dlg.vgg_appearance_combo.currentText()
         old_lr = dlg.lr_edit.value()
         old_camera_lr = dlg.camera_lr_edit.value()
         old_mix_layer_start = dlg.mix_layer_start_edit.value()
@@ -1269,6 +1413,7 @@ class MainWindow(QMainWindow):
             dlg.tonal_transfer_combo.setCurrentText(old_tonal)
             dlg.eye_preservation_combo.setCurrentText(old_eye)
             dlg.structure_matching_combo.setCurrentText(old_structure)
+            dlg.vgg_appearance_combo.setCurrentText(old_vgg_appearance)
             dlg.noise_regularize_edit.setValue(old_noise_regularize)
             dlg.lr_edit.setValue(old_lr)
             dlg.camera_lr_edit.setValue(old_camera_lr)
@@ -1288,6 +1433,8 @@ class MainWindow(QMainWindow):
     def get_identity_preservation_value(self):
         preset = self.advanced_dialog.identity_preservation_combo.currentText()
 
+        if preset == "Off":
+            return 0.0
         if preset == "Lower":
             return 0.20
         if preset == "Higher":
@@ -1297,6 +1444,8 @@ class MainWindow(QMainWindow):
     def get_tonal_transfer_value(self):
         preset = self.advanced_dialog.tonal_transfer_combo.currentText()
 
+        if preset == "Off":
+            return 0.0
         if preset == "Lower":
             return 1e9
         if preset == "Higher":
@@ -1306,6 +1455,8 @@ class MainWindow(QMainWindow):
     def get_eye_preservation_value(self):
         preset = self.advanced_dialog.eye_preservation_combo.currentText()
 
+        if preset == "Off":
+            return 0.0
         if preset == "Lower":
             return 0.05
         if preset == "Higher":
@@ -1315,11 +1466,24 @@ class MainWindow(QMainWindow):
     def get_structure_matching_value(self):
         preset = self.advanced_dialog.structure_matching_combo.currentText()
 
+        if preset == "Off":
+            return 0.0
         if preset == "Lower":
             return 0.05
         if preset == "Higher":
             return 0.20
         return 0.10
+
+    def get_vgg_appearance_value(self):
+        preset = self.advanced_dialog.vgg_appearance_combo.currentText()
+
+        if preset == "Off":
+            return 0.0
+        if preset == "Lower":
+            return 0.5
+        if preset == "Higher":
+            return 1.5
+        return 1.0
         
     def get_spectral_sensitivity_value(self):
         label = self.spectral_sensitivity_combo.currentText()
@@ -1788,6 +1952,7 @@ class MainWindow(QMainWindow):
         tonal_value = str(self.get_tonal_transfer_value())
         eye_value = str(self.get_eye_preservation_value())
         structure_value = str(self.get_structure_matching_value())
+        vgg_value = str(self.get_vgg_appearance_value())
         spectral_value = self.get_spectral_sensitivity_value()
         gaussian_value = self.advanced_dialog.gaussian_edit.text().strip()
         noise_regularize_value = self.advanced_dialog.noise_regularize_edit.text().strip()
@@ -1824,6 +1989,8 @@ class MainWindow(QMainWindow):
             eye_value,
             "-Contextual",
             structure_value,
+            "-VGG",
+            vgg_value,
             "-NoiseRegularize",
             noise_regularize_value,
             "-LR",
@@ -1855,18 +2022,18 @@ class MainWindow(QMainWindow):
     # ------------------------------
     # Result discovery / preview
     # ------------------------------
-    def find_latest_image(self, root: Path, after_epoch: float | None):
-        if not root.exists():
+    def _find_newest_image_in_tree(self, root: Path, after_epoch: float | None = None, preferred_substring: str | None = None):
+        """Return newest image in a tree, optionally preferring paths containing a substring."""
+        if root is None or (not root.exists()):
             return None
 
-        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-        newest = None
-        newest_mtime = -1.0
+        newest_any = None
+        newest_any_mtime = -1.0
+        newest_preferred = None
+        newest_preferred_mtime = -1.0
 
         for p in root.rglob("*"):
-            if not p.is_file():
-                continue
-            if p.suffix.lower() not in exts:
+            if not p.is_file() or p.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
             try:
                 mtime = p.stat().st_mtime
@@ -1874,11 +2041,19 @@ class MainWindow(QMainWindow):
                 continue
             if after_epoch is not None and mtime < after_epoch:
                 continue
-            if mtime > newest_mtime:
-                newest_mtime = mtime
-                newest = p
 
-        return newest
+            if mtime > newest_any_mtime:
+                newest_any_mtime = mtime
+                newest_any = p
+
+            if preferred_substring and preferred_substring in str(p) and mtime > newest_preferred_mtime:
+                newest_preferred_mtime = mtime
+                newest_preferred = p
+
+        return newest_preferred or newest_any
+
+    def find_latest_image(self, root: Path, after_epoch: float | None):
+        return self._find_newest_image_in_tree(root, after_epoch=after_epoch)
 
     def sanitize_name_for_folder(self, text):
         """
@@ -1892,40 +2067,26 @@ class MainWindow(QMainWindow):
         result = "".join(c if c not in invalid_chars else "_" for c in text)
         # Remove excessive leading/trailing underscores
         result = result.strip("_")
-        # Collapse multiple underscores
-        while "__" in result:
-            result = result.replace("__", "_")
+        # Collapse underscore runs
+        result = re.sub(r"_+", "_", result)
         return result if result else "output"
 
     def find_latest_crop_output(self, after_epoch=None):
         """
         Find the newest image file in preprocess/face_crops created after the run start time.
+        Uses tracked path from stdout if available, otherwise does recursive scan.
         Returns Path to the newest crop image, or None if not found.
         """
+        # If we have a tracked crop output dir from stdout, use it directly
+        if self.current_crop_output_dir:
+            tracked_dir = Path(self.current_crop_output_dir)
+            newest = self._find_newest_image_in_tree(tracked_dir)
+            if newest is not None:
+                return newest
+        
+        # Fallback: recursive scan of default crop directory
         crop_dir = self.repo_root / "preprocess" / "face_crops"
-        if not crop_dir.exists():
-            return None
-
-        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-        newest = None
-        newest_mtime = -1.0
-
-        for p in crop_dir.rglob("*"):
-            if not p.is_file():
-                continue
-            if p.suffix.lower() not in exts:
-                continue
-            try:
-                mtime = p.stat().st_mtime
-            except OSError:
-                continue
-            if after_epoch is not None and mtime < after_epoch:
-                continue
-            if mtime > newest_mtime:
-                newest_mtime = mtime
-                newest = p
-
-        return newest
+        return self._find_newest_image_in_tree(crop_dir, after_epoch=after_epoch)
 
     def copy_crop_outputs_to_results_root(self, crop_image_path):
         """
@@ -1944,7 +2105,7 @@ class MainWindow(QMainWindow):
                 results_root.mkdir(parents=True, exist_ok=True)
 
             # Get input image stem for folder naming
-            input_file = self.input_image_path_edit.text().strip()
+            input_file = self.input_image_edit.text().strip()
             input_stem = Path(input_file).stem if input_file else "crop_only_output"
             safe_stem = self.sanitize_name_for_folder(input_stem)
 
@@ -2122,52 +2283,30 @@ class MainWindow(QMainWindow):
         self.position_result_stage_overlay()
 
     def find_latest_enhanced_output(self, after_epoch=None):
-        """Find the newest enhanced/blended image from GFPGAN output folders."""
+        """Find the newest enhanced/blended image from GFPGAN output folders.
+        Uses tracked path from stdout if available, otherwise does recursive scan."""
+
+        # Try tracked blended_faces dir first
+        if self.current_blended_faces_dir:
+            tracked_dir = Path(self.current_blended_faces_dir)
+            newest = self._find_newest_image_in_tree(tracked_dir)
+            if newest:
+                return newest
+
+        # Try tracked GFPGAN output dir
+        if self.current_gfpgan_output_dir:
+            tracked_dir = Path(self.current_gfpgan_output_dir)
+            newest = self._find_newest_image_in_tree(tracked_dir)
+            if newest:
+                return newest
+
+        # Fallback: recursive scan of default gfpgan directory
         gfpgan_dir = self.repo_root / "preprocess" / "gfpgan_runs"
-        if not gfpgan_dir.exists():
-            return None
-
-        exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-        newest = None
-        newest_mtime = -1.0
-
-        # Search recursively for blended faces preferentially
-        for p in gfpgan_dir.rglob("*"):
-            if not p.is_file():
-                continue
-            if p.suffix.lower() not in exts:
-                continue
-            try:
-                mtime = p.stat().st_mtime
-            except OSError:
-                continue
-            if after_epoch is not None and mtime < after_epoch:
-                continue
-            # Prefer paths containing "blended_faces"
-            if "blended_faces" not in str(p):
-                continue
-            if mtime > newest_mtime:
-                newest_mtime = mtime
-                newest = p
-
-        # Fallback: any gfpgan output image
-        if newest is None:
-            for p in gfpgan_dir.rglob("*"):
-                if not p.is_file():
-                    continue
-                if p.suffix.lower() not in exts:
-                    continue
-                try:
-                    mtime = p.stat().st_mtime
-                except OSError:
-                    continue
-                if after_epoch is not None and mtime < after_epoch:
-                    continue
-                if mtime > newest_mtime:
-                    newest_mtime = mtime
-                    newest = p
-
-        return newest
+        return self._find_newest_image_in_tree(
+            gfpgan_dir,
+            after_epoch=after_epoch,
+            preferred_substring="blended_faces",
+        )
 
     def preview_stage_image_if_found(self, image_path, stage_name):
         """Preview an image if it exists and update stage overlay."""
@@ -2306,6 +2445,16 @@ class MainWindow(QMainWindow):
             if (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
                 self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
                 self.flush_pending_milestones()
+                
+                # Log stage timing summary
+                if self.stage_elapsed:
+                    timing_items = []
+                    for stage_name in ["crop", "enhance", "rephoto"]:
+                        if stage_name in self.stage_elapsed:
+                            elapsed_sec = self.stage_elapsed[stage_name]
+                            timing_items.append(f"{stage_name}: {elapsed_sec:.1f}s")
+                    if timing_items:
+                        self.log_box.append(f"Stage timing: {', '.join(timing_items)}")
 
             if self.advanced_dialog.crop_only_checkbox.isChecked():
                 # Crop-only mode: find and copy crop output
@@ -2414,6 +2563,16 @@ class MainWindow(QMainWindow):
         self.reset_progress_bars()
         # start in preprocessing phase with minimal indicator
         self.current_run_phase = "preprocess"
+        
+        # Reset path tracking and stage timing
+        self.current_crop_output_dir = None
+        self.current_gfpgan_output_dir = None
+        self.current_blended_faces_dir = None
+        self.current_results_dir = None
+        self.current_manifest_path = None
+        self.stage_started_at = {}
+        self.stage_elapsed = {}
+        
         self.set_preprocess_progress(5, "Starting...")
         self.set_rephoto_progress(0, "Waiting...")
         command = self.build_wrapper_command()
@@ -2457,8 +2616,8 @@ class MainWindow(QMainWindow):
             self.log_box.setMaximumHeight(360)
             self.expand_log_button.setText("Compact Log")
         else:
-            self.log_box.setMinimumHeight(180)
-            self.log_box.setMaximumHeight(180)
+            self.log_box.setMinimumHeight(150)
+            self.log_box.setMaximumHeight(150)
             self.expand_log_button.setText("Expand Log")
 
 def main():

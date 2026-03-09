@@ -102,7 +102,8 @@ class PerceptualLoss(torch.nn.Module):
             self.vggface = VGGFacePerceptualLoss()
 
     def forward(self, input, target, eps=1e-8, use_vggface: bool = True, use_vgg=True, max_vgg_layer=4):
-        loss = 0.0
+        # Keep return type stable even when all perceptual branches are disabled.
+        loss = torch.zeros((), device=input.device, dtype=input.dtype)
         if self.lambda_vgg > eps and use_vgg:
             loss = loss + self.lambda_vgg * self.vgg(input, target, max_layer=max_vgg_layer)
         if self.lambda_vggface > eps and use_vggface:

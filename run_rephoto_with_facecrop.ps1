@@ -36,6 +36,7 @@
     [string]$SpectralSensitivity = "b",
     [double]$Gaussian = 0.75,
     [double]$VGGFace = 0.3,
+    [double]$VGG = 1.0,
     [double]$ColorTransfer = 10000000000.0,
     [double]$Eye = 0.1,
     [double]$Contextual = 0.1,
@@ -370,6 +371,7 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "CropOutputDir=$CropOutDir"
     "ResultRoot=$ResultRoot"
     "ProjectorScriptPath=$ProjectorScriptPath"
+    "VGG=$VGG"
 ) | Set-Content -LiteralPath $ManifestPath
 
 Write-Host "Manifest: $ManifestPath"
@@ -437,7 +439,7 @@ try {
             --gaussian $Gaussian `
             --spectral_sensitivity $SpectralSensitivity `
             --recon_size 256 `
-            --vgg 1 `
+            --vgg $VGG `
             --vggface $VGGFace `
             --lr $LR `
             --noise_strength 0.0 `
