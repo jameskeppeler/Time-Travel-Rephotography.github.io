@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFrame,
     QSpinBox,
     QTabWidget,
     QFileDialog,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSplitter,
+    QSizePolicy,
     QTextEdit,
     QToolButton,
     QToolTip,
@@ -105,7 +107,7 @@ class InstantToolButton(QToolButton):
 
 class InputDropLabel(QLabel):
     def __init__(self, parent_window):
-        super().__init__("Drop or click to choose an input image.")
+        super().__init__("Drop or click to choose an input image.\nSupported: PNG, JPG, TIFF, WEBP")
         self.parent_window = parent_window
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignCenter)
@@ -114,13 +116,13 @@ class InputDropLabel(QLabel):
         self._set_normal_style()
 
     def _set_normal_style(self):
-        self.setStyleSheet("border: 1px dashed #999; border-radius: 6px; background-color: transparent;")
+        self.setStyleSheet("border: 1px dashed #868b94; border-radius: 6px; color: #b7bcc5; background-color: transparent;")
 
     def _set_hover_style(self):
-        self.setStyleSheet("border: 2px solid #1a73e8; border-radius: 6px; background-color: transparent;")
+        self.setStyleSheet("border: 2px solid #1a73e8; border-radius: 6px; color: #d0d4dc; background-color: transparent;")
 
     def _set_drag_style(self):
-        self.setStyleSheet("border: 2px solid #1a73e8; border-radius: 6px; background-color: transparent;")
+        self.setStyleSheet("border: 2px solid #1a73e8; border-radius: 6px; color: #d0d4dc; background-color: transparent;")
 
     def enterEvent(self, event):
         self._set_hover_style()
@@ -456,12 +458,19 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
 
 class MainWindow(QMainWindow):
+    def make_form_label(self, label_text):
+        label = QLabel(label_text)
+        label.setFixedWidth(168)
+        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        return label
+
     def make_label_with_info(self, label_text, tooltip_text):
         label_widget = QWidget()
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(3)
         label_widget.setLayout(row)
+        label_widget.setFixedWidth(168)
 
         label = QLabel(label_text)
 
@@ -525,7 +534,8 @@ class MainWindow(QMainWindow):
         scroll_area.setWidget(central)
 
         main_layout = QVBoxLayout()
-        main_layout.setSpacing(5)
+        main_layout.setSpacing(8)
+        main_layout.setAlignment(Qt.AlignTop)
         central.setLayout(main_layout)
 
         # --- Input image ---
@@ -540,7 +550,9 @@ class MainWindow(QMainWindow):
 
         # --- Main settings ---
         form_layout = QFormLayout()
-        form_layout.setVerticalSpacing(8)
+        form_layout.setVerticalSpacing(6)
+        form_layout.setHorizontalSpacing(10)
+        form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.advanced_dialog = AdvancedSettingsDialog(self)
         self.advanced_dialog.strategy_combo.setCurrentText("largest")
@@ -610,20 +622,32 @@ class MainWindow(QMainWindow):
         self.runtime_info.setToolTip("Estimated processing time is approximate.")
 
         self.runtime_prefix_label = QLabel("Est.")
-        self.elapsed_label = QLabel("Elapsed: 0:00")
+        self.runtime_prefix_label.setStyleSheet("color: #b7bcc5;")
+        self.runtime_label.setStyleSheet("color: #b7bcc5;")
+        self.rephoto_status_text = "Waiting..."
 
         quality_header_row = QHBoxLayout()
         quality_header_row.setContentsMargins(0, 0, 0, 0)
-        quality_header_row.setSpacing(6)
+        quality_header_row.setSpacing(8)
         quality_header_row.addWidget(self.quality_label)
         quality_header_row.addWidget(self.quality_value_label)
         quality_header_row.addWidget(self.quality_default_label)
         quality_header_row.addWidget(self.quality_info)
         quality_header_row.addStretch(1)
 
+        quality_runtime_cluster = QWidget()
+        quality_runtime_layout = QHBoxLayout()
+        quality_runtime_layout.setContentsMargins(0, 0, 0, 0)
+        quality_runtime_layout.setSpacing(3)
+        quality_runtime_cluster.setLayout(quality_runtime_layout)
+        quality_runtime_layout.addWidget(self.runtime_prefix_label)
+        quality_runtime_layout.addWidget(self.runtime_label)
+        quality_runtime_layout.addWidget(self.runtime_info)
+        quality_header_row.addWidget(quality_runtime_cluster, 0, Qt.AlignVCenter)
+
         quality_slider_row = QHBoxLayout()
-        quality_slider_row.setContentsMargins(0, 0, 0, 0)
-        quality_slider_row.setSpacing(6)
+        quality_slider_row.setContentsMargins(0, 2, 0, 0)
+        quality_slider_row.setSpacing(10)
         quality_slider_row.addSpacing(0)
         quality_slider_row.addWidget(self.iter_slider, 1)
         quality_slider_row.addWidget(self.advanced_mode_checkbox, 0, Qt.AlignVCenter)
@@ -631,7 +655,7 @@ class MainWindow(QMainWindow):
         self.quality_widget = QWidget()
         quality_layout = QVBoxLayout()
         quality_layout.setContentsMargins(0, 3, 0, 2)
-        quality_layout.setSpacing(2)
+        quality_layout.setSpacing(4)
         self.quality_widget.setLayout(quality_layout)
 
         quality_layout.addLayout(quality_header_row)
@@ -665,20 +689,8 @@ class MainWindow(QMainWindow):
         self.photo_type_combo.currentTextChanged.connect(self.update_spectral_sensitivity_ui)
         self.approx_date_edit.textChanged.connect(self.update_spectral_sensitivity_ui)
 
-        form_layout.addRow(
-            self.make_label_with_info(
-                "Photo type / process",
-                "Historical process or presentation format hint. Used to help infer spectral sensitivity automatically."
-            ),
-            self.photo_type_combo,
-        )
-        form_layout.addRow(
-            self.make_label_with_info(
-                "Approximate date",
-                "Optional year/decade (e.g. 1865, 1890s, circa 1910) used to refine automatic spectral sensitivity choice."
-            ),
-            self.approx_date_edit,
-        )
+        form_layout.addRow(self.make_form_label("Photo type / process"), self.photo_type_combo)
+        form_layout.addRow(self.make_form_label("Approximate date"), self.approx_date_edit)
         form_layout.addRow(
             self.make_label_with_info(
                 "Spectral sensitivity mode",
@@ -696,7 +708,8 @@ class MainWindow(QMainWindow):
 
         self.advanced_settings_button = QPushButton("Advanced Settings...")
         self.advanced_settings_button.clicked.connect(self.open_advanced_settings_dialog)
-        form_layout.addRow("Advanced", self.advanced_settings_button)
+        self.advanced_settings_button.setMinimumHeight(30)
+        form_layout.addRow(self.make_form_label("Advanced"), self.advanced_settings_button)
 
         # Add Quality row as proper form row
         form_layout.addRow(self.quality_widget)
@@ -712,61 +725,46 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(form_layout)
 
         # --- Progress row ---
-        progress_section = QVBoxLayout()
-        progress_section.setContentsMargins(0, 0, 0, 0)
-        progress_section.setSpacing(4)
+        progress_row = QHBoxLayout()
+        progress_row.setContentsMargins(0, 0, 0, 0)
+        progress_row.setSpacing(4)
 
-        self.preprocess_progress_label = QLabel("Preprocessing")
-        self.rephoto_progress_label = QLabel("Processing")
-        self.preprocess_progress_label.setFixedWidth(110)
-        self.rephoto_progress_label.setFixedWidth(110)
+        progress_bars_layout = QVBoxLayout()
+        progress_bars_layout.setContentsMargins(0, 0, 0, 0)
+        progress_bars_layout.setSpacing(1)
 
-        preprocess_row = QHBoxLayout()
-        preprocess_row.setContentsMargins(0, 0, 0, 0)
-        preprocess_row.setSpacing(6)
-        preprocess_row.addWidget(self.preprocess_progress_label)
         self.preprocess_progress_bar = QProgressBar()
         self.preprocess_progress_bar.setRange(0, 100)
         self.preprocess_progress_bar.setValue(0)
         self.preprocess_progress_bar.setVisible(True)
-        self.preprocess_progress_bar.setFormat("Ready... %p%")
-        self.preprocess_progress_bar.setFixedHeight(28)
-        self.preprocess_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.preprocess_progress_bar.setFormat("Preprocess ready")
+        self.preprocess_progress_bar.setFixedHeight(16)
+        self.preprocess_progress_bar.setStyleSheet("QProgressBar { min-height: 16px; max-height: 16px; border: 1px solid #6d727b; border-radius: 4px; text-align: center; color: #d5d9df; } QProgressBar::groove { background: #2a2f36; border-radius: 4px; } QProgressBar::chunk { background: #2f7be6; border-radius: 4px; margin: 0px; }")
         self.preprocess_progress_bar.setAutoFillBackground(True)
-        preprocess_row.addWidget(self.preprocess_progress_bar, 1)
+        progress_bars_layout.addWidget(self.preprocess_progress_bar)
 
-        rephoto_row = QHBoxLayout()
-        rephoto_row.setContentsMargins(0, 0, 0, 0)
-        rephoto_row.setSpacing(6)
-        rephoto_row.addWidget(self.rephoto_progress_label)
-
-        runtime_cluster = QWidget()
-        runtime_cluster_layout = QHBoxLayout()
-        runtime_cluster_layout.setContentsMargins(0, 0, 0, 0)
-        runtime_cluster_layout.setSpacing(3)
-        runtime_cluster.setLayout(runtime_cluster_layout)
-        runtime_cluster_layout.addWidget(self.runtime_prefix_label)
-        runtime_cluster_layout.addWidget(self.runtime_label)
-        runtime_cluster_layout.addWidget(self.runtime_info)
-
-        rephoto_row.addWidget(runtime_cluster, 0, Qt.AlignVCenter)
+        self.rephoto_progress_label = QLabel("Processing")
+        self.rephoto_progress_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.rephoto_progress_label.setFixedWidth(94)
+        self.rephoto_progress_label.setFixedHeight(41)
+        self.rephoto_progress_label.setStyleSheet("color: #c7ccd4;")
 
         self.rephoto_progress_bar = QProgressBar()
         self.rephoto_progress_bar.setRange(0, 100)
         self.rephoto_progress_bar.setValue(0)
         self.rephoto_progress_bar.setVisible(True)
-        self.rephoto_progress_bar.setFormat("Waiting... %p%")
-        self.rephoto_progress_bar.setFixedHeight(28)
-        self.rephoto_progress_bar.setStyleSheet("QProgressBar { min-height: 28px; max-height: 28px; border: 1px solid #999; border-radius: 6px; text-align: center; } QProgressBar::groove { background: #e6e6e6; border-radius: 6px; } QProgressBar::chunk { background: #1a73e8; border-radius: 6px; margin: 0px; }")
+        self.rephoto_progress_bar.setFormat("Waiting... 0% | 0:00")
+        self.rephoto_progress_bar.setFixedHeight(24)
+        self.rephoto_progress_bar.setStyleSheet("QProgressBar { min-height: 24px; max-height: 24px; border: 1px solid #6d727b; border-radius: 5px; text-align: center; color: #e3e7ec; } QProgressBar::groove { background: #2a2f36; border-radius: 5px; } QProgressBar::chunk { background: #2f7be6; border-radius: 5px; margin: 0px; }")
         self.rephoto_progress_bar.setAutoFillBackground(True)
-        rephoto_row.addWidget(self.rephoto_progress_bar, 1)
-        rephoto_row.addWidget(self.elapsed_label, 0, Qt.AlignVCenter)
+        progress_bars_layout.addWidget(self.rephoto_progress_bar)
 
-        progress_section.addLayout(preprocess_row)
-        progress_section.addLayout(rephoto_row)
+        progress_row.addWidget(self.rephoto_progress_label, 0, Qt.AlignVCenter)
+        progress_row.addLayout(progress_bars_layout, 1)
 
         progress_widget = QWidget()
-        progress_widget.setLayout(progress_section)
+        progress_widget.setLayout(progress_row)
+        progress_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         main_layout.addWidget(progress_widget)
 
         self._elapsed_timer = QTimer(self)
@@ -776,9 +774,10 @@ class MainWindow(QMainWindow):
         # --- Outputs (Results only) ---
         outputs_group = QGroupBox("Outputs")
         outputs_layout = QFormLayout()
-        outputs_layout.setVerticalSpacing(2)
-        outputs_layout.setContentsMargins(6, 2, 6, 2)
+        outputs_layout.setVerticalSpacing(3)
+        outputs_layout.setContentsMargins(6, 4, 6, 3)
         outputs_group.setLayout(outputs_layout)
+        outputs_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         results_row = QHBoxLayout()
         results_row.setContentsMargins(0, 0, 0, 0)
@@ -800,50 +799,112 @@ class MainWindow(QMainWindow):
 
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.run_wrapper)
-        self.run_button.setMinimumHeight(36)
+        self.run_button.setMinimumHeight(34)
+        self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.run_button.setStyleSheet(
             "QPushButton { font-weight: bold; background-color: #1a73e8; color: white; border: none; border-radius: 4px; } "
             "QPushButton:hover { background-color: #1455c0; } QPushButton:pressed { background-color: #0d47a1; }"
         )
 
+        secondary_button_style = (
+            "QPushButton { border: 1px solid #4a4f57; border-radius: 4px; background-color: #252a31; color: #e6e8eb; } "
+            "QPushButton:hover { background-color: #2d333b; } "
+            "QPushButton:pressed { background-color: #20252b; } "
+            "QPushButton:disabled { color: #8b929c; background-color: #22262c; border: 1px solid #3b4048; }"
+        )
+        utility_button_style = (
+            "QPushButton { border: 1px solid #3f4550; border-radius: 4px; background-color: #20252c; color: #c4cad3; } "
+            "QPushButton:hover { background-color: #262b33; } "
+            "QPushButton:pressed { background-color: #1d2128; } "
+            "QPushButton:disabled { color: #89909a; background-color: #1f2329; border: 1px solid #363c45; }"
+        )
+
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel_run)
         self.cancel_button.setEnabled(False)
+        self.cancel_button.setMinimumHeight(34)
+        self.cancel_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.cancel_button.setStyleSheet(secondary_button_style)
 
         self.reset_button = QPushButton("Reset Defaults")
         self.reset_button.clicked.connect(self.reset_form_defaults)
+        self.reset_button.setMinimumHeight(34)
+        self.reset_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.reset_button.setStyleSheet(secondary_button_style)
 
         self.quit_button = QPushButton("Quit")
         self.quit_button.clicked.connect(self.close)
+        self.quit_button.setMinimumHeight(34)
+        self.quit_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.quit_button.setStyleSheet(secondary_button_style)
+
+        self.toggle_log_button = QPushButton("Hide Log" if self.log_visible else "Show Log")
+        self.toggle_log_button.setMinimumHeight(34)
+        self.toggle_log_button.setMinimumWidth(102)
+        self.toggle_log_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self.toggle_log_button.setStyleSheet(utility_button_style)
 
         button_row.addWidget(self.run_button)
         button_row.addWidget(self.cancel_button)
         button_row.addWidget(self.reset_button)
         button_row.addWidget(self.quit_button)
+        button_row.addWidget(self.toggle_log_button)
 
         # --- Previews (Input on left, Result on right) ---
         previews_group = QGroupBox("Previews")
         previews_layout = QHBoxLayout()
+        previews_layout.setContentsMargins(6, 6, 6, 6)
+        previews_layout.setSpacing(6)
         previews_group.setLayout(previews_layout)
+        previews_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
-        input_group = QGroupBox("Input Preview")
+        input_group = QWidget()
         input_layout = QVBoxLayout()
+        input_layout.setContentsMargins(0, 0, 0, 0)
+        input_layout.setSpacing(4)
         input_group.setLayout(input_layout)
+        input_header = QHBoxLayout()
+        input_header.setContentsMargins(0, 0, 0, 0)
+        input_header.setSpacing(6)
+        input_title = QLabel("Input Preview")
+        input_title.setStyleSheet("color: #c7ccd4;")
+        input_divider = QFrame()
+        input_divider.setFrameShape(QFrame.HLine)
+        input_divider.setFrameShadow(QFrame.Sunken)
+        input_divider.setStyleSheet("color: #3a3f47;")
+        input_header.addWidget(input_title)
+        input_header.addWidget(input_divider, 1)
+        input_layout.addLayout(input_header)
 
         self.input_preview_label = InputDropLabel(self)
         self.input_preview_label.setAlignment(Qt.AlignCenter)
-        self.input_preview_label.setMinimumHeight(270)
-        self.input_preview_label.setStyleSheet("border: 1px solid #999;")
+        self.input_preview_label.setFixedHeight(300)
+        self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         input_layout.addWidget(self.input_preview_label)
 
-        result_group = QGroupBox("Result Preview")
+        result_group = QWidget()
         result_layout = QVBoxLayout()
+        result_layout.setContentsMargins(0, 0, 0, 0)
+        result_layout.setSpacing(4)
         result_group.setLayout(result_layout)
+        result_header = QHBoxLayout()
+        result_header.setContentsMargins(0, 0, 0, 0)
+        result_header.setSpacing(6)
+        result_title = QLabel("Result Preview")
+        result_title.setStyleSheet("color: #c7ccd4;")
+        result_divider = QFrame()
+        result_divider.setFrameShape(QFrame.HLine)
+        result_divider.setFrameShadow(QFrame.Sunken)
+        result_divider.setStyleSheet("color: #3a3f47;")
+        result_header.addWidget(result_title)
+        result_header.addWidget(result_divider, 1)
+        result_layout.addLayout(result_header)
 
-        self.result_preview_label = QLabel("No result image yet.")
+        self.result_preview_label = QLabel("No result image yet.\nRun to generate a preview.")
         self.result_preview_label.setAlignment(Qt.AlignCenter)
-        self.result_preview_label.setMinimumHeight(270)
-        self.result_preview_label.setStyleSheet("border: 1px solid #999;")
+        self.result_preview_label.setFixedHeight(300)
+        self.result_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.result_preview_label.setStyleSheet("border: 1px solid #868b94; border-radius: 4px; color: #b7bcc5;")
         result_layout.addWidget(self.result_preview_label)
 
         # Stage overlay label for animated stage indicator
@@ -864,6 +925,8 @@ class MainWindow(QMainWindow):
         self.open_image_location_button = QPushButton("Open Image Location")
         self.open_image_location_button.clicked.connect(self.open_result_image_location)
         self.open_image_location_button.setEnabled(False)
+        self.open_image_location_button.setMinimumHeight(32)
+        self.open_image_location_button.setStyleSheet(secondary_button_style)
         result_layout.addWidget(self.open_image_location_button)
 
         previews_layout.addWidget(input_group)
@@ -884,8 +947,9 @@ class MainWindow(QMainWindow):
         
         # Settings section with input image and form layout
         settings_container = QWidget()
+        settings_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         settings_layout = QVBoxLayout()
-        settings_layout.setSpacing(8)
+        settings_layout.setSpacing(6)
         settings_layout.setContentsMargins(0, 0, 0, 0)
         settings_container.setLayout(settings_layout)
         settings_layout.addWidget(QLabel("Input Image"))
@@ -898,17 +962,20 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(button_row)
 
         # --- Log container ---
-        log_container = QWidget()
+        self.log_container = QWidget()
         log_layout = QVBoxLayout()
-        log_container.setLayout(log_layout)
+        log_layout.setContentsMargins(0, 0, 0, 0)
+        log_layout.setSpacing(4)
+        self.log_container.setLayout(log_layout)
 
         log_header_row = QHBoxLayout()
-        log_header_row.addWidget(QLabel("Log Output"))
+        self.log_title_label = QLabel("Log Output")
+        self.log_title_label.setStyleSheet("color: #b7bcc5;")
+        log_header_row.addWidget(self.log_title_label)
         log_header_row.addStretch()
         self.expand_log_button = QPushButton("Expand Log")
-        self.toggle_log_button = QPushButton("Hide Log" if self.log_visible else "Show Log")
+        self.expand_log_button.setStyleSheet(secondary_button_style)
         log_header_row.addWidget(self.expand_log_button)
-        log_header_row.addWidget(self.toggle_log_button)
 
         log_layout.addLayout(log_header_row)
 
@@ -925,11 +992,10 @@ class MainWindow(QMainWindow):
         self.expand_log_button.clicked.connect(self.toggle_log_size)
         self.toggle_log_button.clicked.connect(self.toggle_log_visibility)
 
-        self.log_box.setVisible(self.log_visible)
-        self.status_label.setVisible(self.log_visible)
         self.expand_log_button.setEnabled(self.log_visible)
+        self.log_container.setVisible(self.log_visible)
 
-        main_layout.addWidget(log_container)
+        main_layout.addWidget(self.log_container)
 
         # Initial state
         self.update_mode_controls()
@@ -989,9 +1055,10 @@ class MainWindow(QMainWindow):
 
     def reset_progress_bars(self):
         self.preprocess_progress_bar.setValue(0)
-        self.preprocess_progress_bar.setFormat("Ready... %p%")
+        self.preprocess_progress_bar.setFormat("Preprocess ready")
         self.rephoto_progress_bar.setValue(0)
-        self.rephoto_progress_bar.setFormat("Waiting... %p%")
+        self.rephoto_status_text = "Waiting..."
+        self.update_rephoto_bar_format()
         self.preprocess_stage = "idle"
         self.rephoto_stage = None
         self.rephoto_stage_name = None
@@ -1001,6 +1068,22 @@ class MainWindow(QMainWindow):
         self.rephoto_total_work = 0
         self.rephoto_step_pair = (250, 750)
         self.current_run_phase = "idle"
+
+    def get_elapsed_display_text(self):
+        if self.run_started_at is None:
+            return "0:00"
+
+        elapsed = int(time.time() - self.run_started_at)
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+    def update_rephoto_bar_format(self):
+        elapsed_text = self.get_elapsed_display_text()
+        self.rephoto_progress_bar.setFormat(f"{self.rephoto_status_text} %p% | {elapsed_text}")
 
     def get_effective_rephoto_steps(self):
         preset = self.get_selected_preset_value()
@@ -1015,13 +1098,14 @@ class MainWindow(QMainWindow):
         value = max(0, min(100, value))
         self.preprocess_progress_bar.setValue(value)
         if text:
-            self.preprocess_progress_bar.setFormat(f"{text} %p%")
+            self.preprocess_progress_bar.setFormat(text)
 
     def set_rephoto_progress(self, value, text=None):
         value = max(0, min(100, value))
         self.rephoto_progress_bar.setValue(value)
         if text:
-            self.rephoto_progress_bar.setFormat(f"{text} %p%")
+            self.rephoto_status_text = text
+        self.update_rephoto_bar_format()
 
     def start_rephoto_progress_tracking(self):
         self.rephoto_step_pair = self.get_effective_rephoto_steps()
@@ -2315,18 +2399,7 @@ class MainWindow(QMainWindow):
             self.set_result_stage_overlay(stage_name)
 
     def update_elapsed_label(self):
-        if self.run_started_at is None:
-            self.elapsed_label.setText("Elapsed: 0:00")
-            return
-
-        elapsed = int(time.time() - self.run_started_at)
-        h, rem = divmod(elapsed, 3600)
-        m, s = divmod(rem, 60)
-
-        if h > 0:
-            self.elapsed_label.setText(f"Elapsed: {h}:{m:02d}:{s:02d}")
-        else:
-            self.elapsed_label.setText(f"Elapsed: {m}:{s:02d}")
+        self.update_rephoto_bar_format()
 
     def open_result_image_location(self):
         if self.last_result_image_path is None:
@@ -2573,7 +2646,7 @@ class MainWindow(QMainWindow):
         self.stage_started_at = {}
         self.stage_elapsed = {}
         
-        self.set_preprocess_progress(5, "Starting...")
+        self.set_preprocess_progress(5, "Preprocessing...")
         self.set_rephoto_progress(0, "Waiting...")
         command = self.build_wrapper_command()
 
@@ -2598,8 +2671,7 @@ class MainWindow(QMainWindow):
 
     def toggle_log_visibility(self):
         self.log_visible = not self.log_visible
-        self.log_box.setVisible(self.log_visible)
-        self.status_label.setVisible(self.log_visible)
+        self.log_container.setVisible(self.log_visible)
 
         if self.log_visible:
             self.toggle_log_button.setText("Hide Log")
