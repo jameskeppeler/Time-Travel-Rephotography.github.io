@@ -8,7 +8,7 @@ import shutil
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QProcess, Qt, QTimer
+from PySide6.QtCore import QEvent, QProcess, QSettings, Qt, QTimer
 from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -691,7 +691,7 @@ class MainWindow(QMainWindow):
             self.log_box.append(f"Could not open results folder: {e}")
 
     def open_project_readme(self):
-        readme_path = self.repo_root / "README.md"
+        readme_path = self.resolve_resource_path("README.md")
         if not readme_path.exists():
             self.log_box.append("README.md not found.")
             return
@@ -740,6 +740,10 @@ class MainWindow(QMainWindow):
         readme_action.triggered.connect(self.open_project_readme)
         help_menu.addAction(readme_action)
 
+        preflight_action = QAction("Run Startup Preflight", self)
+        preflight_action.triggered.connect(lambda: self.run_startup_preflight(show_dialog=True, user_initiated=True))
+        help_menu.addAction(preflight_action)
+
         help_menu.addSeparator()
         about_action = QAction("About", self)
         about_action.triggered.connect(self.show_about_dialog)
@@ -753,14 +757,455 @@ class MainWindow(QMainWindow):
         if hasattr(self, "menu_expand_log_action"):
             self.menu_expand_log_action.setText("Compact Log" if self.log_expanded else "Expand Log")
             self.menu_expand_log_action.setEnabled(self.log_visible)
+
+    def detect_app_root(self):
+        """Resolve the application root robustly for source runs and packaged executables."""
+        script_root = Path(__file__).resolve().parent.parent
+        seeds = [script_root]
+
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            seeds.extend([exe_dir, exe_dir.parent])
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                mp = Path(meipass).resolve()
+                seeds.extend([mp, mp.parent])
+
+        markers = ("run_rephoto_with_facecrop.ps1", "projector.py")
+        checked = set()
+
+        for seed in seeds:
+            for candidate in [seed, *list(seed.parents)[:3]]:
+                candidate = candidate.resolve()
+                if candidate in checked:
+                    continue
+                checked.add(candidate)
+                if all((candidate / marker).exists() for marker in markers):
+                    return candidate
+
+        return script_root
+
+    def resolve_resource_path(self, relative_path):
+        """Resolve a resource path from app root and packaged fallbacks."""
+        rel = Path(relative_path)
+        roots = []
+
+        app_root = getattr(self, "app_root", Path(__file__).resolve().parent.parent)
+        roots.append(app_root)
+
+        if getattr(sys, "frozen", False):
+            exe_dir = Path(sys.executable).resolve().parent
+            roots.extend([exe_dir, exe_dir.parent])
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                mp = Path(meipass).resolve()
+                roots.extend([mp, mp.parent])
+
+        seen = set()
+        for root in roots:
+            root = root.resolve()
+            if root in seen:
+                continue
+            seen.add(root)
+            candidate = root / rel
+            if candidate.exists():
+                return candidate
+
+        return (app_root / rel).resolve()
+
+    def _to_bool(self, value, default=False):
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+
+    def _set_combo_if_present(self, combo: QComboBox, value: str):
+        if not value:
+            return
+        idx = combo.findText(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _set_iteration_from_value(self, iteration_value):
+        try:
+            iv = int(iteration_value)
+        except Exception:
+            iv = DEFAULT_ITERATION
+        closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - iv))
+        self.iter_slider.setValue(closest_index)
+
+    def save_persisted_settings(self):
+        if not hasattr(self, "settings_store"):
+            return
+        s = self.settings_store
+
+        s.setValue("window/geometry", self.saveGeometry())
+        s.setValue("window/log_visible", self.log_visible)
+        s.setValue("window/log_expanded", self.log_expanded)
+
+        s.setValue("main/input_image", self.input_image_edit.text().strip())
+        s.setValue("main/results_root", self.results_root_edit.text().strip())
+        s.setValue("main/photo_type", self.photo_type_combo.currentText())
+        s.setValue("main/approx_date", self.approx_date_edit.text())
+        s.setValue("main/spectral_mode", self.spectral_mode_combo.currentText())
+        s.setValue("main/spectral_sensitivity", self.spectral_sensitivity_combo.currentText())
+        s.setValue("main/advanced_mode", self.advanced_mode_checkbox.isChecked())
+        s.setValue("main/quality_iteration", self.get_selected_preset_value())
+
+        dlg = self.advanced_dialog
+        s.setValue("advanced/strategy", dlg.strategy_combo.currentText())
+        s.setValue("advanced/crop_only", dlg.crop_only_checkbox.isChecked())
+        s.setValue("advanced/use_gfpgan_checkbox", dlg.use_gfpgan_checkbox.isChecked())
+        s.setValue("advanced/det_threshold", dlg.det_threshold_edit.value())
+        s.setValue("advanced/face_factor", dlg.face_factor_edit.value())
+        s.setValue("advanced/gfpgan_blend", dlg.gfpgan_blend_edit.value())
+        s.setValue("advanced/gaussian", dlg.gaussian_edit.value())
+        s.setValue("advanced/identity", dlg.identity_preservation_combo.currentText())
+        s.setValue("advanced/tonal", dlg.tonal_transfer_combo.currentText())
+        s.setValue("advanced/eye", dlg.eye_preservation_combo.currentText())
+        s.setValue("advanced/structure", dlg.structure_matching_combo.currentText())
+        s.setValue("advanced/vgg", dlg.vgg_appearance_combo.currentText())
+        s.setValue("advanced/noise_regularize", dlg.noise_regularize_edit.value())
+        s.setValue("advanced/lr", dlg.lr_edit.value())
+        s.setValue("advanced/camera_lr", dlg.camera_lr_edit.value())
+        s.setValue("advanced/mix_start", dlg.mix_layer_start_edit.value())
+        s.setValue("advanced/mix_end", dlg.mix_layer_end_edit.value())
+
+    def load_persisted_settings(self):
+        if not hasattr(self, "settings_store"):
+            return
+        s = self.settings_store
+
+        geometry = s.value("window/geometry")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+
+        self.log_visible = self._to_bool(s.value("window/log_visible"), self.log_visible)
+        self.log_expanded = self._to_bool(s.value("window/log_expanded"), self.log_expanded)
+
+        input_image = str(s.value("main/input_image", self.input_image_edit.text().strip()) or "").strip()
+        if input_image:
+            self.input_image_edit.setText(input_image)
+            p = Path(input_image)
+            if p.exists():
+                self.set_input_preview_image(p)
+
+        results_root = str(s.value("main/results_root", self.results_root_edit.text().strip()) or "").strip()
+        if results_root:
+            self.results_root_edit.setText(results_root)
+
+        self._set_combo_if_present(self.photo_type_combo, str(s.value("main/photo_type", self.photo_type_combo.currentText()) or ""))
+        self.approx_date_edit.setText(str(s.value("main/approx_date", self.approx_date_edit.text()) or ""))
+        self._set_combo_if_present(self.spectral_mode_combo, str(s.value("main/spectral_mode", self.spectral_mode_combo.currentText()) or ""))
+
+        advanced_mode = self._to_bool(s.value("main/advanced_mode"), self.advanced_mode_checkbox.isChecked())
+        self.advanced_mode_checkbox.setChecked(advanced_mode)
+        self._set_iteration_from_value(s.value("main/quality_iteration", DEFAULT_ITERATION))
+
+        dlg = self.advanced_dialog
+        self._set_combo_if_present(dlg.strategy_combo, str(s.value("advanced/strategy", dlg.strategy_combo.currentText()) or ""))
+        dlg.crop_only_checkbox.setChecked(self._to_bool(s.value("advanced/crop_only"), dlg.crop_only_checkbox.isChecked()))
+        dlg.use_gfpgan_checkbox.setChecked(self._to_bool(s.value("advanced/use_gfpgan_checkbox"), dlg.use_gfpgan_checkbox.isChecked()))
+
+        def _set_spin(spin, key, default_value, cast=float):
+            raw = s.value(key, default_value)
+            try:
+                spin.setValue(cast(raw))
+            except Exception:
+                spin.setValue(default_value)
+
+        _set_spin(dlg.det_threshold_edit, "advanced/det_threshold", dlg.det_threshold_edit.value(), float)
+        _set_spin(dlg.face_factor_edit, "advanced/face_factor", dlg.face_factor_edit.value(), float)
+        _set_spin(dlg.gfpgan_blend_edit, "advanced/gfpgan_blend", dlg.gfpgan_blend_edit.value(), float)
+        _set_spin(dlg.gaussian_edit, "advanced/gaussian", dlg.gaussian_edit.value(), float)
+        _set_spin(dlg.noise_regularize_edit, "advanced/noise_regularize", dlg.noise_regularize_edit.value(), float)
+        _set_spin(dlg.lr_edit, "advanced/lr", dlg.lr_edit.value(), float)
+        _set_spin(dlg.camera_lr_edit, "advanced/camera_lr", dlg.camera_lr_edit.value(), float)
+        _set_spin(dlg.mix_layer_start_edit, "advanced/mix_start", dlg.mix_layer_start_edit.value(), int)
+        _set_spin(dlg.mix_layer_end_edit, "advanced/mix_end", dlg.mix_layer_end_edit.value(), int)
+
+        self._set_combo_if_present(dlg.identity_preservation_combo, str(s.value("advanced/identity", dlg.identity_preservation_combo.currentText()) or ""))
+        self._set_combo_if_present(dlg.tonal_transfer_combo, str(s.value("advanced/tonal", dlg.tonal_transfer_combo.currentText()) or ""))
+        self._set_combo_if_present(dlg.eye_preservation_combo, str(s.value("advanced/eye", dlg.eye_preservation_combo.currentText()) or ""))
+        self._set_combo_if_present(dlg.structure_matching_combo, str(s.value("advanced/structure", dlg.structure_matching_combo.currentText()) or ""))
+        self._set_combo_if_present(dlg.vgg_appearance_combo, str(s.value("advanced/vgg", dlg.vgg_appearance_combo.currentText()) or ""))
+
+        self.update_spectral_sensitivity_ui()
+        saved_spectral = str(s.value("main/spectral_sensitivity", self.spectral_sensitivity_combo.currentText()) or "")
+        if self.spectral_mode_combo.currentText() == "Manual":
+            self._set_combo_if_present(self.spectral_sensitivity_combo, saved_spectral)
+
+        self.log_container.setVisible(self.log_visible)
+        self.expand_log_button.setEnabled(self.log_visible)
+        self.toggle_log_button.setText("Hide Log" if self.log_visible else "Show Log")
+
+        if self.log_expanded:
+            self.log_box.setMinimumHeight(360)
+            self.log_box.setMaximumHeight(360)
+            self.expand_log_button.setText("Compact Log")
+        else:
+            self.log_box.setMinimumHeight(150)
+            self.log_box.setMaximumHeight(150)
+            self.expand_log_button.setText("Expand Log")
+
+        self.update_mode_controls()
+        self.update_runtime_label()
+        self.update_view_menu_actions()
+
+    def closeEvent(self, event):
+        self.save_persisted_settings()
+        super().closeEvent(event)
+
+    def _collect_preflight_report(self):
+        checks = []
+
+        def add_check(name, status, detail, fix=""):
+            checks.append({"name": name, "status": status, "detail": detail, "fix": fix})
+
+        add_check("Application root", "pass", f"Using app root: {self.repo_root}")
+
+        wrapper = self.resolve_resource_path("run_rephoto_with_facecrop.ps1")
+        if wrapper.exists():
+            add_check("Wrapper script", "pass", f"Found: {wrapper}")
+        else:
+            add_check(
+                "Wrapper script",
+                "fail",
+                f"Missing: {wrapper}",
+                "Ensure run_rephoto_with_facecrop.ps1 is bundled next to the app resources."
+            )
+
+        stylegan_ckpt = self.resolve_resource_path(Path("checkpoint") / "stylegan2-ffhq-config-f.pt")
+        e4e_ckpt = self.resolve_resource_path(Path("checkpoint") / "e4e_ffhq_encode.pt")
+        encoder_dir = self.resolve_resource_path(Path("checkpoint") / "encoder")
+        encoder_candidates = list(encoder_dir.glob("checkpoint_*.pt")) if encoder_dir.exists() else []
+
+        if stylegan_ckpt.exists():
+            add_check("StyleGAN checkpoint", "pass", f"Found: {stylegan_ckpt.name}")
+        else:
+            add_check("StyleGAN checkpoint", "fail", "Missing stylegan2-ffhq-config-f.pt", "Run bootstrap_local_assets.ps1 to fetch required assets.")
+
+        if e4e_ckpt.exists():
+            add_check("e4e checkpoint", "pass", f"Found: {e4e_ckpt.name}")
+        else:
+            add_check("e4e checkpoint", "fail", "Missing e4e_ffhq_encode.pt", "Run bootstrap_local_assets.ps1 to fetch required assets.")
+
+        if encoder_candidates:
+            add_check("Encoder checkpoint", "pass", f"Found {len(encoder_candidates)} file(s) in checkpoint/encoder")
+        else:
+            add_check("Encoder checkpoint", "fail", "Missing encoder checkpoint in checkpoint/encoder", "Verify checkpoint/encoder/checkpoint_*.pt exists.")
+
+        gfpgan_root = self.resolve_resource_path(Path("deps") / "GFPGAN")
+        if gfpgan_root.exists():
+            add_check("GFPGAN dependency", "pass", f"Found: {gfpgan_root}")
+        else:
+            add_check("GFPGAN dependency", "warn", "deps/GFPGAN not found (enhancement unavailable)", "Install or restore deps/GFPGAN if enhancement is needed.")
+
+        if shutil.which("powershell.exe"):
+            add_check("PowerShell runtime", "pass", "powershell.exe is available.")
+        else:
+            add_check("PowerShell runtime", "fail", "powershell.exe not found in PATH.", "Install/enable PowerShell and ensure it is discoverable.")
+
+        results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+        try:
+            results_root.mkdir(parents=True, exist_ok=True)
+            probe = results_root / ".preflight_write_test.tmp"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            add_check("Results folder write access", "pass", f"Writable: {results_root}")
+        except Exception as e:
+            add_check("Results folder write access", "fail", f"Cannot write to {results_root}: {e}", "Pick a writable results folder in the Outputs section.")
+
+        hw = self.get_hardware_info()
+        gpu_name = (hw.get("gpu_name") or "Unknown GPU").strip()
+        if gpu_name and gpu_name.lower() != "unknown gpu":
+            add_check("GPU detection", "pass", f"Detected GPU: {gpu_name}")
+        else:
+            add_check("GPU detection", "warn", "No GPU detected via nvidia-smi.", "Install NVIDIA driver/CUDA stack, or expect slower CPU-only behavior.")
+
+        fail_count = sum(1 for c in checks if c["status"] == "fail")
+        warn_count = sum(1 for c in checks if c["status"] == "warn")
+        pass_count = sum(1 for c in checks if c["status"] == "pass")
+        return {
+            "checks": checks,
+            "fail": fail_count,
+            "warn": warn_count,
+            "pass": pass_count,
+        }
+
+    def _preflight_report_plain_text(self, report):
+        lines = [
+            "Startup Preflight Report",
+            f"Summary: {report['pass']} pass, {report['warn']} warn, {report['fail']} fail",
+            "",
+        ]
+        for check in report["checks"]:
+            lines.append(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
+            if check.get("fix") and check["status"] != "pass":
+                lines.append(f"  Fix: {check['fix']}")
+        return "\n".join(lines)
+
+    def _preflight_report_html(self, report):
+        status_color = {"pass": "#6fcf97", "warn": "#f2c94c", "fail": "#eb5757"}
+        rows = []
+        for c in report["checks"]:
+            color = status_color.get(c["status"], "#b7bcc5")
+            fix_html = f"<br/><span style='color:#b7bcc5'><b>Fix:</b> {c['fix']}</span>" if c.get("fix") and c["status"] != "pass" else ""
+            rows.append(
+                f"<li><span style='color:{color}'><b>{c['status'].upper()}</b></span> "
+                f"<b>{c['name']}</b>: {c['detail']}{fix_html}</li>"
+            )
+        return (
+            f"<h3>Startup Preflight</h3>"
+            f"<p><b>Summary:</b> {report['pass']} pass, {report['warn']} warn, {report['fail']} fail</p>"
+            f"<ul>{''.join(rows)}</ul>"
+        )
+
+    def show_preflight_dialog(self, report):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Startup Preflight Report")
+        dialog.setMinimumSize(820, 520)
+        layout = QVBoxLayout(dialog)
+
+        browser = QTextBrowser()
+        browser.setHtml(self._preflight_report_html(report))
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        copy_button = QPushButton("Copy Report")
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self._preflight_report_plain_text(report)))
+        buttons.addButton(copy_button, QDialogButtonBox.ActionRole)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
+
+    def run_startup_preflight(self, show_dialog=False, user_initiated=False):
+        report = self._collect_preflight_report()
+        self.last_preflight_report = report
+
+        self.log_box.append("")
+        self.log_box.append("=== Startup preflight ===")
+        for check in report["checks"]:
+            self.log_box.append(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
+            if check.get("fix") and check["status"] != "pass":
+                self.log_box.append(f"  Fix: {check['fix']}")
+        self.log_box.append(f"Preflight summary: {report['pass']} pass, {report['warn']} warn, {report['fail']} fail")
+
+        should_show = show_dialog and (user_initiated or report["fail"] > 0)
+        if should_show:
+            self.show_preflight_dialog(report)
+
+    def _format_elapsed_for_summary(self, elapsed_seconds):
+        if elapsed_seconds is None:
+            return "N/A"
+        elapsed = int(max(0, elapsed_seconds))
+        h, rem = divmod(elapsed, 3600)
+        m, s = divmod(rem, 60)
+        if h > 0:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+    def _capture_run_context(self):
+        return {
+            "input_image": self.input_image_edit.text().strip(),
+            "results_root": self.results_root_edit.text().strip(),
+            "quality": self.get_selected_preset_value(),
+            "photo_type": self.photo_type_combo.currentText(),
+            "approx_date": self.approx_date_edit.text().strip(),
+            "spectral_sensitivity": self.get_spectral_sensitivity_value(),
+            "crop_only": self.advanced_dialog.crop_only_checkbox.isChecked(),
+            "enhancement_enabled": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()) and self.gfpgan_is_available(),
+            "faces_to_enhance": self.advanced_dialog.strategy_combo.currentText(),
+        }
+
+    def _build_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
+        ctx = self.current_run_summary_context or {}
+        status = "Success" if success else "Failed"
+        if launch_error:
+            status = "Launch Error"
+
+        lines = [
+            "Run Summary",
+            "-----------",
+            f"Status: {status}",
+            f"Exit code: {exit_code}",
+            f"Elapsed: {self._format_elapsed_for_summary(elapsed_seconds)}",
+            "",
+            "Key settings:",
+            f"- Quality: {ctx.get('quality', 'N/A')}",
+            f"- Photo type: {ctx.get('photo_type', 'N/A')}",
+            f"- Approximate date: {ctx.get('approx_date', '') or 'N/A'}",
+            f"- Spectral sensitivity: {ctx.get('spectral_sensitivity', 'N/A')}",
+            f"- Faces to enhance: {ctx.get('faces_to_enhance', 'N/A')}",
+            f"- Enhancement enabled: {'Yes' if ctx.get('enhancement_enabled') else 'No'}",
+            f"- Crop-only: {'Yes' if ctx.get('crop_only') else 'No'}",
+            "",
+            f"Input image: {ctx.get('input_image', 'N/A')}",
+            f"Results root: {ctx.get('results_root', 'N/A')}",
+            f"Output image: {str(output_path) if output_path else 'N/A'}",
+        ]
+
+        if launch_error:
+            lines.extend(["", f"Launch error: {launch_error}"])
+
+        return "\n".join(lines)
+
+    def show_run_summary_dialog(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
+        if self.current_run_summary_context is None:
+            return
+
+        summary_text = self._build_run_summary_text(
+            success=success,
+            exit_code=exit_code,
+            elapsed_seconds=elapsed_seconds,
+            output_path=output_path,
+            launch_error=launch_error,
+        )
+        self.last_run_summary_text = summary_text
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Run Summary")
+        dialog.setMinimumSize(760, 500)
+        layout = QVBoxLayout(dialog)
+
+        body = QTextEdit()
+        body.setReadOnly(True)
+        body.setPlainText(summary_text)
+        layout.addWidget(body)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        copy_button = QPushButton("Copy Run Details")
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(summary_text))
+        buttons.addButton(copy_button, QDialogButtonBox.ActionRole)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.exec()
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Time-Travel Rephotography")
 
-        self.repo_root = Path(__file__).resolve().parent.parent
-        self.wrapper_script = self.repo_root / "run_rephoto_with_facecrop.ps1"
+        self.app_root = self.detect_app_root()
+        self.repo_root = self.app_root
+        self.wrapper_script = self.resolve_resource_path("run_rephoto_with_facecrop.ps1")
+        self.settings_store = QSettings("TimeTravelRephotography", "DesktopGUI")
         self.process = None
         self.run_started_at = None
+        self.current_run_summary_context = None
+        self.last_run_summary_text = ""
+        self.last_preflight_report = None
 
         self.preprocess_stage = "idle"
         self.rephoto_stage = None
@@ -1267,13 +1712,17 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(self.content_layout)
         self._wide_layout_active = None
         self.apply_responsive_layout(force=True)
+        self.load_persisted_settings()
+        self.apply_responsive_layout(force=True)
 
         # Initial state
         self.update_mode_controls()
+        self.update_runtime_label()
         if not self.gfpgan_is_available():
             self.log_box.append("GFPGAN not found (deps\\GFPGAN). Enhancement is disabled.")
         else:
             self.log_box.append("GFPGAN found. Enhancement is available.")
+        self.run_startup_preflight(show_dialog=True)
 
     # ------------------------------
     # Qt / window events
@@ -1372,7 +1821,7 @@ class MainWindow(QMainWindow):
     # UI state / control updates
     # ------------------------------
     def gfpgan_is_available(self):
-        return (self.repo_root / "deps" / "GFPGAN").exists()
+        return self.resolve_resource_path(Path("deps") / "GFPGAN").exists()
 
     
     def update_mode_controls(self):
@@ -2861,6 +3310,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
         self.log_box.append(f"Process finished with exit code: {exit_code}")
+        elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
+        final_output_path = None
 
         if exit_code == 0:
             # finalize bars according to phase
@@ -2892,12 +3343,14 @@ class MainWindow(QMainWindow):
                     copied_path = self.copy_crop_outputs_to_results_root(crop_image)
                     if copied_path is not None:
                         self.set_result_preview_image(copied_path)
+                        final_output_path = copied_path
                         self.log_box.append(f"Crop-only output copied to: {copied_path.parent}")
                         self.log_box.append(f"Previewing crop-only result: {copied_path.name}")
                         self.status_label.setText("Status: Crop-only output ready")
                     else:
                         self.log_box.append("Crop-only run: crop was produced but copy to results failed.")
                         self.set_result_preview_image(crop_image)
+                        final_output_path = crop_image
                 else:
                     self.log_box.append("Crop-only run: no crop image was found.")
                     self.set_result_preview_image(None)
@@ -2913,6 +3366,7 @@ class MainWindow(QMainWindow):
                     _, rephoto_path = self.simplify_run_folder(run_folder)
                     final_preview = rephoto_path or newest
                     self.set_result_preview_image(final_preview)
+                    final_output_path = final_preview
                     self.log_box.append(f"Previewing final result: {final_preview.name}")
 
             # Clear overlay after displaying final preview
@@ -2921,6 +3375,14 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("Status: Backend returned an error")
             self.clear_result_stage_overlay()
+
+        self.show_run_summary_dialog(
+            success=(exit_code == 0),
+            exit_code=exit_code,
+            elapsed_seconds=elapsed_seconds,
+            output_path=final_output_path,
+        )
+        self.current_run_summary_context = None
 
         self.set_controls_for_running(False)
         self.process = None
@@ -2933,6 +3395,15 @@ class MainWindow(QMainWindow):
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
         self.clear_result_stage_overlay()
+        elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
+        self.show_run_summary_dialog(
+            success=False,
+            exit_code=-1,
+            elapsed_seconds=elapsed_seconds,
+            output_path=None,
+            launch_error=str(process_error),
+        )
+        self.current_run_summary_context = None
         self.set_controls_for_running(False)
         self.process = None
         self.run_started_at = None
@@ -2989,6 +3460,7 @@ class MainWindow(QMainWindow):
 
         self.clear_result_stage_overlay()
         self.reset_progress_bars()
+        self.current_run_summary_context = self._capture_run_context()
         # start in preprocessing phase with minimal indicator
         self.current_run_phase = "preprocess"
         
