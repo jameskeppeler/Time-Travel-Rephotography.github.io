@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QProcess, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -74,6 +74,9 @@ YEAR_RE = re.compile(r"\b(\d{4})")
 SIMPLE_FINAL_COPY_RE = re.compile(r"^Simple final copy:\s*(.+?)\s*$")
 REPHOTO_CROP_FAIL_RE = re.compile(r"projector\.py failed for crop:\s*(.+)$", re.IGNORECASE)
 QUICK_FACE_DECISION_RE = re.compile(r"QUICK_FACE_DECISION_COUNT\s*=\s*(\d+)")
+RETINA_FACE_BOX_RE = re.compile(r"RETINA_FACE_BOX_(\d+)\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
+CROP_ALIGN_BOX_RE = re.compile(r"CROP_ALIGN_BOX_(\d+)\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
+FACE_SUFFIX_INDEX_RE = re.compile(r"_(\d+)$")
 
 # ============================================================================
 # INSTANT TOOLTIP BUTTON (for minimal responsiveness)
@@ -116,6 +119,31 @@ class NoScrollComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class FaceStripToolButton(QToolButton):
+    """Filmstrip card button that exposes lightweight hover callbacks."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
+        self.hover_enter_callback = None
+        self.hover_leave_callback = None
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if callable(self.hover_enter_callback):
+            self.hover_enter_callback()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        if callable(self.hover_enter_callback):
+            self.hover_enter_callback()
+
+    def leaveEvent(self, event):
+        if callable(self.hover_leave_callback):
+            self.hover_leave_callback()
+        super().leaveEvent(event)
 
 
 class InputDropLabel(QLabel):
@@ -741,6 +769,17 @@ class MainWindow(QMainWindow):
         self.menu_expand_log_action.setShortcut("Ctrl+Shift+L")
         self.menu_expand_log_action.triggered.connect(self.toggle_log_size)
         view_menu.addAction(self.menu_expand_log_action)
+        view_menu.addSeparator()
+        self.menu_show_last_summary_action = QAction("Show Last Run Summary", self)
+        self.menu_show_last_summary_action.setShortcut("Ctrl+R")
+        self.menu_show_last_summary_action.triggered.connect(self.show_last_run_summary_dialog)
+        view_menu.addAction(self.menu_show_last_summary_action)
+        view_menu.addSeparator()
+        self.menu_face_box_debug_action = QAction("Show Face Box IDs (Debug)", self)
+        self.menu_face_box_debug_action.setCheckable(True)
+        self.menu_face_box_debug_action.setShortcut("Ctrl+Shift+D")
+        self.menu_face_box_debug_action.toggled.connect(self.set_face_box_debug_overlay_enabled)
+        view_menu.addAction(self.menu_face_box_debug_action)
 
         help_menu = menu_bar.addMenu("&Help")
         parameter_help_action = QAction("Parameter Guide", self)
@@ -769,6 +808,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "menu_expand_log_action"):
             self.menu_expand_log_action.setText("Compact Log" if self.log_expanded else "Expand Log")
             self.menu_expand_log_action.setEnabled(self.log_visible)
+        if hasattr(self, "menu_show_last_summary_action"):
+            self.menu_show_last_summary_action.setEnabled(bool(self.last_run_summary_text))
+        if hasattr(self, "menu_face_box_debug_action"):
+            self.menu_face_box_debug_action.setChecked(bool(getattr(self, "face_box_debug_overlay_enabled", False)))
+
+    def set_face_box_debug_overlay_enabled(self, enabled):
+        self.face_box_debug_overlay_enabled = bool(enabled)
+        self.refresh_input_preview_scale()
 
     def detect_app_root(self):
         """Resolve the application root robustly for source runs and packaged executables."""
@@ -1035,6 +1082,12 @@ class MainWindow(QMainWindow):
         status = "Success" if success else "Failed"
         if launch_error:
             status = "Launch Error"
+        preset_sent = ctx.get("effective_preset")
+        if preset_sent is None:
+            quality_line = f"- Quality: {ctx.get('quality', 'N/A')}"
+        else:
+            normalized_preset = "750" if str(preset_sent).strip().lower() == "test" else str(preset_sent)
+            quality_line = f"- Quality: {ctx.get('quality', 'N/A')} (preset sent: {normalized_preset})"
 
         lines = [
             "Run Summary",
@@ -1044,7 +1097,7 @@ class MainWindow(QMainWindow):
             f"Elapsed: {self._format_elapsed_for_summary(elapsed_seconds)}",
             "",
             "Key settings:",
-            f"- Quality: {ctx.get('quality', 'N/A')}",
+            quality_line,
             f"- Photo type: {ctx.get('photo_type', 'N/A')}",
             f"- Approximate date: {ctx.get('approx_date', '') or 'N/A'}",
             f"- Spectral sensitivity: {ctx.get('spectral_sensitivity', 'N/A')}",
@@ -1062,9 +1115,9 @@ class MainWindow(QMainWindow):
 
         return "\n".join(lines)
 
-    def show_run_summary_dialog(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
+    def _store_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
         if self.current_run_summary_context is None:
-            return
+            return None
 
         summary_text = self._build_run_summary_text(
             success=success,
@@ -1074,6 +1127,12 @@ class MainWindow(QMainWindow):
             launch_error=launch_error,
         )
         self.last_run_summary_text = summary_text
+        self.update_view_menu_actions()
+        return summary_text
+
+    def _show_run_summary_text_dialog(self, summary_text):
+        if not summary_text:
+            return
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Run Summary")
@@ -1094,6 +1153,26 @@ class MainWindow(QMainWindow):
         layout.addWidget(buttons)
 
         dialog.exec()
+
+    def show_run_summary_dialog(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
+        summary_text = self._store_run_summary_text(
+            success=success,
+            exit_code=exit_code,
+            elapsed_seconds=elapsed_seconds,
+            output_path=output_path,
+            launch_error=launch_error,
+        )
+        if not summary_text:
+            return
+        self._show_run_summary_text_dialog(summary_text)
+
+    def show_last_run_summary_dialog(self):
+        summary_text = (self.last_run_summary_text or "").strip()
+        if not summary_text:
+            self.status_label.setText("Status: No run summary available yet")
+            self.log_box.append("No run summary is available yet.")
+            return
+        self._show_run_summary_text_dialog(summary_text)
 
     def __init__(self):
         super().__init__()
@@ -1145,13 +1224,20 @@ class MainWindow(QMainWindow):
         self.last_result_image_path = None
         self.input_face_boxes = []
         self.input_face_box_source = None
+        self.face_box_debug_overlay_enabled = False
+        self.face_box_probe_cache = {}
+        self.face_box_probe_cache_max_entries = 24
         self._face_overlay_detector_warned = False
 
         # Multi-face preview state (for strategy=all / multi-face detections)
         self.face_preview_entries = []
         self.active_face_preview_index = None
         self.selected_face_preview_index = None
+        self.hover_face_preview_index = None
+        self.hover_face_box_override = None
+        self.hover_face_box_cache = {}
         self.quick_face_count_estimate = None
+        self.current_wide_preview_side = 360
         self.quick_face_probe_process = None
         self.quick_face_probe_token = 0
         self.quick_face_probe_target_input = None
@@ -1159,6 +1245,8 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_warned = False
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
+        self.retina_face_box_probe_warned = False
+        self.cropper_face_box_probe_warned = False
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -1169,7 +1257,6 @@ class MainWindow(QMainWindow):
 
         main_layout = QVBoxLayout()
         main_layout.setSpacing(8)
-        main_layout.setAlignment(Qt.AlignTop)
         central.setLayout(main_layout)
 
         # --- Input image ---
@@ -1435,7 +1522,11 @@ class MainWindow(QMainWindow):
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.run_button.setStyleSheet(
             "QPushButton { font-weight: bold; background-color: #1a73e8; color: white; border: none; border-radius: 4px; } "
-            "QPushButton:hover { background-color: #1455c0; } QPushButton:pressed { background-color: #0d47a1; }"
+            "QPushButton:hover { background-color: #1455c0; } "
+            "QPushButton:pressed { background-color: #0d47a1; } "
+            "QPushButton:disabled { "
+            "background-color: #2a2f36; color: #8f96a1; border: 1px solid #4a505a; "
+            "}"
         )
 
         secondary_button_style = (
@@ -1488,7 +1579,7 @@ class MainWindow(QMainWindow):
         previews_layout.setContentsMargins(6, 6, 6, 6)
         previews_layout.setSpacing(6)
         previews_group.setLayout(previews_layout)
-        previews_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        previews_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         preview_top_row = QWidget()
         previews_split_layout = QBoxLayout(QBoxLayout.LeftToRight)
@@ -1498,6 +1589,7 @@ class MainWindow(QMainWindow):
 
         input_group = QWidget()
         input_layout = QVBoxLayout()
+        self.input_preview_layout = input_layout
         input_layout.setContentsMargins(0, 0, 0, 0)
         input_layout.setSpacing(4)
         input_group.setLayout(input_layout)
@@ -1519,9 +1611,15 @@ class MainWindow(QMainWindow):
         self.input_preview_label.setFixedHeight(300)
         self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         input_layout.addWidget(self.input_preview_label)
+        self.input_preview_footer_spacer = QWidget()
+        self.input_preview_footer_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.input_preview_footer_spacer.setFixedHeight(32)
+        self.input_preview_footer_spacer.setVisible(True)
+        input_layout.addWidget(self.input_preview_footer_spacer)
 
         result_group = QWidget()
         result_layout = QVBoxLayout()
+        self.result_preview_layout = result_layout
         result_layout.setContentsMargins(0, 0, 0, 0)
         result_layout.setSpacing(4)
         result_group.setLayout(result_layout)
@@ -1609,7 +1707,10 @@ class MainWindow(QMainWindow):
         self.face_preview_strip_layout.setSpacing(6)
         self.face_preview_strip_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.face_preview_strip_container.setLayout(self.face_preview_strip_layout)
+        self.face_preview_strip_container.setMouseTracking(True)
         self.face_preview_strip_scroll.setWidget(self.face_preview_strip_container)
+        self.face_preview_strip_scroll.viewport().setMouseTracking(True)
+        self.face_preview_strip_scroll.viewport().installEventFilter(self)
 
         self.face_preview_header.setVisible(False)
         self.face_preview_strip_scroll.setVisible(False)
@@ -1621,8 +1722,8 @@ class MainWindow(QMainWindow):
         self.open_image_location_button.setStyleSheet(secondary_button_style)
         result_layout.addWidget(self.open_image_location_button)
 
-        previews_split_layout.addWidget(input_group, 1, Qt.AlignTop)
-        previews_split_layout.addWidget(result_group, 1, Qt.AlignTop)
+        previews_split_layout.addWidget(input_group, 1)
+        previews_split_layout.addWidget(result_group, 1)
         previews_layout.addWidget(preview_top_row)
 
         self.face_preview_panel = QWidget()
@@ -1630,6 +1731,21 @@ class MainWindow(QMainWindow):
         face_panel_layout.setContentsMargins(0, 0, 0, 0)
         face_panel_layout.setSpacing(3)
         self.face_preview_panel.setLayout(face_panel_layout)
+        self.face_selection_notice_label = QLabel("Select one or more faces to continue")
+        self.face_selection_notice_label.setWordWrap(True)
+        self.face_selection_notice_label.setAlignment(Qt.AlignCenter)
+        self.face_selection_notice_label.setStyleSheet(
+            "QLabel { "
+            "color: #e6f4ff; "
+            "background-color: #21476f; "
+            "border: 1px solid #4b88bc; "
+            "border-radius: 4px; "
+            "padding: 6px 8px; "
+            "font-weight: 600; "
+            "}"
+        )
+        self.face_selection_notice_label.setVisible(False)
+        face_panel_layout.addWidget(self.face_selection_notice_label)
         face_panel_layout.addWidget(self.face_preview_header)
         face_panel_layout.addWidget(self.face_preview_strip_scroll)
         self.face_preview_panel.setVisible(False)
@@ -1652,11 +1768,16 @@ class MainWindow(QMainWindow):
         self.controls_layout = controls_layout
         controls_layout.setSpacing(8)
         controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setAlignment(Qt.AlignTop)
         self.controls_container.setLayout(controls_layout)
         controls_layout.addWidget(settings_container)
         controls_layout.addWidget(progress_widget)
         controls_layout.addWidget(outputs_group)
-        controls_layout.addLayout(button_row)
+
+        self.button_bar_widget = QWidget()
+        self.button_bar_widget.setLayout(button_row)
+        self.button_bar_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        controls_layout.addWidget(self.button_bar_widget)
 
         # --- Log container ---
         self.log_container = QWidget()
@@ -1692,13 +1813,14 @@ class MainWindow(QMainWindow):
         self.expand_log_button.setEnabled(self.log_visible)
         self.log_container.setVisible(self.log_visible)
         controls_layout.addWidget(self.log_container)
-        controls_layout.addStretch(1)
 
         self.setup_menu_bar()
 
         # --- Responsive page layout ---
         self.previews_group = previews_group
+        self.previews_layout = previews_layout
         self.previews_split_layout = previews_split_layout
+        self.main_layout = main_layout
         self.content_layout = QBoxLayout(QBoxLayout.TopToBottom)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(8)
@@ -1731,6 +1853,61 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.WindowStateChange:
             QTimer.singleShot(0, self.apply_responsive_layout)
 
+    def _rehost_face_preview_panel(self, use_wide_layout):
+        if not hasattr(self, "face_preview_panel"):
+            return
+        if hasattr(self, "previews_layout"):
+            self.previews_layout.removeWidget(self.face_preview_panel)
+        if hasattr(self, "main_layout"):
+            self.main_layout.removeWidget(self.face_preview_panel)
+        if hasattr(self, "content_layout"):
+            self.content_layout.removeWidget(self.face_preview_panel)
+
+        if use_wide_layout:
+            # In wide mode, placement is handled directly inside content layout.
+            return
+        else:
+            # In stacked mode, keep filmstrip attached under preview panes.
+            self.previews_layout.insertWidget(1, self.face_preview_panel)
+
+    def _configure_face_preview_panel_for_mode(self, use_wide_layout):
+        if not hasattr(self, "face_preview_panel"):
+            return
+
+        if use_wide_layout:
+            card_w = self._get_face_strip_card_width(True)
+            panel_w = card_w + 34
+            self.face_preview_strip_layout.setDirection(QBoxLayout.TopToBottom)
+            self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.face_preview_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.face_preview_strip_scroll.setMinimumHeight(0)
+            self.face_preview_strip_scroll.setMaximumHeight(16777215)
+            self.face_preview_strip_scroll.setMinimumWidth(panel_w - 8)
+            self.face_preview_strip_scroll.setMaximumWidth(panel_w)
+            self.face_preview_panel.setMinimumWidth(panel_w)
+            self.face_preview_panel.setMaximumWidth(panel_w)
+            self.face_preview_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+            self.face_preview_auto_follow_checkbox.setText("Auto-follow")
+        else:
+            self.face_preview_strip_layout.setDirection(QBoxLayout.LeftToRight)
+            self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.face_preview_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.face_preview_strip_scroll.setMinimumHeight(142)
+            self.face_preview_strip_scroll.setMaximumHeight(142)
+            self.face_preview_strip_scroll.setMinimumWidth(0)
+            self.face_preview_strip_scroll.setMaximumWidth(16777215)
+            self.face_preview_panel.setMinimumWidth(0)
+            self.face_preview_panel.setMaximumWidth(16777215)
+            self.face_preview_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.face_preview_auto_follow_checkbox.setText("Auto-follow latest")
+
+    def _get_face_strip_card_width(self, wide_mode):
+        if not wide_mode:
+            return 116
+        side = max(240, int(getattr(self, "current_wide_preview_side", 360)))
+        # Keep vertical rail compact while scaling mildly with preview size.
+        return max(98, min(132, int(round(side * 0.30))))
+
     def apply_responsive_layout(self, force=False):
         if not hasattr(self, "content_layout"):
             return
@@ -1743,10 +1920,13 @@ class MainWindow(QMainWindow):
         while self.content_layout.count() > 0:
             self.content_layout.takeAt(0)
 
+        self._rehost_face_preview_panel(use_wide_layout)
+
         if use_wide_layout:
             preview_side = self._compute_wide_preview_side()
-            preview_pane_width = preview_side + 56
-            preview_pane_height = (2 * preview_side) + 248
+            self.current_wide_preview_side = preview_side
+            self._configure_face_preview_panel_for_mode(True)
+            preview_pane_width = preview_side + 24
 
             self.content_layout.setDirection(QBoxLayout.LeftToRight)
             self.previews_split_layout.setDirection(QBoxLayout.TopToBottom)
@@ -1754,15 +1934,23 @@ class MainWindow(QMainWindow):
             self.input_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.result_preview_label.setFixedSize(preview_side, preview_side)
             self.result_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            self.controls_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Maximum)
-            self.previews_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
+            if hasattr(self, "input_preview_layout"):
+                self.input_preview_layout.setAlignment(self.input_preview_label, Qt.AlignHCenter | Qt.AlignTop)
+            if hasattr(self, "result_preview_layout"):
+                self.result_preview_layout.setAlignment(self.result_preview_label, Qt.AlignHCenter | Qt.AlignTop)
+            if hasattr(self, "input_preview_footer_spacer"):
+                self.input_preview_footer_spacer.setVisible(False)
+            self.controls_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.previews_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
             self.previews_group.setMinimumWidth(preview_pane_width)
             self.previews_group.setMaximumWidth(preview_pane_width)
-            self.previews_group.setMinimumHeight(preview_pane_height)
-            self.previews_group.setMaximumHeight(preview_pane_height)
-            self.content_layout.addWidget(self.controls_container, 6, Qt.AlignTop)
-            self.content_layout.addWidget(self.previews_group, 4, Qt.AlignTop)
+            self.previews_group.setMinimumHeight(0)
+            self.previews_group.setMaximumHeight(16777215)
+            self.content_layout.addWidget(self.controls_container, 1)
+            self.content_layout.addWidget(self.face_preview_panel, 0)
+            self.content_layout.addWidget(self.previews_group, 0)
         else:
+            self._configure_face_preview_panel_for_mode(False)
             self.content_layout.setDirection(QBoxLayout.TopToBottom)
             self.previews_split_layout.setDirection(QBoxLayout.LeftToRight)
             self.input_preview_label.setMinimumWidth(0)
@@ -1773,6 +1961,14 @@ class MainWindow(QMainWindow):
             self.result_preview_label.setMaximumWidth(16777215)
             self.result_preview_label.setFixedHeight(300)
             self.result_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            if hasattr(self, "input_preview_layout"):
+                self.input_preview_layout.setAlignment(self.input_preview_label, Qt.Alignment())
+            if hasattr(self, "result_preview_layout"):
+                self.result_preview_layout.setAlignment(self.result_preview_label, Qt.Alignment())
+            if hasattr(self, "input_preview_footer_spacer"):
+                if hasattr(self, "open_image_location_button"):
+                    self.input_preview_footer_spacer.setFixedHeight(max(24, self.open_image_location_button.minimumHeight()))
+                self.input_preview_footer_spacer.setVisible(True)
             self.controls_container.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
             self.previews_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
             self.previews_group.setMinimumWidth(0)
@@ -1783,24 +1979,26 @@ class MainWindow(QMainWindow):
             self.content_layout.addWidget(self.controls_container, 0)
 
         self._apply_mode_layout_profile(use_wide_layout)
+        if self.face_preview_entries:
+            self.render_face_preview_strip()
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
 
     def _compute_wide_preview_side(self):
-        # Keep square previews while constraining right pane height and width in wide mode.
-        side_by_height = int((self.height() - 422) / 2)
-        side_by_width = int((self.width() * 0.38) - 56)
+        # Keep square previews while using fullscreen height more effectively.
+        side_by_height = int((self.height() - 190) / 2)
+        side_by_width = int((self.width() * 0.46) - 112)
         side = min(side_by_height, side_by_width)
-        return max(220, min(380, side))
+        return max(320, min(700, side))
 
     def _apply_mode_layout_profile(self, use_wide_layout):
         if use_wide_layout:
-            self.controls_layout.setSpacing(6)
-            self.settings_layout.setSpacing(4)
-            self.form_layout.setVerticalSpacing(5)
+            self.controls_layout.setSpacing(4)
+            self.settings_layout.setSpacing(3)
+            self.form_layout.setVerticalSpacing(4)
             self.progress_bars_layout.setSpacing(1)
-            self.outputs_layout.setVerticalSpacing(2)
-            self.outputs_layout.setContentsMargins(6, 3, 6, 3)
+            self.outputs_layout.setVerticalSpacing(1)
+            self.outputs_layout.setContentsMargins(6, 2, 6, 2)
         else:
             self.controls_layout.setSpacing(8)
             self.settings_layout.setSpacing(6)
@@ -2053,8 +2251,6 @@ class MainWindow(QMainWindow):
         reason = ""
         if self.process is not None:
             reason = "A run is currently in progress."
-        elif self.awaiting_face_selection:
-            reason = "Finish face selection first (Continue or Cancel)."
 
         if reason:
             if show_message:
@@ -2067,14 +2263,20 @@ class MainWindow(QMainWindow):
         if force_running is None:
             can_select = self.can_select_new_image(show_message=False)
         else:
-            can_select = (not force_running) and (not self.awaiting_face_selection)
+            can_select = (not force_running)
         self.browse_button.setEnabled(can_select)
         self.input_image_edit.setEnabled(can_select)
         if hasattr(self, "input_preview_label"):
             self.input_preview_label.setEnabled(can_select)
 
     def set_controls_for_running(self, is_running):
-        self.run_button.setEnabled(not is_running)
+        if is_running:
+            self.run_button.setEnabled(False)
+        else:
+            if self.awaiting_face_selection:
+                self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
+            else:
+                self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.quit_button.setEnabled(not is_running)
@@ -2272,6 +2474,19 @@ class MainWindow(QMainWindow):
     # ------------------------------
     # Input / output selection
     # ------------------------------
+    def _reset_main_window_for_new_input(self):
+        """Clear selection/runtime preview state when user imports a new input image."""
+        self.stop_quick_face_probe()
+        self.quick_face_count_estimate = None
+        self.reset_face_preview_state(preserve_input_overlays=False)
+        self.clear_result_stage_overlay()
+        self.reset_progress_bars()
+        self._reset_wrapper_runtime_tracking()
+        self.current_run_summary_context = None
+        self.set_result_preview_image(None)
+        self.result_preview_label.setText("No result image yet.\nRun to generate a preview.")
+        self.update_run_button_for_quick_face_hint()
+
     def reset_form_defaults(self):
         self.stop_quick_face_probe()
         # Reset all advanced-settings values to their defaults.
@@ -2301,12 +2516,13 @@ class MainWindow(QMainWindow):
     def set_selected_input_image(self, file_path):
         if not self.can_select_new_image(show_message=True):
             return
-        self.stop_quick_face_probe()
+        was_awaiting = bool(self.awaiting_face_selection)
+        self._reset_main_window_for_new_input()
         self.input_image_edit.setText(file_path)
+        if was_awaiting:
+            self.log_box.append("Face selection canceled: new image imported.")
         self.log_box.append(f"Selected image: {file_path}")
         self.status_label.setText("Status: Image selected")
-        self.quick_face_count_estimate = None
-        self.reset_face_preview_state(preserve_input_overlays=False)
         self.set_input_preview_image(Path(file_path))
         self.refresh_quick_face_hint_from_input()
 
@@ -2320,12 +2536,13 @@ class MainWindow(QMainWindow):
             "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
         )
         if file_path:
-            self.stop_quick_face_probe()
+            was_awaiting = bool(self.awaiting_face_selection)
+            self._reset_main_window_for_new_input()
             self.input_image_edit.setText(file_path)
+            if was_awaiting:
+                self.log_box.append("Face selection canceled: new image imported.")
             self.log_box.append(f"Selected image: {file_path}")
             self.status_label.setText("Status: Image selected")
-            self.quick_face_count_estimate = None
-            self.reset_face_preview_state(preserve_input_overlays=False)
             self.set_input_preview_image(Path(file_path))
             self.refresh_quick_face_hint_from_input()
 
@@ -3190,6 +3407,9 @@ class MainWindow(QMainWindow):
         return (orig_target, final_target)
 
     def clear_face_preview_strip_layout(self):
+        if self.hover_face_preview_index is not None:
+            self.hover_face_preview_index = None
+            self.refresh_input_preview_scale()
         while self.face_preview_strip_layout.count() > 0:
             item = self.face_preview_strip_layout.takeAt(0)
             widget = item.widget()
@@ -3200,6 +3420,9 @@ class MainWindow(QMainWindow):
         self.face_preview_entries = []
         self.active_face_preview_index = None
         self.selected_face_preview_index = None
+        self.hover_face_preview_index = None
+        self.hover_face_box_override = None
+        self.hover_face_box_cache = {}
         self.awaiting_face_selection = False
         self.face_preview_summary_label.setText("Faces: none")
         self.clear_face_preview_strip_layout()
@@ -3219,15 +3442,30 @@ class MainWindow(QMainWindow):
 
     def set_run_button_continue_mode(self, is_continue_mode):
         if is_continue_mode:
+            can_continue = len(self.get_selected_face_indices()) > 0
             self.run_button.setText("Continue")
-            self.run_button.setToolTip("Continue rephotography for the selected face(s).")
+            self.run_button.setEnabled(can_continue)
+            if can_continue:
+                self.run_button.setToolTip("Select one or more faces in the filmstrip, then continue rephotography.")
+            else:
+                self.run_button.setToolTip("Select at least one face in the filmstrip to enable Continue.")
             return
         self.update_run_button_for_quick_face_hint()
 
     def update_run_button_for_quick_face_hint(self):
         if getattr(self, "awaiting_face_selection", False):
+            can_continue = len(self.get_selected_face_indices()) > 0
             self.run_button.setText("Continue")
-            self.run_button.setToolTip("Continue rephotography for the selected face(s).")
+            self.run_button.setEnabled(can_continue)
+            if can_continue:
+                self.run_button.setToolTip("Select one or more faces in the filmstrip, then continue rephotography.")
+            else:
+                self.run_button.setToolTip("Select at least one face in the filmstrip to enable Continue.")
+            return
+
+        if self.process is not None or self.current_run_phase in {"preprocess", "rephoto"}:
+            self.run_button.setText("Run")
+            self.run_button.setToolTip("Run the full rephotography workflow.")
             return
 
         crop_only_mode = self.advanced_dialog.crop_only_checkbox.isChecked()
@@ -3512,6 +3750,180 @@ class MainWindow(QMainWindow):
 
         self._start_quick_face_probe(image_path, fallback_count=fallback_count)
 
+    def resolve_input_face_boxes_via_retina_probe(self, image_path: Path, expected_count=None):
+        if image_path is None or (not image_path.exists()):
+            return []
+        conda_exe = self.resolve_conda_executable()
+        if not conda_exe:
+            return []
+        probe_script = self.resolve_resource_path(Path("tools") / "quick_face_boxes_retina.py")
+        if not probe_script.exists():
+            return []
+
+        det_threshold = self.advanced_dialog.det_threshold_edit.value()
+        facecrop_env = self.resolve_facecrop_env_name()
+        command = [
+            conda_exe,
+            "run",
+            "-n",
+            facecrop_env,
+            "python",
+            str(probe_script),
+            "--image",
+            str(image_path),
+            "--det-threshold",
+            f"{det_threshold:.2f}",
+            "--resize-size",
+            "1536",
+        ]
+        if expected_count is not None and int(expected_count) > 0:
+            command.extend(["--max-faces", str(int(expected_count))])
+
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=40,
+                cwd=str(self.repo_root),
+            )
+        except Exception as exc:
+            if not self.retina_face_box_probe_warned:
+                self.log_box.append(f"Retina face-box probe failed to launch: {exc}")
+                self.retina_face_box_probe_warned = True
+            return []
+
+        if proc.returncode != 0:
+            if not self.retina_face_box_probe_warned:
+                tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                suffix = f" ({tail[-1]})" if tail else ""
+                self.log_box.append(f"Retina face-box probe failed{suffix}")
+                self.retina_face_box_probe_warned = True
+            return []
+
+        boxes = []
+        for line in (proc.stdout or "").splitlines():
+            match = RETINA_FACE_BOX_RE.search(line.strip())
+            if not match:
+                continue
+            x = int(match.group(2))
+            y = int(match.group(3))
+            w = int(match.group(4))
+            h = int(match.group(5))
+            if w >= 8 and h >= 8:
+                boxes.append((x, y, w, h))
+
+        if expected_count is not None and int(expected_count) > 0 and len(boxes) > int(expected_count):
+            boxes = boxes[: int(expected_count)]
+        return boxes
+
+    def _make_face_box_probe_cache_key(self, probe_name, image_path: Path, expected_count, det_threshold, face_factor):
+        try:
+            stat = image_path.stat()
+            mtime_ns = int(getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)))
+            size_bytes = int(stat.st_size)
+        except OSError:
+            mtime_ns = 0
+            size_bytes = 0
+        return (
+            str(probe_name),
+            str(image_path.resolve()).lower(),
+            size_bytes,
+            mtime_ns,
+            int(expected_count) if expected_count is not None else 0,
+            float(f"{float(det_threshold):.2f}"),
+            float(f"{float(face_factor):.2f}"),
+        )
+
+    def _set_face_box_probe_cache(self, key, boxes):
+        self.face_box_probe_cache[key] = [tuple(map(int, b)) for b in boxes]
+        while len(self.face_box_probe_cache) > int(self.face_box_probe_cache_max_entries):
+            oldest_key = next(iter(self.face_box_probe_cache))
+            self.face_box_probe_cache.pop(oldest_key, None)
+
+    def resolve_input_face_boxes_via_cropper_probe(self, image_path: Path, expected_count=None):
+        if image_path is None or (not image_path.exists()):
+            return []
+        conda_exe = self.resolve_conda_executable()
+        if not conda_exe:
+            return []
+        probe_script = self.resolve_resource_path(Path("tools") / "quick_face_boxes_cropper.py")
+        if not probe_script.exists():
+            return []
+
+        det_threshold = self.advanced_dialog.det_threshold_edit.value()
+        face_factor = self.advanced_dialog.face_factor_edit.value()
+        cache_key = self._make_face_box_probe_cache_key(
+            "cropper_probe",
+            image_path=image_path,
+            expected_count=expected_count,
+            det_threshold=det_threshold,
+            face_factor=face_factor,
+        )
+        if cache_key in self.face_box_probe_cache:
+            return list(self.face_box_probe_cache.get(cache_key, []))
+
+        facecrop_env = self.resolve_facecrop_env_name()
+        command = [
+            conda_exe,
+            "run",
+            "-n",
+            facecrop_env,
+            "python",
+            str(probe_script),
+            "--image",
+            str(image_path),
+            "--det-threshold",
+            f"{det_threshold:.2f}",
+            "--resize-size",
+            "3072",
+            "--output-size",
+            "2048",
+            "--face-factor",
+            f"{face_factor:.2f}",
+        ]
+        if expected_count is not None and int(expected_count) > 0:
+            command.extend(["--max-faces", str(int(expected_count))])
+
+        try:
+            proc = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=65,
+                cwd=str(self.repo_root),
+            )
+        except Exception as exc:
+            if not self.cropper_face_box_probe_warned:
+                self.log_box.append(f"Cropper face-box probe failed to launch: {exc}")
+                self.cropper_face_box_probe_warned = True
+            return []
+
+        if proc.returncode != 0:
+            if not self.cropper_face_box_probe_warned:
+                tail = (proc.stderr or proc.stdout or "").strip().splitlines()
+                suffix = f" ({tail[-1]})" if tail else ""
+                self.log_box.append(f"Cropper face-box probe failed{suffix}")
+                self.cropper_face_box_probe_warned = True
+            return []
+
+        boxes = []
+        for line in (proc.stdout or "").splitlines():
+            match = CROP_ALIGN_BOX_RE.search(line.strip())
+            if not match:
+                continue
+            x = int(match.group(2))
+            y = int(match.group(3))
+            w = int(match.group(4))
+            h = int(match.group(5))
+            if w >= 8 and h >= 8:
+                boxes.append((x, y, w, h))
+
+        if expected_count is not None and int(expected_count) > 0 and len(boxes) > int(expected_count):
+            boxes = boxes[: int(expected_count)]
+        self._set_face_box_probe_cache(cache_key, boxes)
+        return boxes
+
     def get_selected_face_indices(self):
         if not self.face_preview_entries:
             return []
@@ -3532,9 +3944,17 @@ class MainWindow(QMainWindow):
     def _list_image_files_in_dir(self, folder: Path):
         if folder is None or (not folder.exists()) or (not folder.is_dir()):
             return []
+        def _sort_key(p: Path):
+            match = FACE_SUFFIX_INDEX_RE.search(p.stem)
+            if match:
+                try:
+                    return (0, int(match.group(1)), p.name.lower())
+                except Exception:
+                    pass
+            return (1, p.name.lower())
         return sorted(
             [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS],
-            key=lambda p: p.name.lower(),
+            key=_sort_key,
         )
 
     def collect_current_crop_files(self):
@@ -3578,6 +3998,8 @@ class MainWindow(QMainWindow):
             expected_count = len(crop_files)
 
         self.face_preview_entries = []
+        self.hover_face_box_cache = {}
+        self.hover_face_box_override = None
         for idx in range(expected_count):
             crop_path = crop_files[idx] if idx < len(crop_files) else None
             self.face_preview_entries.append(
@@ -3596,8 +4018,8 @@ class MainWindow(QMainWindow):
         self.update_runtime_label()
         self.render_face_preview_strip()
 
-    def _make_face_thumb_icon(self, image_path, fallback_text, muted=False):
-        thumb_size = 84
+    def _make_face_thumb_icon(self, image_path, fallback_text, muted=False, thumb_size=84):
+        thumb_size = max(56, int(thumb_size))
         inner_size = thumb_size - 2
         thumb = QPixmap(thumb_size, thumb_size)
         thumb.fill(QColor("#242933"))
@@ -3635,8 +4057,15 @@ class MainWindow(QMainWindow):
         self.clear_face_preview_strip_layout()
         entries = self.face_preview_entries
         selection_mode = self.awaiting_face_selection
+        wide_mode = bool(getattr(self, "_wide_layout_active", False))
+        if wide_mode:
+            self.face_preview_strip_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
+        else:
+            self.face_preview_strip_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         if not entries:
             self.face_preview_summary_label.setText("Faces: none")
+            if hasattr(self, "face_selection_notice_label"):
+                self.face_selection_notice_label.setVisible(False)
             self.face_preview_header.setVisible(False)
             self.face_preview_strip_scroll.setVisible(False)
             if hasattr(self, "face_preview_panel"):
@@ -3645,16 +4074,29 @@ class MainWindow(QMainWindow):
 
         if selection_mode:
             selected_count = len([e for e in entries if e.get("selected", True)])
-            summary = f"Select face(s) to rephotograph: {selected_count}/{len(entries)} selected"
+            self.run_button.setEnabled(selected_count > 0)
+            summary = f"Selected: {selected_count}/{len(entries)}"
+            if hasattr(self, "face_selection_notice_label"):
+                self.face_selection_notice_label.setText(
+                    f"Select one or more faces to continue ({selected_count}/{len(entries)} selected)"
+                )
+                self.face_selection_notice_label.setVisible(True)
         else:
             done_count = sum(1 for e in entries if e.get("status") == "done")
             fail_count = sum(1 for e in entries if e.get("status") == "failed")
-            summary = f"Faces: {len(entries)} | Done: {done_count}"
+            if wide_mode:
+                summary = f"Faces {len(entries)} | Done {done_count}"
+            else:
+                summary = f"Faces: {len(entries)} | Done: {done_count}"
             if fail_count:
-                summary += f" | Failed: {fail_count}"
+                summary += f" | Failed {fail_count}" if wide_mode else f" | Failed: {fail_count}"
+            if hasattr(self, "face_selection_notice_label"):
+                self.face_selection_notice_label.setVisible(False)
         self.face_preview_summary_label.setText(summary)
 
         if len(entries) <= 1:
+            if hasattr(self, "face_selection_notice_label"):
+                self.face_selection_notice_label.setVisible(False)
             self.face_preview_header.setVisible(False)
             self.face_preview_strip_scroll.setVisible(False)
             if hasattr(self, "face_preview_panel"):
@@ -3685,6 +4127,13 @@ class MainWindow(QMainWindow):
             # Keep selected faces first once continuation starts.
             display_entries = sorted(entries, key=lambda e: (not e.get("selected", True), e["index"]))
 
+        card_w = self._get_face_strip_card_width(wide_mode)
+        thumb_size = max(72, min(104, card_w - 24))
+        card_h = thumb_size + (50 if wide_mode else 42)
+
+        if wide_mode:
+            self.face_preview_strip_layout.addStretch(1)
+
         for entry in display_entries:
             idx = entry["index"]
             status = entry.get("status", "queued")
@@ -3695,17 +4144,17 @@ class MainWindow(QMainWindow):
                 label = status.capitalize()
             icon_path = entry.get("result_path") or entry.get("crop_path")
 
-            button = QToolButton()
+            button = FaceStripToolButton()
             button.setCheckable(True)
             button.setChecked(is_selected if selection_mode else (idx == self.selected_face_preview_index))
             button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
             is_muted = not is_selected
-            button.setIconSize(QSize(84, 84))
-            button.setFixedSize(116, 126)
+            button.setIconSize(QSize(thumb_size, thumb_size))
+            button.setFixedSize(card_w, card_h)
             button.setCursor(Qt.PointingHandCursor)
             button.setFont(QFont("Segoe UI", 8))
             button.setText(f"Face {idx + 1}\n{label}")
-            button.setIcon(self._make_face_thumb_icon(icon_path, str(idx + 1), muted=is_muted))
+            button.setIcon(self._make_face_thumb_icon(icon_path, str(idx + 1), muted=is_muted, thumb_size=thumb_size))
             if selection_mode:
                 accent = "#1f6fd9" if is_selected else "#525a66"
             else:
@@ -3730,10 +4179,205 @@ class MainWindow(QMainWindow):
             )
             if is_muted and (not selection_mode):
                 button.setEnabled(False)
+            button.setProperty("faceIndex", idx)
+            button.installEventFilter(self)
+            button.hover_enter_callback = (lambda i=idx: self.set_hover_face_preview_index(i))
+            button.hover_leave_callback = self.clear_hover_face_preview_index
             button.clicked.connect(lambda _checked=False, i=idx: self.select_face_preview(i, user_initiated=True))
-            self.face_preview_strip_layout.addWidget(button)
+            if wide_mode:
+                self.face_preview_strip_layout.addWidget(button, 0, Qt.AlignHCenter)
+            else:
+                self.face_preview_strip_layout.addWidget(button)
 
         self.face_preview_strip_layout.addStretch(1)
+
+    def set_hover_face_preview_index(self, face_index):
+        idx = face_index
+        if idx is not None:
+            try:
+                idx = int(idx)
+            except Exception:
+                idx = None
+        if self.hover_face_preview_index == idx:
+            return
+        self.hover_face_preview_index = idx
+        self.hover_face_box_override = None
+        if isinstance(idx, int):
+            cached_box = self.hover_face_box_cache.get(idx)
+            if cached_box is None:
+                cached_box = self.resolve_hover_face_box(idx)
+                self.hover_face_box_cache[idx] = cached_box
+            self.hover_face_box_override = cached_box
+        self.refresh_input_preview_scale()
+
+    def clear_hover_face_preview_index(self):
+        had_hover = (self.hover_face_preview_index is not None) or (self.hover_face_box_override is not None)
+        self.hover_face_preview_index = None
+        self.hover_face_box_override = None
+        if had_hover:
+            self.refresh_input_preview_scale()
+
+    def _cursor_face_preview_index(self):
+        widget = QApplication.widgetAt(QCursor.pos())
+        while widget is not None and (not isinstance(widget, FaceStripToolButton)):
+            widget = widget.parentWidget()
+        if not isinstance(widget, FaceStripToolButton):
+            return None
+        try:
+            return int(widget.property("faceIndex"))
+        except Exception:
+            return None
+
+    def resolve_hover_face_box(self, face_index):
+        if face_index is None:
+            return None
+        try:
+            idx = int(face_index)
+        except Exception:
+            return None
+        if idx < 0:
+            return None
+
+        if self.input_face_box_source == "cropper_probe" and self.input_face_boxes:
+            if idx < len(self.input_face_boxes):
+                return self.input_face_boxes[idx]
+            return None
+
+        # Correctness first: template-match hovered crop back to input image.
+        box = self.resolve_face_box_from_crop_template(idx)
+        if box is not None:
+            return box
+
+        # If uncertain, show no highlight rather than an incorrect one.
+        return None
+
+    def resolve_face_box_from_crop_template(self, face_index):
+        if not self.face_preview_entries:
+            return None
+        if face_index < 0 or face_index >= len(self.face_preview_entries):
+            return None
+
+        entry = self.face_preview_entries[face_index]
+        crop_path = entry.get("crop_path")
+        input_path_text = self.input_image_edit.text().strip()
+        if (crop_path is None) or (not input_path_text):
+            return None
+
+        crop_file = Path(crop_path)
+        input_file = Path(input_path_text)
+        if (not crop_file.exists()) or (not input_file.exists()):
+            return None
+
+        try:
+            import cv2
+        except Exception:
+            return None
+
+        input_gray = cv2.imread(str(input_file), cv2.IMREAD_GRAYSCALE)
+        crop_gray = cv2.imread(str(crop_file), cv2.IMREAD_GRAYSCALE)
+        if input_gray is None or crop_gray is None:
+            return None
+
+        ih, iw = input_gray.shape[:2]
+        ch, cw = crop_gray.shape[:2]
+        if iw < 8 or ih < 8 or cw < 8 or ch < 8:
+            return None
+
+        # Keep template matching responsive for very large scans.
+        max_side = max(iw, ih)
+        input_scale = 1.0
+        target_max = 2400
+        if max_side > target_max:
+            input_scale = float(target_max) / float(max_side)
+            nw = max(1, int(round(iw * input_scale)))
+            nh = max(1, int(round(ih * input_scale)))
+            input_gray_small = cv2.resize(input_gray, (nw, nh), interpolation=cv2.INTER_AREA)
+        else:
+            input_gray_small = input_gray
+
+        sh, sw = input_gray_small.shape[:2]
+        if sh < 16 or sw < 16:
+            return None
+
+        # face-crop outputs are resized, so template scale may differ from source face size.
+        # Search a compact range of scales and keep the highest-confidence match.
+        candidate_scales = [1.0, 0.85, 0.72, 0.62, 0.54, 0.46, 0.40, 0.34, 0.29, 0.24, 0.20, 0.17, 0.14, 0.12]
+        best = None  # (score, x, y, w, h)
+        for extra_scale in candidate_scales:
+            tw = max(12, int(round(cw * input_scale * extra_scale)))
+            th = max(12, int(round(ch * input_scale * extra_scale)))
+            if tw >= sw or th >= sh:
+                continue
+
+            try:
+                templ = cv2.resize(crop_gray, (tw, th), interpolation=cv2.INTER_AREA)
+                response = cv2.matchTemplate(input_gray_small, templ, cv2.TM_CCOEFF_NORMED)
+                _min_val, max_val, _min_loc, max_loc = cv2.minMaxLoc(response)
+            except Exception:
+                continue
+
+            if best is None or max_val > best[0]:
+                best = (float(max_val), int(max_loc[0]), int(max_loc[1]), int(tw), int(th))
+
+        if best is None:
+            return None
+
+        best_score, bx, by, bw, bh = best
+        # Low-confidence matches are often false positives on repeated textures.
+        if best_score < 0.20:
+            return None
+
+        inv = (1.0 / input_scale) if input_scale > 0 else 1.0
+        x = int(round(bx * inv))
+        y = int(round(by * inv))
+        w = int(round(bw * inv))
+        h = int(round(bh * inv))
+
+        x = max(0, min(x, max(0, iw - 1)))
+        y = max(0, min(y, max(0, ih - 1)))
+        w = max(8, min(w, iw - x))
+        h = max(8, min(h, ih - y))
+
+        # Crop templates include substantial context; tighten to a face-centered region
+        # so the hover highlight corresponds more closely to the visible face card.
+        tight_w = max(8, int(round(w * 0.62)))
+        tight_h = max(8, int(round(h * 0.78)))
+        tight_x = x + int(round((w - tight_w) * 0.50))
+        tight_y = y + int(round((h - tight_h) * 0.26))
+        tight_x = max(0, min(tight_x, max(0, iw - 1)))
+        tight_y = max(0, min(tight_y, max(0, ih - 1)))
+        tight_w = max(8, min(tight_w, iw - tight_x))
+        tight_h = max(8, min(tight_h, ih - tight_y))
+        return (tight_x, tight_y, tight_w, tight_h)
+
+    def eventFilter(self, watched, event):
+        try:
+            if hasattr(self, "face_preview_strip_scroll") and watched is self.face_preview_strip_scroll.viewport():
+                et = event.type()
+                if et in (QEvent.MouseMove, QEvent.HoverMove):
+                    vp_pos = event.pos()
+                    container_pos = self.face_preview_strip_container.mapFrom(watched, vp_pos)
+                    child = self.face_preview_strip_container.childAt(container_pos)
+                    while child is not None and (not isinstance(child, FaceStripToolButton)):
+                        child = child.parentWidget()
+                    if isinstance(child, FaceStripToolButton):
+                        self.set_hover_face_preview_index(child.property("faceIndex"))
+                    else:
+                        self.clear_hover_face_preview_index()
+                elif et in (QEvent.Leave, QEvent.HoverLeave):
+                    self.clear_hover_face_preview_index()
+                return super().eventFilter(watched, event)
+
+            if isinstance(watched, FaceStripToolButton):
+                et = event.type()
+                if et in (QEvent.Enter, QEvent.HoverEnter, QEvent.MouseMove, QEvent.HoverMove):
+                    self.set_hover_face_preview_index(watched.property("faceIndex"))
+                elif et in (QEvent.Leave, QEvent.HoverLeave):
+                    self.clear_hover_face_preview_index()
+        except Exception:
+            # Never let hover diagnostics break event dispatch.
+            pass
+        return super().eventFilter(watched, event)
 
     def select_face_preview(self, face_index, user_initiated=False):
         if face_index < 0 or face_index >= len(self.face_preview_entries):
@@ -3991,12 +4635,32 @@ class MainWindow(QMainWindow):
             self.refresh_input_preview_scale()
             return
 
+        # Multi-face mapping should prefer cropper probe, which mirrors the same
+        # alignment transform used for face-crop outputs.
+        if expected_count and int(expected_count) > 1:
+            cropper_boxes = self.resolve_input_face_boxes_via_cropper_probe(image_path, expected_count=expected_count)
+            if len(cropper_boxes) >= int(expected_count):
+                self.input_face_boxes = cropper_boxes
+                self.input_face_box_source = "cropper_probe"
+                self.refresh_input_preview_scale()
+                return
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if len(retina_boxes) >= int(expected_count):
+                self.input_face_boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
+                self.refresh_input_preview_scale()
+                return
+
         try:
             import cv2
         except Exception:
             if (not self._face_overlay_detector_warned) and expected_count and expected_count > 1:
-                self.log_box.append("OpenCV unavailable; input face boxes are disabled.")
+                self.log_box.append("OpenCV unavailable in GUI env; attempting Retina face-box probe.")
                 self._face_overlay_detector_warned = True
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if retina_boxes:
+                self.input_face_boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
             self.refresh_input_preview_scale()
             return
 
@@ -4015,18 +4679,30 @@ class MainWindow(QMainWindow):
         detected = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
         boxes = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detected]
         if not boxes:
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if retina_boxes:
+                self.input_face_boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
             self.refresh_input_preview_scale()
             return
 
         if expected_count is not None and expected_count > 0:
             boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)[:expected_count]
         boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
+        if expected_count is not None and expected_count > 0 and len(boxes) < int(expected_count):
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if len(retina_boxes) >= len(boxes):
+                boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
         self.input_face_boxes = boxes
-        self.input_face_box_source = "cascade"
+        if self.input_face_box_source is None:
+            self.input_face_box_source = "cascade"
         self.refresh_input_preview_scale()
 
     def set_input_preview_image(self, image_path: Path | None):
         self.input_pixmap = None
+        self.hover_face_box_override = None
+        self.hover_face_box_cache = {}
         if image_path is None or (not image_path.exists()):
             self.input_face_boxes = []
             self.input_face_box_source = None
@@ -4077,7 +4753,30 @@ class MainWindow(QMainWindow):
         h = max(1, self.input_preview_label.height() - 10)
         scaled = self.input_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
-        if self.input_face_boxes:
+        active_idx = self.hover_face_preview_index
+        if isinstance(active_idx, int):
+            cursor_idx = self._cursor_face_preview_index()
+            if isinstance(cursor_idx, int):
+                if cursor_idx != active_idx:
+                    self.hover_face_preview_index = cursor_idx
+                active_idx = cursor_idx
+            else:
+                self.hover_face_preview_index = None
+                self.hover_face_box_override = None
+                active_idx = None
+
+        active_box = self.hover_face_box_override
+        if active_box is None and isinstance(active_idx, int):
+            cached_box = self.hover_face_box_cache.get(active_idx)
+            if cached_box is None:
+                cached_box = self.resolve_hover_face_box(active_idx)
+                self.hover_face_box_cache[active_idx] = cached_box
+            active_box = cached_box
+
+        draw_debug_boxes = bool(self.face_box_debug_overlay_enabled) and bool(self.input_face_boxes)
+        draw_hover_box = isinstance(active_idx, int) and (active_box is not None)
+
+        if draw_debug_boxes or draw_hover_box:
             draw = QPixmap(scaled)
             painter = QPainter(draw)
             painter.setRenderHint(QPainter.Antialiasing)
@@ -4085,25 +4784,56 @@ class MainWindow(QMainWindow):
             sx = draw.width() / max(1.0, float(self.input_pixmap.width()))
             sy = draw.height() / max(1.0, float(self.input_pixmap.height()))
 
-            pen = QPen(QColor("#2f7be6"))
-            pen.setWidth(2)
-            painter.setPen(pen)
-            font = QFont("Segoe UI", 9, QFont.Bold)
-            painter.setFont(font)
+            if draw_debug_boxes:
+                debug_pen = QPen(QColor(102, 181, 255, 150))
+                debug_pen.setWidth(1)
+                painter.setPen(debug_pen)
+                painter.setFont(QFont("Segoe UI", 8))
+                for idx, box in enumerate(self.input_face_boxes):
+                    x, y, bw, bh = box
+                    rx = int(round(x * sx))
+                    ry = int(round(y * sy))
+                    rw = max(8, int(round(bw * sx)))
+                    rh = max(8, int(round(bh * sy)))
+                    hx = max(0, rx - 1)
+                    hy = max(0, ry - 1)
+                    hw = min(draw.width() - hx - 1, rw + 2)
+                    hh = min(draw.height() - hy - 1, rh + 2)
+                    if hw <= 4 or hh <= 4:
+                        continue
+                    painter.drawRoundedRect(hx, hy, hw, hh, 4, 4)
+                    badge_w = 16
+                    badge_h = 12
+                    badge_y = max(0, hy - badge_h)
+                    painter.fillRect(hx, badge_y, badge_w, badge_h, QColor(32, 63, 92, 190))
+                    painter.setPen(QColor("#d8ecff"))
+                    painter.drawText(hx, badge_y, badge_w, badge_h, Qt.AlignCenter, str(idx + 1))
+                    painter.setPen(debug_pen)
 
-            for idx, (x, y, bw, bh) in enumerate(self.input_face_boxes):
+            if draw_hover_box:
+                x, y, bw, bh = active_box
                 rx = int(round(x * sx))
                 ry = int(round(y * sy))
                 rw = max(8, int(round(bw * sx)))
                 rh = max(8, int(round(bh * sy)))
-                painter.drawRoundedRect(rx, ry, rw, rh, 4, 4)
 
-                badge_w = 20
-                badge_h = 16
-                painter.fillRect(rx, max(0, ry - badge_h), badge_w, badge_h, QColor(26, 115, 232, 220))
-                painter.setPen(QColor("#ffffff"))
-                painter.drawText(rx, max(0, ry - badge_h), badge_w, badge_h, Qt.AlignCenter, str(idx + 1))
-                painter.setPen(pen)
+                hx = max(0, rx - 2)
+                hy = max(0, ry - 2)
+                hw = min(draw.width() - hx - 1, rw + 4)
+                hh = min(draw.height() - hy - 1, rh + 4)
+                if hw > 4 and hh > 4:
+                    hover_pen = QPen(QColor("#66b5ff"))
+                    hover_pen.setWidth(3)
+                    painter.setPen(hover_pen)
+                    painter.drawRoundedRect(hx, hy, hw, hh, 5, 5)
+
+                    badge_w = 22
+                    badge_h = 16
+                    badge_y = max(0, hy - badge_h)
+                    painter.fillRect(hx, badge_y, badge_w, badge_h, QColor(26, 115, 232, 220))
+                    painter.setPen(QColor("#ffffff"))
+                    painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
+                    painter.drawText(hx, badge_y, badge_w, badge_h, Qt.AlignCenter, str(active_idx + 1))
 
             painter.end()
             scaled = draw
@@ -4310,6 +5040,13 @@ class MainWindow(QMainWindow):
         self.append_command_preview(command)
         self.status_label.setText(status_text)
         self.set_controls_for_running(True)
+        if self.current_run_summary_context is not None:
+            try:
+                preset_idx = command.index("-Preset")
+                if preset_idx + 1 < len(command):
+                    self.current_run_summary_context["effective_preset"] = command[preset_idx + 1]
+            except ValueError:
+                pass
 
         self.run_started_at = time.time()
         if hasattr(self, "_elapsed_timer"):
@@ -4368,8 +5105,8 @@ class MainWindow(QMainWindow):
             self.face_select_all_button.setEnabled(True)
         if hasattr(self, "face_select_none_button"):
             self.face_select_none_button.setEnabled(True)
-        self.status_label.setText("Status: Select face(s) and click Continue Rephoto")
-        self.log_box.append(f"Detected {crop_count} faces. Select face(s) in the strip, then click Continue Rephoto.")
+        self.status_label.setText("Status: Select one or more faces, then click Continue")
+        self.log_box.append(f"Detected {crop_count} faces. Select one or more faces in the strip, then click Continue.")
         self.clear_result_stage_overlay()
         self.render_face_preview_strip()
 
@@ -4400,8 +5137,8 @@ class MainWindow(QMainWindow):
                 entry["status"] = "skipped"
         self.selected_face_preview_index = selected_indices[0]
         self.render_face_preview_strip()
-        if self.current_run_summary_context is not None:
-            self.current_run_summary_context["selected_faces"] = self.get_selected_face_count_text()
+        self.current_run_summary_context = self._capture_run_context()
+        self.current_run_summary_context["selected_faces"] = self.get_selected_face_count_text()
         self.update_runtime_label()
 
         self.clear_result_stage_overlay()
@@ -4410,9 +5147,6 @@ class MainWindow(QMainWindow):
         self.set_preprocess_progress(5, "Preparing selected faces...")
         self.set_rephoto_progress(0, "Waiting...")
         self._reset_wrapper_runtime_tracking()
-
-        if self.current_run_summary_context is None:
-            self.current_run_summary_context = self._capture_run_context()
 
         command = self.build_wrapper_command(
             force_crop_only=False,
@@ -4539,12 +5273,14 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Backend returned an error")
             self.clear_result_stage_overlay()
 
-        self.show_run_summary_dialog(
+        summary_text = self._store_run_summary_text(
             success=(exit_code == 0),
             exit_code=exit_code,
             elapsed_seconds=elapsed_seconds,
             output_path=final_output_path,
         )
+        if exit_code != 0 and summary_text:
+            self._show_run_summary_text_dialog(summary_text)
         self.selection_preprocess_mode = False
         self.awaiting_face_selection = False
         self.set_run_button_continue_mode(False)

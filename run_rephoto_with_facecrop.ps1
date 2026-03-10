@@ -231,7 +231,14 @@ else {
 # Gather cropped faces.
 $CropFiles = Get-ChildItem -LiteralPath $CropOutDir -File |
     Where-Object { $_.Extension -match '^\.(png|jpg|jpeg|bmp|tif|tiff|webp)$' } |
-    Sort-Object Name
+    Sort-Object @{
+        Expression = {
+            $stem = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+            if ($stem -match '_(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue }
+        }
+    }, @{
+        Expression = { $_.Name }
+    }
 
 if ($CropFiles.Count -eq 0) {
     throw "No cropped face image files were created in: $CropOutDir"
@@ -454,9 +461,12 @@ if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
 # Run projector on each crop in the rephoto environment.
 Push-Location -LiteralPath $RepoRoot
 try {
+    $CropOrdinal = 0
     foreach ($Crop in $CropFiles) {
+        $CropOrdinal++
         $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
-        $ThisResultDir = Join-Path $ResultRoot "$CropBase`_p$Preset"
+        # Keep per-face result folder names short to avoid Windows path-length failures.
+        $ThisResultDir = Join-Path $ResultRoot ("face_{0:D3}_p{1}" -f $CropOrdinal, $Preset)
 
         $ProjectorImagePath = $Crop.FullName
 
@@ -520,9 +530,14 @@ try {
             Select-Object -First 1
 
         if ($null -ne $FinalPng) {
-            $SimpleFinal = Join-Path $ThisResultDir "final_$CropBase`_p$Preset.png"
-            Copy-Item -LiteralPath $FinalPng.FullName -Destination $SimpleFinal -Force
-            Write-Host "Simple final copy: $SimpleFinal"
+            $SimpleFinal = Join-Path $ThisResultDir "final.png"
+            try {
+                Copy-Item -LiteralPath $FinalPng.FullName -Destination $SimpleFinal -Force
+                Write-Host "Simple final copy: $SimpleFinal"
+            }
+            catch {
+                Write-Warning "Simple final copy failed (non-fatal): $($_.Exception.Message)"
+            }
         }
     }
 }
