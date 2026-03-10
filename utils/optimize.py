@@ -44,6 +44,7 @@ class OptimizerArguments:
         parser.add_argument("--log_dir", default="log/projector", help="tensorboard log directory")
         parser.add_argument("--log_freq", type=int, default=10, help="log frequency")
         parser.add_argument("--log_visual_freq", type=int, default=50, help="log frequency")
+        parser.add_argument("--progress_freq", type=int, default=10, help="tqdm description refresh interval")
 
     @staticmethod
     def to_string(args: Namespace) -> str:
@@ -115,9 +116,14 @@ class Optimizer:
         device = target.device
 
         # start optimize
-        total_steps = np.sum(args.wplus_step)
-        max_coarse_size = (2 ** (len(args.wplus_step) - 1)) * args.coarse_min
-        noiser = LatentNoiser(generator, noise_ramp=args.noise_ramp, noise_strength=args.noise_strength).to(device)
+        total_steps = int(np.sum(args.wplus_step))
+        noiser = None
+        if args.noise_strength > 0:
+            noiser = LatentNoiser(
+                generator,
+                noise_ramp=args.noise_ramp,
+                noise_strength=args.noise_strength,
+            ).to(device)
         latent = latent_init.detach().clone()
         milestone_hits = set()
         for coarse_level, steps in enumerate(args.wplus_step):
@@ -133,12 +139,14 @@ class Optimizer:
                     latent, generator.get_latent_size(coarse_size))
             parameters = create_parameters(latent_coarse)
             optimizer = RAdam(parameters)
+            completed_before_level = int(np.sum(args.wplus_step[:coarse_level]))
+            progress_freq = max(1, int(getattr(args, "progress_freq", 10)))
 
             print(f"Optimizing {coarse_size}x{coarse_size}")
             pbar = tqdm(range(steps))
             for si in pbar:
                 latent = torch.cat((latent_coarse, latent_fine), dim=1)
-                niters = si + np.sum(args.wplus_step[:coarse_level])
+                niters = si + completed_before_level
 
                 # Emit milestone markers for shorter-run timing reuse
                 completed_iters = niters + 1
@@ -147,7 +155,10 @@ class Optimizer:
                     if current_milestone not in milestone_hits and current_milestone < total_steps:
                         print(f"=== Rephoto milestone === {current_milestone}")
                         milestone_hits.add(current_milestone)
-                latent_noisy = noiser(latent, niters / total_steps)
+                if noiser is None:
+                    latent_noisy = latent
+                else:
+                    latent_noisy = noiser(latent, niters / max(1, total_steps))
                 img_gen, _, rgbs = generator([latent_noisy], input_is_latent=True, noise=noises)
                 # TODO: use coarse_size instead of args.coarse_size for rgb_level
                 loss, losses = criterion(img_gen, degrade=degrade, noises=noises, rgbs=rgbs)
@@ -158,8 +169,9 @@ class Optimizer:
 
                 NoiseRegularizer.normalize(noises)
 
-                # log
-                pbar.set_description("; ".join([f"{k}: {v.item(): .3e}" for k, v in losses.items()]))
+                # Refreshing tqdm text less often avoids frequent GPU->CPU sync for .item().
+                if si % progress_freq == 0 or si == (steps - 1):
+                    pbar.set_description("; ".join([f"{k}: {v.item(): .3e}" for k, v in losses.items()]))
 
                 if writer is not None and niters % args.log_freq == 0:
                     cls.log_losses(writer, niters, loss, losses, criterion.weights)

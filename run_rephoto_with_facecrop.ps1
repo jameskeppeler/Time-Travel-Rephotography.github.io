@@ -12,6 +12,7 @@
     [double]$DetThreshold = 0.9,
 
     [int]$CropIndex = -1,
+    [string]$SelectedCropIndices = "",
 
     [switch]$CropOnly,
 
@@ -208,8 +209,9 @@ if (-not $UseExistingCrops) {
     conda run -n $FaceCropEnvName $FaceCropCommand `
         -i $TempInputDir `
         -o $CropOutDir `
-        -s 1000 `
-        -f jpg `
+        -s 2048 `
+        -f png `
+        -r 3072 `
         -st $Strategy `
         -ff $FaceFactor `
         -dt $DetThreshold
@@ -227,13 +229,42 @@ else {
 }
 
 # Gather cropped faces.
-$CropFiles = Get-ChildItem -LiteralPath $CropOutDir -File -Filter "*.jpg" | Sort-Object Name
+$CropFiles = Get-ChildItem -LiteralPath $CropOutDir -File |
+    Where-Object { $_.Extension -match '^\.(png|jpg|jpeg|bmp|tif|tiff|webp)$' } |
+    Sort-Object Name
 
 if ($CropFiles.Count -eq 0) {
-    throw "No cropped face JPGs were created in: $CropOutDir"
+    throw "No cropped face image files were created in: $CropOutDir"
 }
 
-if ($CropIndex -ge 0) {
+$AllCropFiles = @($CropFiles)
+
+$ParsedSelectedCropIndices = @()
+if (-not [string]::IsNullOrWhiteSpace($SelectedCropIndices)) {
+    $ParsedSelectedCropIndices = @(
+        $SelectedCropIndices -split '[,\s;]+' |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { [int]$_ } |
+        Sort-Object -Unique
+    )
+}
+
+if ($ParsedSelectedCropIndices.Count -gt 0) {
+    if ($CropIndex -ge 0) {
+        throw "Use either -CropIndex or -SelectedCropIndices, not both."
+    }
+
+    $NormalizedIndices = @($ParsedSelectedCropIndices)
+    foreach ($Index in $NormalizedIndices) {
+        if ($Index -lt 0 -or $Index -ge $AllCropFiles.Count) {
+            throw "Requested SelectedCropIndices entry '$Index' is out of range for $($AllCropFiles.Count) cropped face(s)."
+        }
+    }
+
+    $CropFiles = @($NormalizedIndices | ForEach-Object { $AllCropFiles[$_] })
+    Write-Host "Selected crop indices: $($NormalizedIndices -join ', ')"
+}
+elseif ($CropIndex -ge 0) {
     if ($CropIndex -ge $CropFiles.Count) {
         throw "Requested CropIndex $CropIndex but only $($CropFiles.Count) cropped face(s) exist."
     }
@@ -266,12 +297,24 @@ if (-not $CropOnly) {
         -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
 }
 
+$GFPGANInputDir = $CropOutDir
+$GFPGANSelectedInputDir = Join-Path $GFPGANRunRoot "selected_input"
+if ($UseGFPGAN -and $CropFiles.Count -lt $AllCropFiles.Count) {
+    New-Item -ItemType Directory -Path $GFPGANSelectedInputDir -Force | Out-Null
+    Get-ChildItem -LiteralPath $GFPGANSelectedInputDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    foreach ($Crop in $CropFiles) {
+        Copy-Item -LiteralPath $Crop.FullName -Destination (Join-Path $GFPGANSelectedInputDir $Crop.Name) -Force
+    }
+    $GFPGANInputDir = $GFPGANSelectedInputDir
+}
+
 # Optional GFPGAN enhancement + blend stage.
 if ($UseGFPGAN) {
     Write-Host "=== GFPGAN step ==="
     Write-Host "GFPGAN root: $GFPGANRoot"
     Write-Host "GFPGAN version: $GFPGANVersion"
     Write-Host "GFPGAN blend: $GFPGANBlend"
+    Write-Host "GFPGAN input: $GFPGANInputDir"
     Write-Host ""
 
     Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
@@ -280,7 +323,7 @@ if ($UseGFPGAN) {
     Push-Location -LiteralPath $GFPGANRoot
 try {
     conda run -n $GFPGANEnvName python (Join-Path $GFPGANRoot "inference_gfpgan.py") `
-        -i $CropOutDir `
+        -i $GFPGANInputDir `
         -o $GFPGANOutputDir `
         -v $GFPGANVersion `
         -s 1 `
@@ -309,22 +352,32 @@ alpha = float(sys.argv[4])
 
 os.makedirs(out_dir, exist_ok=True)
 
-for f in sorted(glob.glob(os.path.join(orig_dir, "*.jpg"))):
+patterns = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp")
+orig_files = []
+for pattern in patterns:
+    orig_files.extend(glob.glob(os.path.join(orig_dir, pattern)))
+
+for f in sorted(set(orig_files)):
     base = os.path.splitext(os.path.basename(f))[0]
-    matches = sorted(glob.glob(os.path.join(enh_dir, base + "*_gfp.png")))
+    matches = sorted(glob.glob(os.path.join(enh_dir, base + "_*_gfp.png")))
+    if not matches:
+        exact = os.path.join(enh_dir, base + "_gfp.png")
+        if os.path.exists(exact):
+            matches = [exact]
     if not matches:
         print(f"MISSING {base}")
         continue
+    match = matches[0]
 
     a = Image.open(f).convert("RGBA")
-    b = Image.open(matches[0]).convert("RGBA").resize(a.size)
+    b = Image.open(match).convert("RGBA").resize(a.size)
     out = os.path.join(out_dir, base + "_blend.png")
-    Image.blend(a, b, alpha).convert("RGB").save(out, quality=95)
+    Image.blend(a, b, alpha).convert("RGB").save(out)
     print(f"WROTE {out}")
 '@ | Set-Content -LiteralPath $BlendScriptPath
 
     conda run -n $GFPGANEnvName python $BlendScriptPath `
-        $CropOutDir `
+        $GFPGANInputDir `
         (Join-Path $GFPGANOutputDir "restored_faces") `
         $GFPGANBlendDir `
         $GFPGANBlend
@@ -353,6 +406,7 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "FaceFactor=$FaceFactor"
     "DetThreshold=$DetThreshold"
     "CropIndex=$CropIndex"
+    "SelectedCropIndices=$SelectedCropIndices"
     "CropOnly=$CropOnly"
     "UseExistingCrops=$UseExistingCrops"
     "UseGFPGAN=$UseGFPGAN"
@@ -360,11 +414,13 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "GFPGANEnvName=$GFPGANEnvName"
     "FaceCropEnvName=$FaceCropEnvName"
     "FaceCropCommand=$FaceCropCommand"
+    "FaceResizeSize=3072"
     "RephotoEnvName=$RephotoEnvName"
     "EncoderCkptPath=$EncoderCkptPath"
     "PreprocessRoot=$PreprocessRoot"
     "ResultsRoot=$ResultsRoot"
     "GFPGANBlend=$GFPGANBlend"
+    "GFPGANInputDir=$GFPGANInputDir"
     "ProjectorInputDir=$ProjectorInputDir"
     "CropCount=$($CropFiles.Count)"
     "RunStamp=$RunStamp"

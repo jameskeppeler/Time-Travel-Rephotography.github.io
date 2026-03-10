@@ -2,7 +2,6 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InputDir,
 
-    [ValidateSet("test", "1500", "3000", "6000")]
     [string]$Preset = "3000",
 
     [ValidateSet("all", "largest")]
@@ -10,6 +9,7 @@ param(
     [double]$FaceFactor = 0.65,
     [double]$DetThreshold = 0.9,
     [int]$CropIndex = -1,
+    [string]$SelectedCropIndices = "",
     [switch]$CropOnly,
     [switch]$UseExistingCrops,
     [switch]$UseGFPGAN,
@@ -26,7 +26,20 @@ param(
     [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
     [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
 
-[double]$GFPGANBlend = 0.35
+    [double]$GFPGANBlend = 0.35,
+    [ValidateSet("b", "gb", "g")]
+    [string]$SpectralSensitivity = "b",
+    [double]$Gaussian = 0.75,
+    [double]$VGGFace = 0.3,
+    [double]$VGG = 1.0,
+    [double]$ColorTransfer = 10000000000.0,
+    [double]$Eye = 0.1,
+    [double]$Contextual = 0.1,
+    [double]$NoiseRegularize = 50000.0,
+    [double]$LR = 0.1,
+    [double]$CameraLR = 0.01,
+    [int]$MixLayerStart = 10,
+    [int]$MixLayerEnd = 18
 )
 
 $ErrorActionPreference = "Stop"
@@ -94,28 +107,44 @@ foreach ($File in $Files) {
     Write-Host "Image: $($File.FullName)"
     Write-Host ""
 
-$RunArgs = @{
-    InputImage      = $File.FullName
-    Preset          = $Preset
-    Strategy        = $Strategy
-    FaceFactor      = $FaceFactor
-    DetThreshold    = $DetThreshold
-    CropIndex       = $CropIndex
-    GFPGANEnvName   = $GFPGANEnvName
-    GFPGANRoot      = $GFPGANRoot
-    FaceCropEnvName = $FaceCropEnvName
-    RephotoEnvName  = $RephotoEnvName
-    EncoderCkptPath = $EncoderCkptPath
-    ProjectorScriptPath = $ProjectorScriptPath
-    PreprocessRoot  = $PreprocessRoot
-    ResultsRoot     = $ResultsRoot
-    FaceCropCommand = $FaceCropCommand
-    GFPGANBlend     = $GFPGANBlend
-    GFPGANVersion   = $GFPGANVersion
-}
+    $RunArgs = @{
+        InputImage      = $File.FullName
+        Preset          = $Preset
+        Strategy        = $Strategy
+        FaceFactor      = $FaceFactor
+        DetThreshold    = $DetThreshold
+        CropIndex       = $CropIndex
+        GFPGANEnvName   = $GFPGANEnvName
+        GFPGANRoot      = $GFPGANRoot
+        FaceCropEnvName = $FaceCropEnvName
+        RephotoEnvName  = $RephotoEnvName
+        EncoderCkptPath = $EncoderCkptPath
+        ProjectorScriptPath = $ProjectorScriptPath
+        PreprocessRoot  = $PreprocessRoot
+        ResultsRoot     = $ResultsRoot
+        FaceCropCommand = $FaceCropCommand
+        GFPGANBlend     = $GFPGANBlend
+        GFPGANVersion   = $GFPGANVersion
+        SpectralSensitivity = $SpectralSensitivity
+        Gaussian        = $Gaussian
+        VGGFace         = $VGGFace
+        VGG             = $VGG
+        ColorTransfer   = $ColorTransfer
+        Eye             = $Eye
+        Contextual      = $Contextual
+        NoiseRegularize = $NoiseRegularize
+        LR              = $LR
+        CameraLR        = $CameraLR
+        MixLayerStart   = $MixLayerStart
+        MixLayerEnd     = $MixLayerEnd
+    }
 
     if ($CropOnly) {
         $RunArgs.CropOnly = $true
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SelectedCropIndices)) {
+        $RunArgs.SelectedCropIndices = $SelectedCropIndices
     }
 
     if ($UseExistingCrops) {
@@ -123,7 +152,7 @@ $RunArgs = @{
     }
 
     if ($UseGFPGAN) {
-    $RunArgs.UseGFPGAN = $true
-}
+        $RunArgs.UseGFPGAN = $true
+    }
     & $SingleRunner @RunArgs
 }
