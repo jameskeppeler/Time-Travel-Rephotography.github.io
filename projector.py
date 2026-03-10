@@ -1,5 +1,6 @@
 ﻿from argparse import Namespace
 import os
+import hashlib
 from os.path import join as pjoin
 import random
 import sys
@@ -41,6 +42,15 @@ def set_random_seed(seed: int):
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+
+def short_hash(text: str, n: int = 10) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:n]
+
+
+def compact_run_tag(input_stem: str, opt_str: str, max_stem: int = 40) -> str:
+    stem_part = (input_stem or "input")[:max_stem]
+    return f"{stem_part}-cfg{short_hash(input_stem + '|' + opt_str)}"
 
 
 def read_images(paths: str, max_size: Optional[int] = None):
@@ -101,6 +111,8 @@ def save(
 def main(args):
     opt_str = ProjectorArguments.to_string(args)
     print(opt_str)
+    input_stem = stem(args.input)
+    run_tag = compact_run_tag(input_stem, opt_str)
 
     if args.rand_seed is not None:
         set_random_seed(args.rand_seed)
@@ -125,13 +137,13 @@ def main(args):
     # create a new input by matching the input's histogram to the sibling image
     with torch.no_grad():
         sibling, _, sibling_rgbs = generator([latent_init], input_is_latent=True, noise=noises_init)
-    mh_dir = pjoin(args.results_dir, stem(args.input))
+    mh_dir = pjoin(args.results_dir, f"mh_{short_hash(input_stem)}")
     imgs = match_skin_histogram(
         imgs, sibling,
         args.spectral_sensitivity,
         pjoin(mh_dir, "input_sibling"),
         pjoin(mh_dir, "skin_mask"),
-        matched_hist_fn=mh_dir.rstrip(os.sep) + f"_{args.spectral_sensitivity}.png",
+        matched_hist_fn=pjoin(mh_dir, f"matched_{args.spectral_sensitivity}.png"),
         normalize=normalize,
     ).to(device)
     torch.cuda.empty_cache()
@@ -146,11 +158,11 @@ def main(args):
 
     # save initialization
     save(
-        [pjoin(args.results_dir, f"{stem(args.input)}-{opt_str}-init")],
+        [pjoin(args.results_dir, f"{run_tag}-init")],
         sibling, latent_init, noises_init,
     )
 
-    writer = SummaryWriter(pjoin(args.log_dir, f"{stem(args.input)}/{opt_str}"))
+    writer = SummaryWriter(pjoin(args.log_dir, run_tag))
     # start optimize
     latent, noises = Optimizer.optimize(generator, criterion, degrade, imgs, latent_init, noises_init, args, writer=writer)
 
@@ -159,7 +171,7 @@ def main(args):
     img_out_rand_noise, _, _ = generator([latent], input_is_latent=True)
     # save output
     save(
-        [pjoin(args.results_dir, f"{stem(args.input)}-{opt_str}")],
+        [pjoin(args.results_dir, run_tag)],
         img_out, latent, noises,
         imgs_rand=img_out_rand_noise
     )

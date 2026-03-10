@@ -81,6 +81,12 @@ class LatentNoiser(nn.Module):
 
 
 class Optimizer:
+    @staticmethod
+    def _to_float_scalar(value) -> float:
+        if torch.is_tensor(value):
+            return float(value.detach().item())
+        return float(value)
+
     @classmethod
     def optimize(
             cls,
@@ -171,7 +177,15 @@ class Optimizer:
 
                 # Refreshing tqdm text less often avoids frequent GPU->CPU sync for .item().
                 if si % progress_freq == 0 or si == (steps - 1):
-                    pbar.set_description("; ".join([f"{k}: {v.item(): .3e}" for k, v in losses.items()]))
+                    desc_parts = []
+                    for k, v in losses.items():
+                        try:
+                            scalar_v = cls._to_float_scalar(v)
+                        except (TypeError, ValueError):
+                            continue
+                        desc_parts.append(f"{k}: {scalar_v: .3e}")
+                    if desc_parts:
+                        pbar.set_description("; ".join(desc_parts))
 
                 if writer is not None and niters % args.log_freq == 0:
                     cls.log_losses(writer, niters, loss, losses, criterion.weights)
@@ -199,12 +213,17 @@ class Optimizer:
             losses: Dict[str, torch.Tensor],
             weights: Optional[Dict[str, torch.Tensor]] = None
     ):
-        writer.add_scalar("loss", loss_total.item(), niters)
+        writer.add_scalar("loss", Optimizer._to_float_scalar(loss_total), niters)
 
         for name, loss in losses.items():
-            writer.add_scalar(name, loss.item(), niters)
-            if weights is not None:
-                writer.add_scalar(f"weighted_{name}", weights[name] * loss.item(), niters)
+            try:
+                loss_scalar = Optimizer._to_float_scalar(loss)
+            except (TypeError, ValueError):
+                continue
+            writer.add_scalar(name, loss_scalar, niters)
+            if weights is not None and name in weights:
+                weight_scalar = Optimizer._to_float_scalar(weights[name])
+                writer.add_scalar(f"weighted_{name}", weight_scalar * loss_scalar, niters)
 
     @staticmethod
     def log_parameters(

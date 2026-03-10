@@ -1222,6 +1222,9 @@ class MainWindow(QMainWindow):
         self.input_pixmap = None
         self.result_pixmap = None
         self.last_result_image_path = None
+        self.result_preview_pixmap_cache = {}
+        self.result_preview_pixmap_cache_max_entries = 96
+        self.result_preview_path_before_hover = None
         self.input_face_boxes = []
         self.input_face_box_source = None
         self.face_box_debug_overlay_enabled = False
@@ -4200,6 +4203,8 @@ class MainWindow(QMainWindow):
                 idx = None
         if self.hover_face_preview_index == idx:
             return
+        if self.hover_face_preview_index is None:
+            self.result_preview_path_before_hover = self.last_result_image_path
         self.hover_face_preview_index = idx
         self.hover_face_box_override = None
         if isinstance(idx, int):
@@ -4208,6 +4213,9 @@ class MainWindow(QMainWindow):
                 cached_box = self.resolve_hover_face_box(idx)
                 self.hover_face_box_cache[idx] = cached_box
             self.hover_face_box_override = cached_box
+            hover_preview_path = self.get_face_preview_path(idx)
+            if hover_preview_path is not None:
+                self.set_result_preview_image(hover_preview_path)
         self.refresh_input_preview_scale()
 
     def clear_hover_face_preview_index(self):
@@ -4215,6 +4223,12 @@ class MainWindow(QMainWindow):
         self.hover_face_preview_index = None
         self.hover_face_box_override = None
         if had_hover:
+            restore_path = self.get_selected_face_preview_path()
+            if restore_path is None:
+                restore_path = self.result_preview_path_before_hover
+            if restore_path is not None:
+                self.set_result_preview_image(restore_path)
+            self.result_preview_path_before_hover = None
             self.refresh_input_preview_scale()
 
     def _cursor_face_preview_index(self):
@@ -4400,6 +4414,7 @@ class MainWindow(QMainWindow):
             self.update_runtime_label()
 
         self.render_face_preview_strip()
+        self.refresh_input_preview_scale()
 
     def handle_face_auto_follow_toggled(self, checked):
         if not checked or not self.face_preview_entries:
@@ -4427,6 +4442,7 @@ class MainWindow(QMainWindow):
         self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
         self.update_runtime_label()
         self.render_face_preview_strip()
+        self.refresh_input_preview_scale()
 
     def get_selected_face_preview_path(self):
         if not self.face_preview_entries:
@@ -4442,6 +4458,18 @@ class MainWindow(QMainWindow):
             if idx is None:
                 idx = 0
             self.selected_face_preview_index = idx
+
+        return self.get_face_preview_path(idx)
+
+    def get_face_preview_path(self, face_index):
+        if not self.face_preview_entries:
+            return None
+        try:
+            idx = int(face_index)
+        except Exception:
+            return None
+        if idx < 0 or idx >= len(self.face_preview_entries):
+            return None
 
         entry = self.face_preview_entries[idx]
         preview_path = entry.get("result_path") or entry.get("crop_path")
@@ -4724,18 +4752,56 @@ class MainWindow(QMainWindow):
         )
         self.refresh_input_preview_scale()
 
+    def _result_preview_cache_key(self, image_path: Path):
+        try:
+            return str(Path(image_path).resolve()).lower()
+        except Exception:
+            return str(image_path).lower()
+
+    def _get_result_pixmap_cached(self, image_path: Path):
+        key = self._result_preview_cache_key(image_path)
+        cached = self.result_preview_pixmap_cache.pop(key, None)
+        if cached is not None and (not cached.isNull()):
+            self.result_preview_pixmap_cache[key] = cached
+            return cached
+
+        pix = QPixmap(str(image_path))
+        if pix.isNull():
+            return None
+
+        self.result_preview_pixmap_cache[key] = pix
+        while len(self.result_preview_pixmap_cache) > int(self.result_preview_pixmap_cache_max_entries):
+            oldest_key = next(iter(self.result_preview_pixmap_cache))
+            self.result_preview_pixmap_cache.pop(oldest_key, None)
+        return pix
+
     def set_result_preview_image(self, image_path: Path | None):
-        self.last_result_image_path = None
-        self.result_pixmap = None
+        prev_path = self.last_result_image_path
+        prev_pix = self.result_pixmap
         self.open_image_location_button.setEnabled(False)
 
         if image_path is None or (not image_path.exists()):
+            self.last_result_image_path = None
+            self.result_pixmap = None
             self.result_preview_label.setText("No result image found.")
             self.result_preview_label.setPixmap(QPixmap())
             return
 
-        pix = QPixmap(str(image_path))
-        if pix.isNull():
+        image_path = Path(image_path)
+        cache_key = self._result_preview_cache_key(image_path)
+        if prev_path is not None and prev_pix is not None:
+            if self._result_preview_cache_key(prev_path) == cache_key:
+                self.last_result_image_path = prev_path
+                self.result_pixmap = prev_pix
+                self.open_image_location_button.setEnabled(True)
+                self.refresh_result_preview_scale()
+                self.position_result_stage_overlay()
+                return
+
+        pix = self._get_result_pixmap_cached(image_path)
+        if pix is None:
+            self.last_result_image_path = None
+            self.result_pixmap = None
             self.result_preview_label.setText("Could not load result image.")
             self.result_preview_label.setPixmap(QPixmap())
             return
@@ -4773,10 +4839,27 @@ class MainWindow(QMainWindow):
                 self.hover_face_box_cache[active_idx] = cached_box
             active_box = cached_box
 
+        if self.awaiting_face_selection:
+            selected_indices = [e["index"] for e in self.face_preview_entries if e.get("selected", False)]
+        else:
+            selected_indices = []
+            if isinstance(self.selected_face_preview_index, int) and self.selected_face_preview_index >= 0:
+                selected_indices = [self.selected_face_preview_index]
+
+        selected_boxes = []
+        for idx in selected_indices:
+            cached_box = self.hover_face_box_cache.get(idx)
+            if cached_box is None:
+                cached_box = self.resolve_hover_face_box(idx)
+                self.hover_face_box_cache[idx] = cached_box
+            if cached_box is not None:
+                selected_boxes.append((idx, cached_box))
+
         draw_debug_boxes = bool(self.face_box_debug_overlay_enabled) and bool(self.input_face_boxes)
         draw_hover_box = isinstance(active_idx, int) and (active_box is not None)
+        draw_selected_boxes = bool(selected_boxes)
 
-        if draw_debug_boxes or draw_hover_box:
+        if draw_debug_boxes or draw_hover_box or draw_selected_boxes:
             draw = QPixmap(scaled)
             painter = QPainter(draw)
             painter.setRenderHint(QPainter.Antialiasing)
@@ -4810,6 +4893,34 @@ class MainWindow(QMainWindow):
                     painter.drawText(hx, badge_y, badge_w, badge_h, Qt.AlignCenter, str(idx + 1))
                     painter.setPen(debug_pen)
 
+            if draw_selected_boxes:
+                for selected_idx, selected_box in selected_boxes:
+                    x, y, bw, bh = selected_box
+                    rx = int(round(x * sx))
+                    ry = int(round(y * sy))
+                    rw = max(8, int(round(bw * sx)))
+                    rh = max(8, int(round(bh * sy)))
+
+                    hx = max(0, rx - 2)
+                    hy = max(0, ry - 2)
+                    hw = min(draw.width() - hx - 1, rw + 4)
+                    hh = min(draw.height() - hy - 1, rh + 4)
+                    if hw <= 4 or hh <= 4:
+                        continue
+
+                    selected_pen = QPen(QColor(102, 181, 255, 210))
+                    selected_pen.setWidth(2)
+                    painter.setPen(selected_pen)
+                    painter.drawRoundedRect(hx, hy, hw, hh, 5, 5)
+
+                    badge_w = 20
+                    badge_h = 14
+                    badge_y = max(0, hy - badge_h)
+                    painter.fillRect(hx, badge_y, badge_w, badge_h, QColor(39, 93, 152, 205))
+                    painter.setPen(QColor("#eaf5ff"))
+                    painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+                    painter.drawText(hx, badge_y, badge_w, badge_h, Qt.AlignCenter, str(selected_idx + 1))
+
             if draw_hover_box:
                 x, y, bw, bh = active_box
                 rx = int(round(x * sx))
@@ -4834,7 +4945,6 @@ class MainWindow(QMainWindow):
                     painter.setPen(QColor("#ffffff"))
                     painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
                     painter.drawText(hx, badge_y, badge_w, badge_h, Qt.AlignCenter, str(active_idx + 1))
-
             painter.end()
             scaled = draw
 
