@@ -25,9 +25,14 @@ def _to_4pad(value):
 
 
 def _upfirdn2d_fallback_impl(x, kernel, up=1, down=1, pad=(0, 0)):
-    # NCHW expected by StyleGAN2 call sites.
     if x.ndim != 4:
         raise RuntimeError(f"upfirdn2d expected a 4D NCHW tensor, got shape {tuple(x.shape)}")
+
+    # e4e's Windows no-JIT path calls this helper with NHWC tensors shaped
+    # [N, H, W, 1]. Native StyleGAN2 call sites use NCHW.
+    nhwc_mode = bool(x.shape[-1] == 1 and x.shape[1] != 1)
+    if nhwc_mode:
+        x = x.permute(0, 3, 1, 2).contiguous()
 
     up_x, up_y = _to_2tuple(up)
     down_x, down_y = _to_2tuple(down)
@@ -73,7 +78,16 @@ def _upfirdn2d_fallback_impl(x, kernel, up=1, down=1, pad=(0, 0)):
     if down_x > 1 or down_y > 1:
         x = x[:, :, ::down_y, ::down_x]
 
+    if nhwc_mode:
+        x = x.permute(0, 2, 3, 1).contiguous()
+
     return x
+
+
+# Backward-compat export used by e4e stylegan2 op fallback import path:
+# from op.upfirdn2d import _upfirdn2d_fallback as _upfirdn2d
+def _upfirdn2d_fallback(input, kernel, up=1, down=1, pad=(0, 0)):
+    return _upfirdn2d_fallback_impl(input, kernel, up=up, down=down, pad=pad)
 
 
 try:

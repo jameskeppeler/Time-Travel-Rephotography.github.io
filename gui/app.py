@@ -171,11 +171,21 @@ class InputDropLabel(QLabel):
         super().enterEvent(event)
 
     def leaveEvent(self, event):
+        if hasattr(self.parent_window, "handle_input_preview_mouse_leave"):
+            self.parent_window.handle_input_preview_mouse_leave()
         self._set_normal_style()
         super().leaveEvent(event)
 
+    def mouseMoveEvent(self, event):
+        if hasattr(self.parent_window, "handle_input_preview_mouse_move"):
+            self.parent_window.handle_input_preview_mouse_move(event.pos())
+        super().mouseMoveEvent(event)
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            if hasattr(self.parent_window, "handle_input_preview_click"):
+                if self.parent_window.handle_input_preview_click(event.pos()):
+                    return
             if not self.parent_window.can_select_new_image(show_message=True):
                 return
             self.parent_window.browse_for_image()
@@ -1417,6 +1427,7 @@ class MainWindow(QMainWindow):
         self.active_face_preview_index = None
         self.selected_face_preview_index = None
         self.hover_face_preview_index = None
+        self.hover_face_preview_source = None
         self.hover_face_box_override = None
         self.hover_face_box_cache = {}
         self.quick_face_count_estimate = None
@@ -3660,6 +3671,7 @@ class MainWindow(QMainWindow):
     def clear_face_preview_strip_layout(self):
         if self.hover_face_preview_index is not None:
             self.hover_face_preview_index = None
+            self.hover_face_preview_source = None
             self.refresh_input_preview_scale()
         while self.face_preview_strip_layout.count() > 0:
             item = self.face_preview_strip_layout.takeAt(0)
@@ -3672,6 +3684,7 @@ class MainWindow(QMainWindow):
         self.active_face_preview_index = None
         self.selected_face_preview_index = None
         self.hover_face_preview_index = None
+        self.hover_face_preview_source = None
         self.hover_face_box_override = None
         self.hover_face_box_cache = {}
         self.awaiting_face_selection = False
@@ -4493,18 +4506,20 @@ class MainWindow(QMainWindow):
 
         self.face_preview_strip_layout.addStretch(1)
 
-    def set_hover_face_preview_index(self, face_index):
+    def set_hover_face_preview_index(self, face_index, source="strip"):
         idx = face_index
         if idx is not None:
             try:
                 idx = int(idx)
             except Exception:
                 idx = None
-        if self.hover_face_preview_index == idx:
+        source_name = str(source or "strip")
+        if self.hover_face_preview_index == idx and self.hover_face_preview_source == source_name:
             return
         if self.hover_face_preview_index is None:
             self.result_preview_path_before_hover = self.last_result_image_path
         self.hover_face_preview_index = idx
+        self.hover_face_preview_source = source_name if isinstance(idx, int) else None
         self.hover_face_box_override = None
         if isinstance(idx, int):
             cached_box = self.hover_face_box_cache.get(idx)
@@ -4520,6 +4535,7 @@ class MainWindow(QMainWindow):
     def clear_hover_face_preview_index(self):
         had_hover = (self.hover_face_preview_index is not None) or (self.hover_face_box_override is not None)
         self.hover_face_preview_index = None
+        self.hover_face_preview_source = None
         self.hover_face_box_override = None
         if had_hover:
             restore_path = self.get_selected_face_preview_path()
@@ -4563,6 +4579,94 @@ class MainWindow(QMainWindow):
 
         # If uncertain, show no highlight rather than an incorrect one.
         return None
+
+    def _input_preview_display_rect(self):
+        label = self.input_preview_label
+        pix = label.pixmap()
+        if pix is None or pix.isNull():
+            return None
+        pw = int(pix.width())
+        ph = int(pix.height())
+        if pw <= 0 or ph <= 0:
+            return None
+        ox = max(0, (label.width() - pw) // 2)
+        oy = max(0, (label.height() - ph) // 2)
+        return QRect(ox, oy, pw, ph)
+
+    def _source_point_from_input_preview_pos(self, pos):
+        if self.input_pixmap is None:
+            return None
+        display_rect = self._input_preview_display_rect()
+        if display_rect is None or (not display_rect.contains(pos)):
+            return None
+        if display_rect.width() <= 0 or display_rect.height() <= 0:
+            return None
+        rel_x = float(pos.x() - display_rect.x())
+        rel_y = float(pos.y() - display_rect.y())
+        src_x = rel_x * (float(self.input_pixmap.width()) / float(display_rect.width()))
+        src_y = rel_y * (float(self.input_pixmap.height()) / float(display_rect.height()))
+        return (src_x, src_y)
+
+    def _resolve_input_interaction_face_boxes(self):
+        if not self.face_preview_entries or not self.input_face_boxes:
+            return []
+        resolved = []
+        for entry in self.face_preview_entries:
+            idx = entry.get("index")
+            if not isinstance(idx, int) or idx < 0:
+                continue
+            if idx >= len(self.input_face_boxes):
+                continue
+            box = self.input_face_boxes[idx]
+            if not isinstance(box, (tuple, list)) or len(box) != 4:
+                continue
+            try:
+                x, y, w, h = [int(v) for v in box]
+            except Exception:
+                continue
+            if w < 8 or h < 8:
+                continue
+            resolved.append((idx, (x, y, w, h)))
+        return resolved
+
+    def _hit_test_input_face_index(self, pos):
+        src_pt = self._source_point_from_input_preview_pos(pos)
+        if src_pt is None:
+            return None
+        sx, sy = src_pt
+        candidates = []
+        for idx, box in self._resolve_input_interaction_face_boxes():
+            x, y, w, h = box
+            if sx >= x and sx <= (x + w) and sy >= y and sy <= (y + h):
+                candidates.append((w * h, idx))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda t: t[0])
+        return int(candidates[0][1])
+
+    def handle_input_preview_mouse_move(self, pos):
+        if not self.face_preview_entries:
+            return
+        idx = self._hit_test_input_face_index(pos)
+        if isinstance(idx, int):
+            self.set_hover_face_preview_index(idx, source="input")
+            return
+        if self.hover_face_preview_source == "input":
+            self.clear_hover_face_preview_index()
+
+    def handle_input_preview_mouse_leave(self):
+        if self.hover_face_preview_source == "input":
+            self.clear_hover_face_preview_index()
+
+    def handle_input_preview_click(self, pos):
+        if not self.face_preview_entries:
+            return False
+        idx = self._hit_test_input_face_index(pos)
+        if not isinstance(idx, int):
+            return False
+        self.set_hover_face_preview_index(idx, source="input")
+        self.select_face_preview(idx, user_initiated=True)
+        return True
 
     def resolve_face_box_from_crop_template(self, face_index):
         if not self.face_preview_entries:
@@ -5029,6 +5133,7 @@ class MainWindow(QMainWindow):
     def set_input_preview_image(self, image_path: Path | None):
         self.input_pixmap = None
         self.hover_face_box_override = None
+        self.hover_face_preview_source = None
         self.hover_face_box_cache = {}
         self.input_preview_scaled_cache_key = None
         self.input_preview_scaled_cache_pixmap = None
@@ -5139,14 +5244,16 @@ class MainWindow(QMainWindow):
             self.input_preview_scaled_cache_pixmap = scaled
 
         active_idx = self.hover_face_preview_index
-        if isinstance(active_idx, int):
+        if isinstance(active_idx, int) and self.hover_face_preview_source == "strip":
             cursor_idx = self._cursor_face_preview_index()
             if isinstance(cursor_idx, int):
                 if cursor_idx != active_idx:
                     self.hover_face_preview_index = cursor_idx
+                    self.hover_face_preview_source = "strip"
                 active_idx = cursor_idx
             else:
                 self.hover_face_preview_index = None
+                self.hover_face_preview_source = None
                 self.hover_face_box_override = None
                 active_idx = None
 
