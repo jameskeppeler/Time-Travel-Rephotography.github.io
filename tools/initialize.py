@@ -72,15 +72,18 @@ class InitializerArguments:
 
 def create_color_encoder(args: Namespace):
     encoder = Encoder(1, args.encoder_size, 512)
-    ckpt = torch.load(args.encoder_ckpt)
+    try:
+        ckpt = torch.load(args.encoder_ckpt, map_location="cpu", weights_only=True)
+    except TypeError:
+        ckpt = torch.load(args.encoder_ckpt, map_location="cpu")
     encoder.load_state_dict(ckpt["model"])
     return encoder
 
 
-def transform_input(img: Image):
+def transform_input(img: Image, size: int):
     tsfm = Compose([
         Grayscale(),
-        Resize(args.encoder_size),
+        Resize(size),
         ToTensor(),
     ])
     return tsfm(img)

@@ -101,7 +101,10 @@ def vgg_face_dag(weights_path=None, **kwargs):
     """
     model = Vgg_face_dag()
     if weights_path:
-        state_dict = torch.load(weights_path)
+        try:
+            state_dict = torch.load(weights_path, map_location="cpu", weights_only=True)
+        except TypeError:
+            state_dict = torch.load(weights_path, map_location="cpu")
         model.load_state_dict(state_dict)
     return model
 

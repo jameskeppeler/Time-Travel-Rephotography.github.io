@@ -10,16 +10,34 @@ def cos_loss(fi, ft):
     return 1 - torch.nn.functional.cosine_similarity(fi, ft).mean()
 
 
+def _load_torch_checkpoint(path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
+def _load_vgg16_features():
+    try:
+        weights = torchvision.models.VGG16_Weights.IMAGENET1K_V1
+        model = torchvision.models.vgg16(weights=weights)
+    except Exception:
+        model = torchvision.models.vgg16(pretrained=True)
+    return model.features.eval()
+
+
 class VGGPerceptualLoss(torch.nn.Module):
     def __init__(self, resize=False):
         super(VGGPerceptualLoss, self).__init__()
-        blocks = []
-        blocks.append(torchvision.models.vgg16(pretrained=True).features[:4].eval())
-        blocks.append(torchvision.models.vgg16(pretrained=True).features[4:9].eval())
-        blocks.append(torchvision.models.vgg16(pretrained=True).features[9:16].eval())
-        blocks.append(torchvision.models.vgg16(pretrained=True).features[16:23].eval())
+        features = _load_vgg16_features()
+        blocks = [
+            torch.nn.Sequential(*[features[i] for i in range(0, 4)]).eval(),
+            torch.nn.Sequential(*[features[i] for i in range(4, 9)]).eval(),
+            torch.nn.Sequential(*[features[i] for i in range(9, 16)]).eval(),
+            torch.nn.Sequential(*[features[i] for i in range(16, 23)]).eval(),
+        ]
         for bl in blocks:
-            for p in bl:
+            for p in bl.parameters():
                 p.requires_grad = False
         self.blocks = torch.nn.ModuleList(blocks)
         self.transform = torch.nn.functional.interpolate
@@ -54,7 +72,7 @@ class VGGFacePerceptualLoss(torch.nn.Module):
     def __init__(self, weight_path: str = "checkpoint/vgg_face_dag.pt", resize: bool = False):
         super().__init__()
         self.vgg = VGGFaceFeats()
-        self.vgg.load_state_dict(torch.load(weight_path))
+        self.vgg.load_state_dict(_load_torch_checkpoint(weight_path))
 
         mean = torch.tensor(self.vgg.meta["mean"]).view(1, 3, 1, 1) / 255.0
         self.register_buffer("mean", mean)

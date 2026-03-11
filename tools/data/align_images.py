@@ -89,8 +89,10 @@ def main(args):
         }
     print('\t', results)
     if args.out_stats is not None:
-        os.makedirs(os.path.dirname(args.out_stats), exist_ok=True)
-        with open(out_stats, 'w') as f:
+        out_dir = os.path.dirname(args.out_stats)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+        with open(args.out_stats, 'w') as f:
             json.dump(results, f)
 
 

@@ -32,6 +32,8 @@ class NoiseRegularizer(nn.Module):
         for noise in noises:
             mean = noise.mean()
             std = noise.std()
-
-            noise.data.add_(-mean).div_(std)
+            if torch.isfinite(std) and std > 1e-8:
+                noise.data.add_(-mean).div_(std)
+            else:
+                noise.data.add_(-mean)
 

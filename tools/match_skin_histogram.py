@@ -38,8 +38,9 @@ def match_skin_histogram(
     im_sibling_dir = os.path.abspath(im_sibling_dir)
     mask_dir = os.path.abspath(mask_dir)
 
-    img_np = make_image(imgs)[0]
-    sibling_np = make_image(sibling_img)[0][...,::-1]
+    # make_image returns RGB; OpenCV expects BGR when writing/reading files.
+    img_np = make_image(imgs)[0][..., ::-1]
+    sibling_np = make_image(sibling_img)[0][..., ::-1]
 
     # save img, sibling
     os.makedirs(im_sibling_dir, exist_ok=True)

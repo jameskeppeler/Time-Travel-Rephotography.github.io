@@ -1358,6 +1358,13 @@ class MainWindow(QMainWindow):
         self.current_run_summary_context = None
         self.last_run_summary_text = ""
         self.last_preflight_report = None
+        self._hardware_info_cache = None
+        self._hardware_info_cache_ts = 0.0
+        self._hardware_info_cache_ttl_sec = 30.0
+        self._timing_records_cache_path = None
+        self._timing_records_cache_mtime = None
+        self._timing_records_cache = []
+        self._haar_face_detector = None
 
         self.preprocess_stage = "idle"
         self.rephoto_stage = None
@@ -2942,6 +2949,13 @@ class MainWindow(QMainWindow):
         return float(math.exp(lyp))
 
     def get_hardware_info(self):
+        now = time.time()
+        if (
+            isinstance(self._hardware_info_cache, dict)
+            and (now - float(self._hardware_info_cache_ts)) < float(self._hardware_info_cache_ttl_sec)
+        ):
+            return dict(self._hardware_info_cache)
+
         # CPU
         cpu_cores = os.cpu_count() or 0
         cpu_name = platform.processor() or "Unknown CPU"
@@ -2981,12 +2995,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
-        return {
+        info = {
             "cpu_name": cpu_name,
             "cpu_cores": cpu_cores,
             "ram_gb": ram_gb,
             "gpu_name": gpu_name,
         }
+        self._hardware_info_cache = dict(info)
+        self._hardware_info_cache_ts = now
+        return info
 
     def load_local_timing_records(self):
         if hasattr(self, "results_root_edit"):
@@ -2994,8 +3011,25 @@ class MainWindow(QMainWindow):
         else:
             results_root = self.repo_root / "results"
         log_path = results_root / "run_timing_log.jsonl"
+        try:
+            cache_path = str(log_path.resolve()).lower()
+        except Exception:
+            cache_path = str(log_path).lower()
+        try:
+            log_mtime = log_path.stat().st_mtime_ns if log_path.exists() else None
+        except OSError:
+            log_mtime = None
+
+        if (
+            self._timing_records_cache_path == cache_path
+            and self._timing_records_cache_mtime == log_mtime
+        ):
+            return list(self._timing_records_cache)
 
         if not log_path.exists():
+            self._timing_records_cache_path = cache_path
+            self._timing_records_cache_mtime = None
+            self._timing_records_cache = []
             return []
 
         records = []
@@ -3018,8 +3052,14 @@ class MainWindow(QMainWindow):
                         continue
                     records.append(rec)
         except Exception:
+            self._timing_records_cache_path = cache_path
+            self._timing_records_cache_mtime = log_mtime
+            self._timing_records_cache = []
             return []
 
+        self._timing_records_cache_path = cache_path
+        self._timing_records_cache_mtime = log_mtime
+        self._timing_records_cache = list(records)
         return records
 
     def estimate_runtime_from_local_history(self, preset_value: int):
@@ -3769,7 +3809,10 @@ class MainWindow(QMainWindow):
 
     def resolve_facecrop_env_name(self):
         env_name = "facecrop_py310"
-        cfg_path = self.resolve_resource_path("run_rephoto_with_facecrop_config.json")
+        cfg_path = self.resolve_resource_path("rephoto_wrapper.config.json")
+        legacy_cfg_path = self.resolve_resource_path("run_rephoto_with_facecrop_config.json")
+        if not cfg_path.exists() and legacy_cfg_path.exists():
+            cfg_path = legacy_cfg_path
         if not cfg_path.exists():
             return env_name
         try:
@@ -3913,7 +3956,9 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_fallback_count = None
 
         current_input = self.input_image_edit.text().strip()
-        if (not current_input) or (os.path.normcase(current_input) != os.path.normcase(str(image_path))):
+        current_key = self._normalized_path_key(current_input)
+        probe_key = self._normalized_path_key(image_path)
+        if (not current_input) or (current_key is None) or (probe_key is None) or (current_key != probe_key):
             self.quick_face_probe_stdout = ""
             self.quick_face_probe_last_error = ""
             return
@@ -3959,7 +4004,7 @@ class MainWindow(QMainWindow):
 
         h, w = img.shape[:2]
         max_side = max(h, w)
-        target_max_side = 1800
+        target_max_side = 960
         if max_side > target_max_side:
             scale = float(target_max_side) / float(max_side)
             nw = max(1, int(round(w * scale)))
@@ -3967,17 +4012,20 @@ class MainWindow(QMainWindow):
             img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        detector = cv2.CascadeClassifier(cascade_path)
-        if detector.empty():
+        detector = self._haar_face_detector
+        if detector is None:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            detector = cv2.CascadeClassifier(cascade_path)
+            self._haar_face_detector = detector
+        if detector is None or detector.empty():
             return None
 
         min_dim = min(img.shape[0], img.shape[1])
-        min_face = max(36, int(round(min_dim * 0.03)))
+        min_face = max(28, int(round(min_dim * 0.035)))
         faces = detector.detectMultiScale(
             gray,
             scaleFactor=1.1,
-            minNeighbors=6,
+            minNeighbors=5,
             minSize=(min_face, min_face),
         )
         return int(len(faces))
@@ -5385,6 +5433,7 @@ class MainWindow(QMainWindow):
 
             self.log_box.append(f"Saved {len(self._pending_milestones)} milestone timing record(s).")
             self._pending_milestones = []
+            self._timing_records_cache_mtime = None
 
         except Exception as e:
             self.log_box.append(f"Milestone timing log write failed: {e}")
@@ -5416,6 +5465,7 @@ class MainWindow(QMainWindow):
             with open(log_path, "a", encoding="utf-8") as f:
                 import json
                 f.write(json.dumps(record) + "\n")
+            self._timing_records_cache_mtime = None
 
             self.log_box.append(f"Saved timing log: {log_path}")
         except Exception as e:

@@ -79,7 +79,10 @@ class Downsample(nn.Module):
             self.stride = 1
             step = input_size / output_size
             x = torch.arange(output_size) * step
-            Y, X = torch.meshgrid(x, x)
+            try:
+                Y, X = torch.meshgrid(x, x, indexing="ij")
+            except TypeError:
+                Y, X = torch.meshgrid(x, x)
             grid = torch.stack((X, Y), dim=-1)
             grid /= torch.Tensor((input_size - 1, input_size - 1)).view(1, 1, -1)
             grid = grid * 2 - 1
@@ -91,7 +94,7 @@ class Downsample(nn.Module):
     def forward(self, im: torch.Tensor):
         out = self.blur(im, stride=self.stride)
         if self.grid is not None:
-            out = F.grid_sample(out, self.grid[None].expand(im.shape[0], -1, -1, -1))
+            out = F.grid_sample(out, self.grid[None].expand(im.shape[0], -1, -1, -1), align_corners=False)
         return out
 
 

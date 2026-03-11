@@ -47,6 +47,26 @@ $RepoRoot = $PSScriptRoot
 
 $ConfigPath = Join-Path $RepoRoot "rephoto_wrapper.config.json"
 
+function Test-IsDefaultPathValue([string]$CurrentValue, [string]$DefaultRelativePath) {
+    if ([string]::IsNullOrWhiteSpace($CurrentValue)) {
+        return $false
+    }
+
+    try {
+        $DefaultFull = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $DefaultRelativePath))
+        if ([System.IO.Path]::IsPathRooted($CurrentValue)) {
+            $CurrentFull = [System.IO.Path]::GetFullPath($CurrentValue)
+        }
+        else {
+            $CurrentFull = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $CurrentValue))
+        }
+        return [string]::Equals($CurrentFull, $DefaultFull, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    catch {
+        return $false
+    }
+}
+
 if (Test-Path -LiteralPath $ConfigPath) {
     $Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
 
@@ -65,16 +85,16 @@ if (Test-Path -LiteralPath $ConfigPath) {
     if ($RephotoEnvName -eq "rephoto_cuda11" -and $Config.RephotoEnvName) {
         $RephotoEnvName = $Config.RephotoEnvName
     }
-    if ($EncoderCkptPath -eq (Join-Path $PSScriptRoot "checkpoint\\encoder\\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
+    if ((Test-IsDefaultPathValue $EncoderCkptPath "checkpoint\encoder\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
         $EncoderCkptPath = Join-Path $RepoRoot $Config.EncoderCkptPath
     }
-    if ($ProjectorScriptPath -eq (Join-Path $PSScriptRoot "projector.py") -and $Config.ProjectorScriptPath) {
+    if ((Test-IsDefaultPathValue $ProjectorScriptPath "projector.py") -and $Config.ProjectorScriptPath) {
         $ProjectorScriptPath = Join-Path $RepoRoot $Config.ProjectorScriptPath
     }
-    if ($PreprocessRoot -eq (Join-Path $PSScriptRoot "preprocess") -and $Config.PreprocessRoot) {
+    if ((Test-IsDefaultPathValue $PreprocessRoot "preprocess") -and $Config.PreprocessRoot) {
         $PreprocessRoot = Join-Path $RepoRoot $Config.PreprocessRoot
     }
-    if ($ResultsRoot -eq (Join-Path $PSScriptRoot "results") -and $Config.ResultsRoot) {
+    if ((Test-IsDefaultPathValue $ResultsRoot "results") -and $Config.ResultsRoot) {
         $ResultsRoot = Join-Path $RepoRoot $Config.ResultsRoot
     }
 }

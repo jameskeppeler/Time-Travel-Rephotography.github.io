@@ -43,7 +43,6 @@ def calculate_lookup(src_cdf, ref_cdf):
     lookup_table = np.zeros(256)
     lookup_val = 0
     for src_pixel_val in range(len(src_cdf)):
-        lookup_val
         for ref_pixel_val in range(len(ref_cdf)):
             if ref_cdf[ref_pixel_val] >= src_cdf[src_pixel_val]:
                 lookup_val = ref_pixel_val
@@ -157,7 +156,9 @@ def main(args):
     # B = exposure.match_histograms(B, A, multichannel=True)
 
     if args.out:
-        os.makedirs(os.path.dirname(args.out), exist_ok=True)
+        out_dir = os.path.dirname(args.out)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
         cv2.imwrite(args.out, B)
 
     return B

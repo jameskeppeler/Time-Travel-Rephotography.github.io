@@ -77,9 +77,17 @@ def normalize(img: torch.Tensor, mean=0.5, std=0.5):
     return (img - mean) / std
 
 
+def _load_checkpoint(path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
+
+
 def create_generator(args: Namespace, device: torch.device):
     generator = Generator(args.generator_size, 512, 8)
-    generator.load_state_dict(torch.load(args.ckpt)['g_ema'], strict=False)
+    ckpt = _load_checkpoint(args.ckpt)
+    generator.load_state_dict(ckpt['g_ema'], strict=False)
     generator.eval()
     generator = generator.to(device)
     return generator
