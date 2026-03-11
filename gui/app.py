@@ -1464,8 +1464,7 @@ class MainWindow(QMainWindow):
         self._process_log_flush_queued = False
         self.retina_face_box_probe_warned = False
         self.cropper_face_box_probe_warned = False
-        # Import should not launch backend work automatically; runs are user-triggered via Run.
-        self.auto_detect_faces_on_import = False
+        self.auto_detect_faces_on_import = True
         self.auto_detect_faces_armed_input = None
         self.auto_detect_faces_triggered_input = None
         self.suppress_preprocess_ui_until_rephoto = False
@@ -4002,8 +4001,8 @@ class MainWindow(QMainWindow):
             return
 
         quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
-        # Only auto-start when we are confidently multi-face.
-        if (quick_count is None) or (quick_count < 2):
+        # More permissive import gate: only suppress when confidently single-face.
+        if quick_count == 1:
             return
 
         self.auto_detect_faces_triggered_input = current_key
@@ -4243,6 +4242,7 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
         self.update_run_button_for_quick_face_hint()
+        self.maybe_auto_start_face_detection_from_import()
 
     def estimate_faces_for_quick_hint(self, image_path: Path):
         """Fast fallback estimate used only for run-button hinting if precise probe is unavailable."""
@@ -4301,6 +4301,7 @@ class MainWindow(QMainWindow):
         fallback_count = self.estimate_faces_for_quick_hint(image_path)
         self.quick_face_count_estimate = fallback_count if isinstance(fallback_count, int) else None
         self.update_run_button_for_quick_face_hint()
+        self.maybe_auto_start_face_detection_from_import(allow_during_probe=True)
 
         self._start_quick_face_probe(image_path, fallback_count=fallback_count)
 
