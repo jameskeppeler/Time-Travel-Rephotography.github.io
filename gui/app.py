@@ -1437,6 +1437,9 @@ class MainWindow(QMainWindow):
         self.result_preview_scaled_cache_key = None
         self.result_preview_scaled_cache_pixmap = None
         self.result_preview_last_display_key = None
+        self.face_preview_thumb_icon_cache = {}
+        self.face_preview_thumb_icon_cache_max_entries = 256
+        self._face_strip_render_signature = None
 
         # Multi-face preview state (for strategy=all / multi-face detections)
         self.face_preview_entries = []
@@ -1457,6 +1460,8 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_last_error = ""
         self._process_stdout_buffer = ""
         self._process_stderr_buffer = ""
+        self._process_log_pending_text = ""
+        self._process_log_flush_queued = False
         self.retina_face_box_probe_warned = False
         self.cropper_face_box_probe_warned = False
         self.auto_detect_faces_on_import = True
@@ -2518,10 +2523,7 @@ class MainWindow(QMainWindow):
         if is_running:
             self.run_button.setEnabled(False)
         else:
-            if self.awaiting_face_selection:
-                self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
-            else:
-                self.run_button.setEnabled(True)
+            self.update_run_button_for_quick_face_hint()
         self.cancel_button.setEnabled(is_running)
         self.reset_button.setEnabled(not is_running)
         self.quit_button.setEnabled(not is_running)
@@ -2558,9 +2560,34 @@ class MainWindow(QMainWindow):
     # ------------------------------
     # Progress tracking
     # ------------------------------
+    def _try_fast_rephoto_iteration_progress(self, text: str):
+        if self.current_run_phase != "rephoto":
+            return False
+        if "/" not in text:
+            return False
+        m = ITER_PROGRESS_RE.search(text)
+        if not m:
+            return False
+        current = int(m.group(1))
+        total = int(m.group(2))
+        allowed_totals = {self.rephoto_step_pair[0], self.rephoto_step_pair[1]}
+        if total not in allowed_totals:
+            return False
+        if total == self.rephoto_step_pair[0]:
+            self.rephoto_stage = "32x32"
+            self.rephoto_stage_name = "32x32"
+        elif total == self.rephoto_step_pair[1]:
+            self.rephoto_stage = "64x64"
+            self.rephoto_stage_name = "64x64"
+        self.rephoto_stage_total = total
+        self.update_rephoto_progress_from_iteration(current, total)
+        return True
+
     def update_progress_from_line(self, line: str):
         s = (line or "").strip()
         if not s:
+            return
+        if self._try_fast_rephoto_iteration_progress(s):
             return
 
         # === Path tracking from stdout ===
@@ -2587,30 +2614,42 @@ class MainWindow(QMainWindow):
             if simple_copy_match:
                 self.mark_face_done_from_result_path(simple_copy_match.group(1))
 
-        if "projector.py failed for crop:" in s.lower():
+        if "projector.py failed for crop:" in s:
             fail_match = REPHOTO_CROP_FAIL_RE.search(s)
             if fail_match:
                 self.mark_face_failed_from_crop_name(fail_match.group(1))
 
         # === Stage timing instrumentation ===
-        current_time = time.time()
-        
+        current_time = None
+
         # Record when stages start
         if "=== Face crop step" in s and "crop" not in self.stage_started_at:
+            if current_time is None:
+                current_time = time.time()
             self.stage_started_at["crop"] = current_time
         if "=== GFPGAN step" in s and "enhance" not in self.stage_started_at:
+            if current_time is None:
+                current_time = time.time()
             self.stage_started_at["enhance"] = current_time
         if "=== Rephoto step" in s and "rephoto" not in self.stage_started_at:
+            if current_time is None:
+                current_time = time.time()
             self.stage_started_at["rephoto"] = current_time
-        
+
         # Record when stages end and compute elapsed time
         if s.startswith("Cropped face count:") and "crop" in self.stage_started_at and "crop" not in self.stage_elapsed:
+            if current_time is None:
+                current_time = time.time()
             self.stage_elapsed["crop"] = current_time - self.stage_started_at["crop"]
         if "GFPGAN blended faces:" in s and "enhance" in self.stage_started_at and "enhance" not in self.stage_elapsed:
+            if current_time is None:
+                current_time = time.time()
             self.stage_elapsed["enhance"] = current_time - self.stage_started_at["enhance"]
 
         # === Rephoto start marker, switch phases ===
         if s.startswith("=== Rephoto step"):
+            if current_time is None:
+                current_time = time.time()
             if self.current_run_phase == "preprocess":
                 if self.suppress_preprocess_ui_until_rephoto:
                     self.set_preprocess_progress(0, "Preprocess ready")
@@ -2710,27 +2749,7 @@ class MainWindow(QMainWindow):
                 self.rephoto_stage_total = self.rephoto_step_pair[1]
                 return
 
-            if "/" in s:
-                m = ITER_PROGRESS_RE.search(s)
-            else:
-                m = None
-            if m:
-                current = int(m.group(1))
-                total = int(m.group(2))
-
-                allowed_totals = {self.rephoto_step_pair[0], self.rephoto_step_pair[1]}
-                if total not in allowed_totals:
-                    return
-
-                if total == self.rephoto_step_pair[0]:
-                    self.rephoto_stage = "32x32"
-                    self.rephoto_stage_name = "32x32"
-                elif total == self.rephoto_step_pair[1]:
-                    self.rephoto_stage = "64x64"
-                    self.rephoto_stage_name = "64x64"
-
-                self.rephoto_stage_total = total
-                self.update_rephoto_progress_from_iteration(current, total)
+            if self._try_fast_rephoto_iteration_progress(s):
                 return
 
         # Completion marker
@@ -3844,6 +3863,7 @@ class MainWindow(QMainWindow):
         return (orig_target, final_target)
 
     def clear_face_preview_strip_layout(self):
+        self._face_strip_render_signature = None
         if self.hover_face_preview_index is not None:
             self.hover_face_preview_index = None
             self.hover_face_preview_source = None
@@ -3870,7 +3890,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "face_preview_panel"):
             self.face_preview_panel.setVisible(False)
         self.set_run_button_continue_mode(False)
-        self.run_button.setEnabled(True)
+        self._face_strip_render_signature = None
 
         if not preserve_input_overlays:
             self.input_face_boxes = []
@@ -3907,15 +3927,30 @@ class MainWindow(QMainWindow):
 
         if self.process is not None or self.current_run_phase in {"preprocess", "rephoto"}:
             self.run_button.setText("Run")
+            self.run_button.setEnabled(False)
             self.run_button.setToolTip("Run the full rephotography workflow.")
             return
 
-        crop_only_mode = self.advanced_dialog.crop_only_checkbox.isChecked()
         input_path_text = self.input_image_edit.text().strip() if hasattr(self, "input_image_edit") else ""
+        input_ready = False
+        if input_path_text:
+            try:
+                input_ready = Path(input_path_text).exists()
+            except Exception:
+                input_ready = False
 
-        # Keep default behavior when no image is selected or in crop-only mode.
-        if (not input_path_text) or crop_only_mode:
+        if not input_ready:
             self.run_button.setText("Run")
+            self.run_button.setEnabled(False)
+            self.run_button.setToolTip("Choose an input image to enable Run.")
+            return
+
+        crop_only_mode = self.advanced_dialog.crop_only_checkbox.isChecked()
+
+        # Keep default behavior in crop-only mode.
+        if crop_only_mode:
+            self.run_button.setText("Run")
+            self.run_button.setEnabled(True)
             self.run_button.setToolTip("Run the full rephotography workflow.")
             return
 
@@ -3925,9 +3960,11 @@ class MainWindow(QMainWindow):
         quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
         if quick_count == 1:
             self.run_button.setText("Run")
+            self.run_button.setEnabled(True)
             self.run_button.setToolTip("Single face detected. Run the full rephotography workflow.")
         else:
             self.run_button.setText("Run")
+            self.run_button.setEnabled(True)
             self.run_button.setToolTip(
                 "Running starts with face detection, then prompts face selection when multiple faces are found."
             )
@@ -4543,8 +4580,38 @@ class MainWindow(QMainWindow):
         self.update_runtime_label()
         self.render_face_preview_strip()
 
+    def _face_thumb_icon_cache_key(self, image_path, fallback_text, muted, thumb_size):
+        normalized = ""
+        mtime_ns = 0
+        file_size = 0
+        if image_path is not None:
+            p = Path(image_path)
+            try:
+                normalized = str(p.resolve()).lower()
+            except Exception:
+                normalized = str(p).lower()
+            try:
+                if p.exists():
+                    st = p.stat()
+                    mtime_ns = int(st.st_mtime_ns)
+                    file_size = int(st.st_size)
+            except OSError:
+                pass
+        return (normalized, str(fallback_text), bool(muted), int(thumb_size), mtime_ns, file_size)
+
     def _make_face_thumb_icon(self, image_path, fallback_text, muted=False, thumb_size=84):
         thumb_size = max(56, int(thumb_size))
+        cache_key = self._face_thumb_icon_cache_key(
+            image_path=image_path,
+            fallback_text=fallback_text,
+            muted=muted,
+            thumb_size=thumb_size,
+        )
+        cached = self.face_preview_thumb_icon_cache.pop(cache_key, None)
+        if cached is not None:
+            self.face_preview_thumb_icon_cache[cache_key] = cached
+            return cached
+
         inner_size = thumb_size - 2
         thumb = QPixmap(thumb_size, thumb_size)
         thumb.fill(QColor("#242933"))
@@ -4576,14 +4643,56 @@ class MainWindow(QMainWindow):
         painter.setPen(QPen(QColor("#59606b"), 1))
         painter.drawRect(0, 0, thumb_size - 1, thumb_size - 1)
         painter.end()
-        return QIcon(thumb)
+        icon = QIcon(thumb)
+        self.face_preview_thumb_icon_cache[cache_key] = icon
+        while len(self.face_preview_thumb_icon_cache) > int(self.face_preview_thumb_icon_cache_max_entries):
+            oldest_key = next(iter(self.face_preview_thumb_icon_cache))
+            self.face_preview_thumb_icon_cache.pop(oldest_key, None)
+        return icon
+
+    def _compute_face_strip_render_signature(self, entries, selection_mode, is_processing, wide_mode):
+        card_w = self._get_face_strip_card_width(wide_mode)
+        selected_idx = int(self.selected_face_preview_index) if isinstance(self.selected_face_preview_index, int) else -1
+        active_idx = int(self.active_face_preview_index) if isinstance(self.active_face_preview_index, int) else -1
+        entry_signature = []
+        for entry in entries:
+            idx = entry.get("index")
+            if not isinstance(idx, int):
+                continue
+            entry_signature.append(
+                (
+                    idx,
+                    str(entry.get("status", "queued")),
+                    bool(entry.get("selected", False)),
+                    str(entry.get("crop_path") or ""),
+                    str(entry.get("result_path") or ""),
+                )
+            )
+        return (
+            bool(selection_mode),
+            bool(is_processing),
+            bool(wide_mode),
+            int(card_w),
+            selected_idx,
+            active_idx,
+            tuple(entry_signature),
+        )
 
     def render_face_preview_strip(self):
-        self.clear_face_preview_strip_layout()
         entries = self.face_preview_entries
         selection_mode = self.awaiting_face_selection
         is_processing = self._is_processing_active()
         wide_mode = bool(getattr(self, "_wide_layout_active", False))
+        render_signature = self._compute_face_strip_render_signature(
+            entries=entries,
+            selection_mode=selection_mode,
+            is_processing=is_processing,
+            wide_mode=wide_mode,
+        )
+        if self._face_strip_render_signature == render_signature:
+            return
+
+        self.clear_face_preview_strip_layout()
         if wide_mode:
             self.face_preview_strip_layout.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         else:
@@ -4596,6 +4705,7 @@ class MainWindow(QMainWindow):
             self.face_preview_strip_scroll.setVisible(False)
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(False)
+            self._face_strip_render_signature = render_signature
             return
 
         if selection_mode:
@@ -4627,6 +4737,7 @@ class MainWindow(QMainWindow):
             self.face_preview_strip_scroll.setVisible(False)
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(False)
+            self._face_strip_render_signature = render_signature
             return
 
         if hasattr(self, "face_preview_panel"):
@@ -4718,6 +4829,7 @@ class MainWindow(QMainWindow):
                 self.face_preview_strip_layout.addWidget(button)
 
         self.face_preview_strip_layout.addStretch(1)
+        self._face_strip_render_signature = render_signature
 
     def set_hover_face_preview_index(self, face_index, source="strip"):
         idx = face_index
@@ -5881,6 +5993,21 @@ class MainWindow(QMainWindow):
     def _append_process_log_text(self, text: str):
         if not text:
             return
+        self._process_log_pending_text += text
+        # Keep pending text bounded in case backend emits very large bursts.
+        if len(self._process_log_pending_text) > 500000:
+            self._process_log_pending_text = self._process_log_pending_text[-500000:]
+        if self._process_log_flush_queued:
+            return
+        self._process_log_flush_queued = True
+        QTimer.singleShot(50, self._flush_process_log_buffer)
+
+    def _flush_process_log_buffer(self):
+        self._process_log_flush_queued = False
+        text = self._process_log_pending_text
+        if not text:
+            return
+        self._process_log_pending_text = ""
         text = text.replace("\r", "\n")
         cursor = self.log_box.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -6030,6 +6157,8 @@ class MainWindow(QMainWindow):
         self.run_started_at = time.time()
         self._process_stdout_buffer = ""
         self._process_stderr_buffer = ""
+        self._process_log_pending_text = ""
+        self._process_log_flush_queued = False
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.start()
             self.update_elapsed_label()
@@ -6155,6 +6284,7 @@ class MainWindow(QMainWindow):
     def process_finished(self, exit_code, exit_status):
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
+        self._flush_process_log_buffer()
         if self._process_stdout_buffer:
             self.update_progress_from_line(self._process_stdout_buffer)
             self._process_stdout_buffer = ""
@@ -6302,6 +6432,7 @@ class MainWindow(QMainWindow):
     def process_error(self, process_error):
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
+        self._flush_process_log_buffer()
         self._process_stdout_buffer = ""
         self._process_stderr_buffer = ""
         if self.active_face_preview_index is not None:

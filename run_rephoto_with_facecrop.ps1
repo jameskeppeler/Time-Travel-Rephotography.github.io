@@ -201,17 +201,21 @@ $ProjectorInputDir = $CropOutDir
 
 New-Item -ItemType Directory -Path $TempInputDir    -Force | Out-Null
 New-Item -ItemType Directory -Path $CropOutDir      -Force | Out-Null
-New-Item -ItemType Directory -Path $GFPGANRunRoot   -Force | Out-Null
-New-Item -ItemType Directory -Path $GFPGANOutputDir -Force | Out-Null
-New-Item -ItemType Directory -Path $GFPGANBlendDir  -Force | Out-Null
 New-Item -ItemType Directory -Path $ResultRoot      -Force | Out-Null
+if ($UseGFPGAN) {
+    New-Item -ItemType Directory -Path $GFPGANRunRoot   -Force | Out-Null
+    New-Item -ItemType Directory -Path $GFPGANOutputDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $GFPGANBlendDir  -Force | Out-Null
+}
 
 if (-not $UseExistingCrops) {
     # Clear prior temp input and prior cropped face files so only this run's files are used.
     Get-ChildItem -LiteralPath $TempInputDir    -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem -LiteralPath $CropOutDir      -File -ErrorAction SilentlyContinue | Remove-Item -Force
-    Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
-    Get-ChildItem -LiteralPath $GFPGANBlendDir  -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    if ($UseGFPGAN) {
+        Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        Get-ChildItem -LiteralPath $GFPGANBlendDir  -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    }
 
     # Copy the chosen image into a temp input folder with a safe name.
     $TempInputFile = Join-Path $TempInputDir "$SafeBase$InputExt"
