@@ -6,10 +6,11 @@ import platform
 import subprocess
 import shutil
 import time
+import math
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QProcess, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QRadialGradient
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -215,6 +216,176 @@ class InputDropLabel(QLabel):
                         return
         self._set_normal_style()
         event.ignore()
+
+
+class InputDetectOverlay(QWidget):
+    """Animated overlay for import-time multi-face detection on the input preview."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setVisible(False)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.base_text = "Detecting Faces"
+        self.dot_count = 0
+        self._pulse_phase = 0.0
+        self._tick_count = 0
+        self._blurred_backdrop = QPixmap()
+        self._blurred_target_rect = QRect()
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(120)
+        self._anim_timer.timeout.connect(self._on_tick)
+
+    def _compute_overlay_target_rect(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return QRect()
+        try:
+            parent_pix = parent.pixmap()
+        except Exception:
+            parent_pix = None
+        if parent_pix is None or parent_pix.isNull():
+            return QRect()
+        pw = int(parent_pix.width())
+        ph = int(parent_pix.height())
+        if pw <= 1 or ph <= 1:
+            return QRect()
+        x = max(0, int(round((self.width() - pw) * 0.5)))
+        y = max(0, int(round((self.height() - ph) * 0.5)))
+        w = min(pw, max(1, self.width() - x))
+        h = min(ph, max(1, self.height() - y))
+        return QRect(x, y, w, h)
+
+    def _rebuild_blurred_backdrop(self):
+        parent = self.parentWidget()
+        if parent is None:
+            self._blurred_backdrop = QPixmap()
+            self._blurred_target_rect = QRect()
+            return
+        target_rect = self._compute_overlay_target_rect()
+        if target_rect.width() <= 2 or target_rect.height() <= 2:
+            self._blurred_backdrop = QPixmap()
+            self._blurred_target_rect = QRect()
+            return
+        self._blurred_target_rect = target_rect
+
+        try:
+            parent_pix = parent.pixmap()
+        except Exception:
+            parent_pix = None
+        if parent_pix is None or parent_pix.isNull():
+            self._blurred_backdrop = QPixmap()
+            return
+
+        captured = parent_pix.copy()
+        cw = int(captured.width())
+        ch = int(captured.height())
+        if cw <= 2 or ch <= 2:
+            self._blurred_backdrop = QPixmap()
+            return
+
+        # One-time blur approximation per activation: downsample then upscale.
+        sample_w = max(1, int(round(cw / 18.0)))
+        sample_h = max(1, int(round(ch / 18.0)))
+        small = captured.scaled(sample_w, sample_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        mid_w = max(1, int(round(cw / 8.0)))
+        mid_h = max(1, int(round(ch / 8.0)))
+        mid = small.scaled(mid_w, mid_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        self._blurred_backdrop = mid.scaled(cw, ch, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+
+    def start(self, base_text="Detecting Faces"):
+        self.base_text = str(base_text or "Detecting Faces")
+        self.dot_count = 0
+        self._pulse_phase = 0.0
+        self._tick_count = 0
+        parent = self.parentWidget()
+        if parent is not None:
+            self.setGeometry(parent.rect().adjusted(1, 1, -1, -1))
+        self._rebuild_blurred_backdrop()
+        self.setVisible(True)
+        self.raise_()
+        if not self._anim_timer.isActive():
+            self._anim_timer.start()
+        self.update()
+
+    def stop(self):
+        self._anim_timer.stop()
+        self.setVisible(False)
+        self._blurred_backdrop = QPixmap()
+        self._blurred_target_rect = QRect()
+
+    def sync_geometry(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        r = parent.rect().adjusted(1, 1, -1, -1)
+        if self.geometry() != r:
+            self.setGeometry(r)
+            if self.isVisible():
+                self._rebuild_blurred_backdrop()
+        if self.isVisible():
+            self.raise_()
+
+    def notify_parent_pixmap_changed(self):
+        if not self.isVisible():
+            return
+        self._rebuild_blurred_backdrop()
+        self.update()
+
+    def _on_tick(self):
+        self._pulse_phase += 0.055
+        if self._pulse_phase > 6.283185307179586:
+            self._pulse_phase -= 6.283185307179586
+        self._tick_count += 1
+        if self._tick_count % 8 == 0:
+            self.dot_count = (self.dot_count + 1) % 4
+        self.update()
+
+    def paintEvent(self, event):
+        if not self.isVisible():
+            return
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing)
+            r = self._blurred_target_rect if (self._blurred_target_rect.width() > 2 and self._blurred_target_rect.height() > 2) else QRect()
+            has_target = r.width() > 2 and r.height() > 2
+            pulse = 0.5 + 0.5 * math.sin(self._pulse_phase)
+
+            if has_target and self._blurred_backdrop is not None and (not self._blurred_backdrop.isNull()):
+                painter.setOpacity(0.70)
+                painter.drawPixmap(r, self._blurred_backdrop)
+                painter.setOpacity(1.0)
+                veil_alpha = int(round(36 + pulse * 20))
+                painter.fillRect(r, QColor(9, 13, 20, veil_alpha))
+
+                cx = r.x() + (r.width() * 0.5)
+                cy = r.y() + (r.height() * 0.5)
+                pulse_scale = 0.92 + (pulse * 0.20)
+                radius = max(78, int(round(min(r.width(), r.height()) * 0.48 * pulse_scale)))
+                glow_alpha = int(round(30 + pulse * 40))
+                glow = QRadialGradient(cx, cy, radius)
+                glow.setColorAt(0.0, QColor(96, 178, 255, glow_alpha))
+                glow.setColorAt(0.32, QColor(80, 156, 230, int(glow_alpha * 0.50)))
+                glow.setColorAt(0.66, QColor(62, 128, 201, int(glow_alpha * 0.14)))
+                glow.setColorAt(1.0, QColor(24, 43, 69, 0))
+                painter.fillRect(r, QBrush(glow))
+
+            text = f"{self.base_text}{'.' * self.dot_count}"
+            painter.setFont(QFont("Segoe UI", 10, QFont.Medium))
+            metrics = painter.fontMetrics()
+            tw = metrics.horizontalAdvance(text) + 20
+            th = metrics.height() + 8
+            bounds = r if has_target else self.rect()
+            tx = bounds.x() + max(8, (bounds.width() - tw) // 2)
+            ty = bounds.y() + max(8, (bounds.height() - th) // 2)
+            bubble = QRect(tx, ty, tw, th)
+
+            painter.setPen(QPen(QColor(90, 160, 228, 125), 1))
+            painter.setBrush(QColor(14, 28, 46, 174))
+            painter.drawRoundedRect(bubble, 8, 8)
+            painter.setPen(QColor("#edf6ff"))
+            painter.drawText(bubble, Qt.AlignCenter, text)
+        finally:
+            painter.end()
 
 class AdvancedSettingsDialog(QDialog):
     def make_label_with_info(self, label_text, tooltip_text):
@@ -1231,6 +1402,8 @@ class MainWindow(QMainWindow):
         self.face_box_probe_cache = {}
         self.face_box_probe_cache_max_entries = 24
         self._face_overlay_detector_warned = False
+        self.input_preview_scaled_cache_key = None
+        self.input_preview_scaled_cache_pixmap = None
 
         # Multi-face preview state (for strategy=all / multi-face detections)
         self.face_preview_entries = []
@@ -1250,6 +1423,10 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_last_error = ""
         self.retina_face_box_probe_warned = False
         self.cropper_face_box_probe_warned = False
+        self.auto_detect_faces_on_import = True
+        self.auto_detect_faces_armed_input = None
+        self.auto_detect_faces_triggered_input = None
+        self.suppress_preprocess_ui_until_rephoto = False
 
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
@@ -1614,6 +1791,7 @@ class MainWindow(QMainWindow):
         self.input_preview_label.setFixedHeight(300)
         self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         input_layout.addWidget(self.input_preview_label)
+        self.input_detect_overlay = InputDetectOverlay(self.input_preview_label)
         self.input_preview_footer_spacer = QWidget()
         self.input_preview_footer_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.input_preview_footer_spacer.setFixedHeight(32)
@@ -1830,7 +2008,6 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(self.content_layout)
         self._wide_layout_active = None
         self.apply_responsive_layout(force=True)
-        self.apply_responsive_layout(force=True)
 
         # Initial state
         self.update_mode_controls()
@@ -1849,6 +2026,7 @@ class MainWindow(QMainWindow):
         self.apply_responsive_layout()
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
+        self.position_input_detect_overlay()
         self.position_result_stage_overlay()
 
     def changeEvent(self, event):
@@ -1986,6 +2164,7 @@ class MainWindow(QMainWindow):
             self.render_face_preview_strip()
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
+        self.position_input_detect_overlay()
 
     def _compute_wide_preview_side(self):
         # Keep square previews while using fullscreen height more effectively.
@@ -2363,7 +2542,11 @@ class MainWindow(QMainWindow):
         # === Rephoto start marker, switch phases ===
         if s.startswith("=== Rephoto step"):
             if self.current_run_phase == "preprocess":
-                self.set_preprocess_progress(100, "Preprocessing complete")
+                if self.suppress_preprocess_ui_until_rephoto:
+                    self.set_preprocess_progress(0, "Preprocess ready")
+                    self.suppress_preprocess_ui_until_rephoto = False
+                else:
+                    self.set_preprocess_progress(100, "Preprocessing complete")
                 self.preprocess_stage = "complete"
                 self.current_run_phase = "rephoto"
                 self.rephoto_started_at = current_time
@@ -2383,51 +2566,62 @@ class MainWindow(QMainWindow):
 
         # Crop‑only skip notice
         if s.startswith("CropOnly requested. Skipping rephoto step."):
-            # finalize preprocessing and leave rephoto untouched
-            self.set_preprocess_progress(100, "Preprocessing complete")
-            self.set_rephoto_progress(0, "Skipped")
+            if self.suppress_preprocess_ui_until_rephoto:
+                self.set_preprocess_progress(0, "Preprocess ready")
+                self.set_rephoto_progress(0, "Waiting...")
+            else:
+                # finalize preprocessing and leave rephoto untouched
+                self.set_preprocess_progress(100, "Preprocessing complete")
+                self.set_rephoto_progress(0, "Skipped")
             self.current_run_phase = "crop_only_done"
             return
 
         # Preprocessing stage updates (only before rephoto begins)
         if self.current_run_phase == "preprocess":
+            suppress_all_preprocess_ui = bool(self.suppress_preprocess_ui_until_rephoto)
             if s.startswith("=== Face crop step"):
-                self.set_preprocess_progress(20, "Cropping faces")
-                self.preprocess_stage = "cropping"
-                self.set_result_stage_overlay("Cropping")
+                if not suppress_all_preprocess_ui:
+                    self.set_preprocess_progress(20, "Cropping faces")
+                    self.preprocess_stage = "cropping"
+                    self.set_result_stage_overlay("Cropping")
                 return
 
             if s.startswith("=== GFPGAN step"):
-                self.set_preprocess_progress(60, "Enhancing faces")
-                self.preprocess_stage = "enhancing"
-                self.set_result_stage_overlay("Enhancing")
+                if not suppress_all_preprocess_ui:
+                    self.set_preprocess_progress(60, "Enhancing faces")
+                    self.preprocess_stage = "enhancing"
+                    self.set_result_stage_overlay("Enhancing")
                 return
 
             if s.startswith("=== GPU pre-check"):
-                self.set_preprocess_progress(80, "GPU pre-check")
-                self.preprocess_stage = "gpu_check"
+                if not suppress_all_preprocess_ui:
+                    self.set_preprocess_progress(80, "GPU pre-check")
+                    self.preprocess_stage = "gpu_check"
                 return
 
             # Parse crop count and preview crop if found
             m = CROPPED_FACE_COUNT_RE.search(s)
             if m:
                 n = int(m.group(1))
-                self.set_preprocess_progress(40, f"Crops ready ({n})")
-                self.preprocess_stage = "crops_ready"
+                if not suppress_all_preprocess_ui:
+                    self.set_preprocess_progress(40, f"Crops ready ({n})")
+                    self.preprocess_stage = "crops_ready"
                 # In two-step multi-face mode, keep the strip hidden until preprocess fully finishes.
                 # This avoids a brief layout collapse where preview panes shrink before selection UI appears.
                 if (not self.selection_preprocess_mode) and (not self.face_preview_entries):
                     self.initialize_face_preview_entries(expected_count=n)
-                crop_image = self.find_latest_crop_output(after_epoch=self.run_started_at)
-                if crop_image:
-                    self.preview_stage_image_if_found(crop_image, "Cropping")
+                if not suppress_all_preprocess_ui:
+                    crop_image = self.find_latest_crop_output(after_epoch=self.run_started_at)
+                    if crop_image:
+                        self.preview_stage_image_if_found(crop_image, "Cropping")
                 return
 
             # Watch for GFPGAN blended output
             if "GFPGAN blended faces:" in s or "GFPGAN output:" in s:
-                enhanced_image = self.find_latest_enhanced_output(after_epoch=self.run_started_at)
-                if enhanced_image:
-                    self.preview_stage_image_if_found(enhanced_image, "Enhancing")
+                if not suppress_all_preprocess_ui:
+                    enhanced_image = self.find_latest_enhanced_output(after_epoch=self.run_started_at)
+                    if enhanced_image:
+                        self.preview_stage_image_if_found(enhanced_image, "Enhancing")
                 return
 
         # Rephoto-specific updates (only during rephoto phase)
@@ -2481,6 +2675,12 @@ class MainWindow(QMainWindow):
         """Clear selection/runtime preview state when user imports a new input image."""
         self.stop_quick_face_probe()
         self.quick_face_count_estimate = None
+        self.auto_detect_faces_armed_input = None
+        self.auto_detect_faces_triggered_input = None
+        self.suppress_preprocess_ui_until_rephoto = False
+        if hasattr(self, "input_image_edit"):
+            self.input_image_edit.setText("")
+        self.set_input_detect_overlay(False)
         self.reset_face_preview_state(preserve_input_overlays=False)
         self.clear_result_stage_overlay()
         self.reset_progress_bars()
@@ -2492,6 +2692,8 @@ class MainWindow(QMainWindow):
 
     def reset_form_defaults(self):
         self.stop_quick_face_probe()
+        self.set_input_detect_overlay(False)
+        self.suppress_preprocess_ui_until_rephoto = False
         # Reset all advanced-settings values to their defaults.
         self.advanced_dialog.restore_defaults()
 
@@ -2522,6 +2724,9 @@ class MainWindow(QMainWindow):
         was_awaiting = bool(self.awaiting_face_selection)
         self._reset_main_window_for_new_input()
         self.input_image_edit.setText(file_path)
+        current_key = self._normalized_path_key(file_path)
+        self.auto_detect_faces_armed_input = current_key
+        self.auto_detect_faces_triggered_input = None
         if was_awaiting:
             self.log_box.append("Face selection canceled: new image imported.")
         self.log_box.append(f"Selected image: {file_path}")
@@ -2542,6 +2747,9 @@ class MainWindow(QMainWindow):
             was_awaiting = bool(self.awaiting_face_selection)
             self._reset_main_window_for_new_input()
             self.input_image_edit.setText(file_path)
+            current_key = self._normalized_path_key(file_path)
+            self.auto_detect_faces_armed_input = current_key
+            self.auto_detect_faces_triggered_input = None
             if was_awaiting:
                 self.log_box.append("Face selection canceled: new image imported.")
             self.log_box.append(f"Selected image: {file_path}")
@@ -3493,6 +3701,47 @@ class MainWindow(QMainWindow):
                 "Running starts with face detection, then prompts face selection when multiple faces are found."
             )
 
+    def _normalized_path_key(self, path_text):
+        if not path_text:
+            return None
+        try:
+            return os.path.normcase(str(Path(path_text).resolve()))
+        except Exception:
+            return os.path.normcase(str(path_text))
+
+    def maybe_auto_start_face_detection_from_import(self, allow_during_probe=False):
+        if not self.auto_detect_faces_on_import:
+            return
+        if self.process is not None or self.awaiting_face_selection:
+            return
+        if self.current_run_phase in {"preprocess", "rephoto"}:
+            return
+        if self.advanced_dialog.crop_only_checkbox.isChecked():
+            return
+        if (not allow_during_probe) and self.quick_face_probe_process is not None:
+            return
+
+        current_input = self.input_image_edit.text().strip()
+        if not current_input:
+            return
+        current_key = self._normalized_path_key(current_input)
+        if current_key is None:
+            return
+        if self.auto_detect_faces_armed_input != current_key:
+            return
+        if self.auto_detect_faces_triggered_input == current_key:
+            return
+
+        quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
+        # More permissive import gate: only suppress when confidently single-face.
+        if quick_count == 1:
+            return
+
+        self.auto_detect_faces_triggered_input = current_key
+        self.log_box.append("Multi-face import detected. Auto-starting face detection...")
+        self.status_label.setText("Status: Auto-starting face detection...")
+        QTimer.singleShot(0, self.run_wrapper)
+
     def resolve_conda_executable(self):
         env_conda = str(os.environ.get("CONDA_EXE", "") or "").strip()
         candidates = []
@@ -3695,6 +3944,7 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
         self.update_run_button_for_quick_face_hint()
+        self.maybe_auto_start_face_detection_from_import()
 
     def estimate_faces_for_quick_hint(self, image_path: Path):
         """Fast fallback estimate used only for run-button hinting if precise probe is unavailable."""
@@ -3750,6 +4000,7 @@ class MainWindow(QMainWindow):
         fallback_count = self.estimate_faces_for_quick_hint(image_path)
         self.quick_face_count_estimate = fallback_count if isinstance(fallback_count, int) else None
         self.update_run_button_for_quick_face_hint()
+        self.maybe_auto_start_face_detection_from_import(allow_during_probe=True)
 
         self._start_quick_face_probe(image_path, fallback_count=fallback_count)
 
@@ -4731,9 +4982,12 @@ class MainWindow(QMainWindow):
         self.input_pixmap = None
         self.hover_face_box_override = None
         self.hover_face_box_cache = {}
+        self.input_preview_scaled_cache_key = None
+        self.input_preview_scaled_cache_pixmap = None
         if image_path is None or (not image_path.exists()):
             self.input_face_boxes = []
             self.input_face_box_source = None
+            self.set_input_detect_overlay(False)
             self.input_preview_label.setText("No input image yet.")
             self.input_preview_label.setPixmap(QPixmap())
             return
@@ -4742,6 +4996,7 @@ class MainWindow(QMainWindow):
         if pix.isNull():
             self.input_face_boxes = []
             self.input_face_box_source = None
+            self.set_input_detect_overlay(False)
             self.input_preview_label.setText("Could not load input image.")
             self.input_preview_label.setPixmap(QPixmap())
             return
@@ -4751,6 +5006,8 @@ class MainWindow(QMainWindow):
             expected_count=len(self.face_preview_entries) if self.face_preview_entries else None
         )
         self.refresh_input_preview_scale()
+        if hasattr(self, "input_detect_overlay") and self.input_detect_overlay.isVisible():
+            self.input_detect_overlay.notify_parent_pixmap_changed()
 
     def _result_preview_cache_key(self, image_path: Path):
         try:
@@ -4817,7 +5074,21 @@ class MainWindow(QMainWindow):
             return
         w = max(1, self.input_preview_label.width() - 10)
         h = max(1, self.input_preview_label.height() - 10)
-        scaled = self.input_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        try:
+            source_key = int(self.input_pixmap.cacheKey())
+        except Exception:
+            source_key = 0
+        cache_key = (source_key, w, h)
+        if (
+            self.input_preview_scaled_cache_key == cache_key
+            and self.input_preview_scaled_cache_pixmap is not None
+            and (not self.input_preview_scaled_cache_pixmap.isNull())
+        ):
+            scaled = self.input_preview_scaled_cache_pixmap
+        else:
+            scaled = self.input_pixmap.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.input_preview_scaled_cache_key = cache_key
+            self.input_preview_scaled_cache_pixmap = scaled
 
         active_idx = self.hover_face_preview_index
         if isinstance(active_idx, int):
@@ -4960,6 +5231,20 @@ class MainWindow(QMainWindow):
         target_h = min(h, self.result_pixmap.height())
         scaled = self.result_pixmap.scaled(target_w, target_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         self.result_preview_label.setPixmap(scaled)
+
+    def position_input_detect_overlay(self):
+        if not hasattr(self, "input_detect_overlay"):
+            return
+        self.input_detect_overlay.sync_geometry()
+
+    def set_input_detect_overlay(self, active, base_text="Detecting Faces"):
+        if not hasattr(self, "input_detect_overlay"):
+            return
+        if active:
+            self.position_input_detect_overlay()
+            self.input_detect_overlay.start(base_text)
+            return
+        self.input_detect_overlay.stop()
 
     def position_result_stage_overlay(self):
         """Position the stage overlay at bottom-left of the result preview."""
@@ -5172,8 +5457,11 @@ class MainWindow(QMainWindow):
         self.process.start(command[0], command[1:])
 
     def _prepare_face_selection_after_preprocess(self):
+        self.set_input_detect_overlay(False)
         crop_files = self.collect_current_crop_files()
         crop_count = len(crop_files)
+        self.set_preprocess_progress(0, "Preprocess ready")
+        self.set_rephoto_progress(0, "Waiting...")
         if crop_count <= 0:
             self.log_box.append("No detected faces were found after preprocessing.")
             self.status_label.setText("Status: No faces detected")
@@ -5232,6 +5520,8 @@ class MainWindow(QMainWindow):
             return
 
         self.awaiting_face_selection = False
+        self.suppress_preprocess_ui_until_rephoto = False
+        self.set_input_detect_overlay(False)
         self.update_image_import_controls()
         self.selection_preprocess_mode = False
         self.set_run_button_continue_mode(False)
@@ -5284,6 +5574,8 @@ class MainWindow(QMainWindow):
         if self.selection_preprocess_mode:
             # Stage 1 of two-step flow (crop detect/preview only).
             self.selection_preprocess_mode = False
+            self.suppress_preprocess_ui_until_rephoto = False
+            self.set_input_detect_overlay(False)
             self.set_controls_for_running(False)
             self.process = None
             self.run_started_at = None
@@ -5294,6 +5586,8 @@ class MainWindow(QMainWindow):
                 return
 
             self.status_label.setText("Status: Preprocessing failed")
+            self.set_preprocess_progress(0, "Preprocess ready")
+            self.set_rephoto_progress(0, "Waiting...")
             self.clear_result_stage_overlay()
             self.show_run_summary_dialog(
                 success=False,
@@ -5392,6 +5686,8 @@ class MainWindow(QMainWindow):
         if exit_code != 0 and summary_text:
             self._show_run_summary_text_dialog(summary_text)
         self.selection_preprocess_mode = False
+        self.suppress_preprocess_ui_until_rephoto = False
+        self.set_input_detect_overlay(False)
         self.awaiting_face_selection = False
         self.set_run_button_continue_mode(False)
         self.current_run_summary_context = None
@@ -5413,6 +5709,8 @@ class MainWindow(QMainWindow):
             self.render_face_preview_strip()
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
+        self.set_input_detect_overlay(False)
+        self.suppress_preprocess_ui_until_rephoto = False
         self.clear_result_stage_overlay()
         elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
         self.show_run_summary_dialog(
@@ -5452,6 +5750,8 @@ class MainWindow(QMainWindow):
             self._elapsed_timer.stop()
         self.log_box.append("Cancel requested. Stopping backend process...")
         self.status_label.setText("Status: Cancelling...")
+        self.set_input_detect_overlay(False)
+        self.suppress_preprocess_ui_until_rephoto = False
         self.clear_result_stage_overlay()
 
         self.process.terminate()
@@ -5491,19 +5791,34 @@ class MainWindow(QMainWindow):
         if not self.validate_numeric_inputs():
             return
 
+        current_key = self._normalized_path_key(str(input_image_path))
+        self.auto_detect_faces_armed_input = None
+
         self.stop_quick_face_probe()
+        self.set_input_detect_overlay(False)
         self.clear_result_stage_overlay()
         self.reset_progress_bars()
         self.reset_face_preview_state(preserve_input_overlays=False)
         self.current_run_summary_context = self._capture_run_context()
         self.current_run_phase = "preprocess"
         self.awaiting_face_selection = False
-        self.selection_preprocess_mode = (not self.advanced_dialog.crop_only_checkbox.isChecked())
+        quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
+        self.selection_preprocess_mode = bool(
+            (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (quick_count != 1)
+        )
+        self.suppress_preprocess_ui_until_rephoto = bool(self.selection_preprocess_mode)
+        if self.selection_preprocess_mode and current_key is not None:
+            self.auto_detect_faces_triggered_input = current_key
         self.set_run_button_continue_mode(False)
 
         self._reset_wrapper_runtime_tracking()
-        self.set_preprocess_progress(5, "Detecting faces..." if self.selection_preprocess_mode else "Preprocessing...")
-        self.set_rephoto_progress(0, "Waiting...")
+        if self.suppress_preprocess_ui_until_rephoto:
+            self.set_input_detect_overlay(True, "Detecting Faces")
+            self.set_preprocess_progress(0, "Preprocess ready")
+            self.set_rephoto_progress(0, "Waiting...")
+        else:
+            self.set_preprocess_progress(5, "Preprocessing...")
+            self.set_rephoto_progress(0, "Waiting...")
         command = self.build_wrapper_command(
             force_crop_only=True if self.selection_preprocess_mode else None,
         )
