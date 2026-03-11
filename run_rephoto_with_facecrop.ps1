@@ -17,6 +17,7 @@
     [switch]$CropOnly,
 
     [switch]$UseExistingCrops,
+    [switch]$RequireSelection,
 
     [switch]$UseGFPGAN,
 
@@ -276,6 +277,10 @@ if (-not [string]::IsNullOrWhiteSpace($SelectedCropIndices)) {
     )
 }
 
+if ($RequireSelection -and $ParsedSelectedCropIndices.Count -eq 0 -and $CropIndex -lt 0) {
+    throw "RequireSelection was set, but no SelectedCropIndices were provided."
+}
+
 if ($ParsedSelectedCropIndices.Count -gt 0) {
     if ($CropIndex -ge 0) {
         throw "Use either -CropIndex or -SelectedCropIndices, not both."
@@ -441,6 +446,7 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "SelectedCropIndices=$SelectedCropIndices"
     "CropOnly=$CropOnly"
     "UseExistingCrops=$UseExistingCrops"
+    "RequireSelection=$RequireSelection"
     "UseGFPGAN=$UseGFPGAN"
     "GFPGANVersion=$GFPGANVersion"
     "GFPGANEnvName=$GFPGANEnvName"

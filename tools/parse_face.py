@@ -2,6 +2,7 @@
 import os
 from os.path import join as pjoin
 from subprocess import run
+import sys
 
 import numpy as np
 import cv2
@@ -26,21 +27,27 @@ def create_skin_mask(anno_dir, mask_dir, skin_thresh=13, include_hair=False):
 
 
 def main(args):
-    FACE_PARSING_DIR = 'third_party/face_parsing'
+    FACE_PARSING_DIR = os.path.abspath(
+        pjoin(os.path.dirname(__file__), "..", "third_party", "face_parsing")
+    )
+    if not os.path.isdir(FACE_PARSING_DIR):
+        raise FileNotFoundError(f"Face parsing directory not found: {FACE_PARSING_DIR}")
+    input_dir = os.path.abspath(args.in_dir)
+    output_dir = os.path.abspath(args.out_dir)
 
     main_env = os.getcwd()
     try:
         os.chdir(FACE_PARSING_DIR)
-        tmp_parse_dir = pjoin(args.out_dir, 'face_parsing')
+        tmp_parse_dir = pjoin(output_dir, 'face_parsing')
         cmd = [
-            'python',
+            sys.executable,
             'test.py',
-            args.in_dir,
+            input_dir,
             tmp_parse_dir,
         ]
         print(' '.join(cmd))
         run(cmd, check=True)
-        create_skin_mask(tmp_parse_dir, args.out_dir, include_hair=args.include_hair)
+        create_skin_mask(tmp_parse_dir, output_dir, include_hair=args.include_hair)
     finally:
         os.chdir(main_env)
 

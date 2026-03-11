@@ -49,14 +49,16 @@ def main(args):
     landmarks_detector = LandmarksDetector(landmarks_model_path)
     face_sizes = SizePathMap()
     raw_img_dir = args.raw_image_dir
-    img_names = [n for n in os.listdir(raw_img_dir) if os.path.isfile(pjoin(raw_img_dir, n))]
+    image_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+    img_names = sorted([
+        n for n in os.listdir(raw_img_dir)
+        if os.path.isfile(pjoin(raw_img_dir, n)) and os.path.splitext(n)[1].lower() in image_exts
+    ])
     aligned_image_dir = args.aligned_image_dir
     os.makedirs(aligned_image_dir, exist_ok=True)
     pbar = tqdm(img_names)
     for img_name in pbar:
         pbar.set_description(img_name)
-        if os.path.splitext(img_name)[-1] == '.txt':
-            continue
         raw_img_path = os.path.join(raw_img_dir, img_name)
         try:
             for i, face_landmarks in enumerate(landmarks_detector.get_landmarks(raw_img_path), start=1):
@@ -80,8 +82,9 @@ def main(args):
 
     print(args.raw_image_dir, ':')
     sizes = face_sizes.get_sizes()
+    mean_size = float(np.mean(sizes)) if sizes else None
     results = {
-            'mean_size': np.mean(sizes),
+            'mean_size': mean_size,
             'num_faces_detected': len(sizes),
             'num_images': len(img_names),
             'sizes': sizes,

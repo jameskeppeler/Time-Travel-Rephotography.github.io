@@ -53,7 +53,7 @@ def compact_run_tag(input_stem: str, opt_str: str, max_stem: int = 40) -> str:
     return f"{stem_part}-cfg{short_hash(input_stem + '|' + opt_str)}"
 
 
-def read_images(paths: str, max_size: Optional[int] = None):
+def read_images(paths: Iterable[str], max_size: Optional[int] = None):
     transform = Compose(
         [
             Grayscale(),
@@ -154,7 +154,6 @@ def main(args):
         matched_hist_fn=pjoin(mh_dir, f"matched_{args.spectral_sensitivity}.png"),
         normalize=normalize,
     ).to(device)
-    torch.cuda.empty_cache()
     # TODO imgs has channel 3
 
     degrade = Degrade(args).to(device)
@@ -171,8 +170,11 @@ def main(args):
     )
 
     writer = SummaryWriter(pjoin(args.log_dir, run_tag))
-    # start optimize
-    latent, noises = Optimizer.optimize(generator, criterion, degrade, imgs, latent_init, noises_init, args, writer=writer)
+    try:
+        # start optimize
+        latent, noises = Optimizer.optimize(generator, criterion, degrade, imgs, latent_init, noises_init, args, writer=writer)
+    finally:
+        writer.close()
 
     # generate output
     img_out, _, _ = generator([latent], input_is_latent=True, noise=noises)

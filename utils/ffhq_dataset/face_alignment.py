@@ -4,6 +4,14 @@ import os
 import PIL.Image
 
 
+if hasattr(PIL.Image, "Resampling"):
+    _RESAMPLE_LANCZOS = PIL.Image.Resampling.LANCZOS
+    _RESAMPLE_BILINEAR = PIL.Image.Resampling.BILINEAR
+else:
+    _RESAMPLE_LANCZOS = PIL.Image.ANTIALIAS
+    _RESAMPLE_BILINEAR = PIL.Image.BILINEAR
+
+
 def image_align(src_file, dst_file, face_landmarks, resize=True, output_size=1024, transform_size=4096, enable_padding=True):
         # Align function from FFHQ dataset pre-processing step
         # https://github.com/NVlabs/ffhq-dataset/blob/master/download_ffhq.py
@@ -50,7 +58,7 @@ def image_align(src_file, dst_file, face_landmarks, resize=True, output_size=102
         shrink = int(np.floor(qsize / output_size * 0.5))
         if shrink > 1:
             rsize = (int(np.rint(float(img.size[0]) / shrink)), int(np.rint(float(img.size[1]) / shrink)))
-            img = img.resize(rsize, PIL.Image.ANTIALIAS)
+            img = img.resize(rsize, _RESAMPLE_LANCZOS)
             quad /= shrink
             qsize /= shrink
 
@@ -89,9 +97,9 @@ def image_align(src_file, dst_file, face_landmarks, resize=True, output_size=102
 
 
         # Transform.
-        img = img.transform((transform_size, transform_size), PIL.Image.QUAD, (quad + 0.5).flatten(), PIL.Image.BILINEAR)
+        img = img.transform((transform_size, transform_size), PIL.Image.QUAD, (quad + 0.5).flatten(), _RESAMPLE_BILINEAR)
         if output_size < transform_size:
-            img = img.resize((output_size, output_size), PIL.Image.ANTIALIAS)
+            img = img.resize((output_size, output_size), _RESAMPLE_LANCZOS)
 
         # Save aligned image.
         os.makedirs(os.path.dirname(dst_file), exist_ok=True)
