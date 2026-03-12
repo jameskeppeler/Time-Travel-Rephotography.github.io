@@ -10,6 +10,8 @@ from typing import (
     Tuple,
 )
 
+import os
+import time
 import numpy as np
 from tqdm import tqdm
 import torch
@@ -132,7 +134,41 @@ class Optimizer:
             ).to(device)
         latent = latent_init.detach().clone()
         milestone_hits = set()
+        stop_flag_path = str(getattr(args, "stop_flag", "") or "").strip()
+        pause_flag_path = str(getattr(args, "pause_flag", "") or "").strip()
+        stop_requested = False
+        pause_announced = False
+
+        def should_stop_early() -> bool:
+            return bool(stop_flag_path) and os.path.exists(stop_flag_path)
+
+        def should_pause() -> bool:
+            return bool(pause_flag_path) and os.path.exists(pause_flag_path)
+
+        def wait_if_paused() -> bool:
+            nonlocal pause_announced, stop_requested
+            while should_pause():
+                if should_stop_early():
+                    print("=== Early stop requested ===")
+                    stop_requested = True
+                    return False
+                if not pause_announced:
+                    print("=== Pause requested ===")
+                    pause_announced = True
+                time.sleep(0.2)
+            if pause_announced:
+                print("=== Resume requested ===")
+                pause_announced = False
+            return True
+
         for coarse_level, steps in enumerate(args.wplus_step):
+            if not wait_if_paused():
+                break
+            if should_stop_early():
+                print("=== Early stop requested ===")
+                stop_requested = True
+                break
+
             if criterion.weights["contextual"] > 0:
                 with torch.no_grad():
                     # synthesize new sibling image using the current optimization results
@@ -151,6 +187,13 @@ class Optimizer:
             print(f"Optimizing {coarse_size}x{coarse_size}")
             pbar = tqdm(range(steps))
             for si in pbar:
+                if not wait_if_paused():
+                    break
+                if should_stop_early():
+                    print("=== Early stop requested ===")
+                    stop_requested = True
+                    break
+
                 latent = torch.cat((latent_coarse, latent_fine), dim=1)
                 niters = si + completed_before_level
 
@@ -194,6 +237,8 @@ class Optimizer:
                     cls.log_visuals(writer, niters, img_gen, target, degraded=degrade(img_gen), rgbs=rgbs)
 
             latent = torch.cat((latent_coarse, latent_fine), dim=1).detach()
+            if stop_requested:
+                break
 
         return latent, noises
 

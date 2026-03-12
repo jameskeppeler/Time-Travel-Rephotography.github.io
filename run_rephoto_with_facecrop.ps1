@@ -13,6 +13,8 @@
 
     [int]$CropIndex = -1,
     [string]$SelectedCropIndices = "",
+    [string]$StopFlagPath = "",
+    [string]$PauseFlagPath = "",
 
     [switch]$CropOnly,
 
@@ -206,6 +208,28 @@ if ($UseGFPGAN) {
     New-Item -ItemType Directory -Path $GFPGANRunRoot   -Force | Out-Null
     New-Item -ItemType Directory -Path $GFPGANOutputDir -Force | Out-Null
     New-Item -ItemType Directory -Path $GFPGANBlendDir  -Force | Out-Null
+}
+
+if (-not [string]::IsNullOrWhiteSpace($StopFlagPath)) {
+    try {
+        if (Test-Path -LiteralPath $StopFlagPath) {
+            Remove-Item -LiteralPath $StopFlagPath -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Failed to clear stop flag path '$StopFlagPath' before run start: $($_.Exception.Message)"
+    }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($PauseFlagPath)) {
+    try {
+        if (Test-Path -LiteralPath $PauseFlagPath) {
+            Remove-Item -LiteralPath $PauseFlagPath -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Failed to clear pause flag path '$PauseFlagPath' before run start: $($_.Exception.Message)"
+    }
 }
 
 if (-not $UseExistingCrops) {
@@ -456,6 +480,8 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "DetThreshold=$DetThreshold"
     "CropIndex=$CropIndex"
     "SelectedCropIndices=$SelectedCropIndices"
+    "StopFlagPath=$StopFlagPath"
+    "PauseFlagPath=$PauseFlagPath"
     "CropOnly=$CropOnly"
     "UseExistingCrops=$UseExistingCrops"
     "RequireSelection=$RequireSelection"
@@ -505,12 +531,40 @@ Push-Location -LiteralPath $RepoRoot
 try {
     $CropOrdinal = 0
     foreach ($Crop in $CropFiles) {
+        $PauseAnnounced = $false
+        while (-not [string]::IsNullOrWhiteSpace($PauseFlagPath) -and (Test-Path -LiteralPath $PauseFlagPath)) {
+            if (-not $PauseAnnounced) {
+                Write-Host "=== Pause requested ==="
+                $PauseAnnounced = $true
+            }
+            Start-Sleep -Milliseconds 250
+            if (-not [string]::IsNullOrWhiteSpace($StopFlagPath) -and (Test-Path -LiteralPath $StopFlagPath)) {
+                break
+            }
+        }
+        if ($PauseAnnounced) {
+            Write-Host "=== Resume requested ==="
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($StopFlagPath) -and (Test-Path -LiteralPath $StopFlagPath)) {
+            Write-Host "Early-stop flag detected. Ending run early."
+            break
+        }
+
         $CropOrdinal++
         $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
         # Keep per-face result folder names short to avoid Windows path-length failures.
         $ThisResultDir = Join-Path $ResultRoot ("face_{0:D3}_p{1}" -f $CropOrdinal, $Preset)
 
         $ProjectorImagePath = $Crop.FullName
+        $ProjectorStopFlagArgs = @()
+        $ProjectorPauseFlagArgs = @()
+        if (-not [string]::IsNullOrWhiteSpace($StopFlagPath)) {
+            $ProjectorStopFlagArgs = @("--stop_flag", $StopFlagPath)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($PauseFlagPath)) {
+            $ProjectorPauseFlagArgs = @("--pause_flag", $PauseFlagPath)
+        }
 
         if ($UseGFPGAN) {
             $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
@@ -557,7 +611,9 @@ try {
             --log_freq 10 `
             --log_visual_freq 1000 `
             --wplus_step $W1 $W2 `
-            --results_dir $ThisResultDir
+            --results_dir $ThisResultDir `
+            $ProjectorStopFlagArgs `
+            $ProjectorPauseFlagArgs
 
         if ($LASTEXITCODE -ne 0) {
             throw "projector.py failed for crop: $($Crop.Name)"
@@ -580,6 +636,11 @@ try {
             catch {
                 Write-Warning "Simple final copy failed (non-fatal): $($_.Exception.Message)"
             }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($StopFlagPath) -and (Test-Path -LiteralPath $StopFlagPath)) {
+            Write-Host "Early-stop flag acknowledged. Finishing run now."
+            break
         }
     }
 }
