@@ -169,7 +169,7 @@ class Optimizer:
                 # TODO: use coarse_size instead of args.coarse_size for rgb_level
                 loss, losses = criterion(img_gen, degrade=degrade, noises=noises, rgbs=rgbs)
 
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
                 optimizer.step()
 

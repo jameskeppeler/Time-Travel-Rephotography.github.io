@@ -14,6 +14,11 @@ import numpy as np
 from PIL import Image
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
+# Enable cuDNN auto-tuner for fixed-size convolutions (StyleGAN2 uses fixed resolutions).
+# This benchmarks different algorithms on first call, then caches the fastest for subsequent calls.
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
 from torchvision.transforms import (
     Compose,
     Grayscale,

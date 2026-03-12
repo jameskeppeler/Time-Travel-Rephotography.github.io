@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sys
@@ -7,6 +8,7 @@ import subprocess
 import shutil
 import time
 import math
+from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer
@@ -1027,6 +1029,15 @@ class MainWindow(QMainWindow):
 
     def resolve_resource_path(self, relative_path):
         """Resolve a resource path from app root and packaged fallbacks."""
+        cache = getattr(self, "_resolve_resource_path_cache", None)
+        if cache is None:
+            cache = {}
+            self._resolve_resource_path_cache = cache
+        rel_key = str(relative_path)
+        cached = cache.get(rel_key)
+        if cached is not None:
+            return cached
+
         rel = Path(relative_path)
         roots = []
 
@@ -1049,9 +1060,12 @@ class MainWindow(QMainWindow):
             seen.add(root)
             candidate = root / rel
             if candidate.exists():
+                cache[rel_key] = candidate
                 return candidate
 
-        return (app_root / rel).resolve()
+        result = (app_root / rel).resolve()
+        cache[rel_key] = result
+        return result
 
     def _to_bool(self, value, default=False):
         if value is None:
@@ -2239,7 +2253,14 @@ class MainWindow(QMainWindow):
     # UI state / control updates
     # ------------------------------
     def gfpgan_is_available(self):
-        return self.resolve_resource_path(Path("deps") / "GFPGAN").exists()
+        cached = getattr(self, "_gfpgan_available_cache", None)
+        if cached is not None:
+            ts, val = cached
+            if (time.time() - ts) < 60.0:
+                return val
+        result = self.resolve_resource_path(Path("deps") / "GFPGAN").exists()
+        self._gfpgan_available_cache = (time.time(), result)
+        return result
 
     
     def update_mode_controls(self):
@@ -2587,64 +2608,74 @@ class MainWindow(QMainWindow):
         s = (line or "").strip()
         if not s:
             return
+
+        # Hot path: during rephoto, most lines are tqdm iteration progress.
+        # Check this first to avoid all the string-contains checks below.
         if self._try_fast_rephoto_iteration_progress(s):
             return
 
+        # Quick reject: lines without "=" or ":" are unlikely to match any markers.
+        # tqdm progress bars, loss dumps, etc. all lack the markers we care about.
+        has_colon = ":" in s
+        has_equals = "===" in s
+        if not has_colon and not has_equals:
+            return
+
         # === Path tracking from stdout ===
-        if s.startswith("Crop:"):
-            crop_path_text = s.split("Crop:", 1)[-1].strip()
-            if crop_path_text:
-                self.mark_face_running_from_crop_path(crop_path_text)
-        if "Crop output dir:" in s:
-            self.current_crop_output_dir = s.split("Crop output dir:")[-1].strip()
-        if "GFPGAN output:" in s:
-            self.current_gfpgan_output_dir = s.split("GFPGAN output:")[-1].strip()
-        if "GFPGAN blended faces:" in s:
-            self.current_blended_faces_dir = s.split("GFPGAN blended faces:")[-1].strip()
-        if "Results:" in s and "Manifest:" not in s:
-            result_dir = s.split("Results:")[-1].strip()
-            self.current_results_dir = result_dir
-            if result_dir:
-                self.current_run_result_dirs.add(result_dir)
-        if "Manifest:" in s:
-            self.current_manifest_path = s.split("Manifest:")[-1].strip()
+        if has_colon:
+            if s.startswith("Crop:"):
+                crop_path_text = s.split("Crop:", 1)[-1].strip()
+                if crop_path_text:
+                    self.mark_face_running_from_crop_path(crop_path_text)
+            if "Crop output dir:" in s:
+                self.current_crop_output_dir = s.split("Crop output dir:")[-1].strip()
+            elif "GFPGAN output:" in s:
+                self.current_gfpgan_output_dir = s.split("GFPGAN output:")[-1].strip()
+            elif "GFPGAN blended faces:" in s:
+                self.current_blended_faces_dir = s.split("GFPGAN blended faces:")[-1].strip()
+            elif "Results:" in s and "Manifest:" not in s:
+                result_dir = s.split("Results:")[-1].strip()
+                self.current_results_dir = result_dir
+                if result_dir:
+                    self.current_run_result_dirs.add(result_dir)
+            elif "Manifest:" in s:
+                self.current_manifest_path = s.split("Manifest:")[-1].strip()
 
-        if "Simple final copy:" in s:
-            simple_copy_match = SIMPLE_FINAL_COPY_RE.match(s)
-            if simple_copy_match:
-                self.mark_face_done_from_result_path(simple_copy_match.group(1))
+            if "Simple final copy:" in s:
+                simple_copy_match = SIMPLE_FINAL_COPY_RE.match(s)
+                if simple_copy_match:
+                    self.mark_face_done_from_result_path(simple_copy_match.group(1))
 
-        if "projector.py failed for crop:" in s:
-            fail_match = REPHOTO_CROP_FAIL_RE.search(s)
-            if fail_match:
-                self.mark_face_failed_from_crop_name(fail_match.group(1))
+            if "projector.py failed for crop:" in s:
+                fail_match = REPHOTO_CROP_FAIL_RE.search(s)
+                if fail_match:
+                    self.mark_face_failed_from_crop_name(fail_match.group(1))
 
         # === Stage timing instrumentation ===
         current_time = None
 
-        # Record when stages start
-        if "=== Face crop step" in s and "crop" not in self.stage_started_at:
-            if current_time is None:
+        if has_equals:
+            # Record when stages start
+            if "=== Face crop step" in s and "crop" not in self.stage_started_at:
                 current_time = time.time()
-            self.stage_started_at["crop"] = current_time
-        if "=== GFPGAN step" in s and "enhance" not in self.stage_started_at:
-            if current_time is None:
+                self.stage_started_at["crop"] = current_time
+            elif "=== GFPGAN step" in s and "enhance" not in self.stage_started_at:
                 current_time = time.time()
-            self.stage_started_at["enhance"] = current_time
-        if "=== Rephoto step" in s and "rephoto" not in self.stage_started_at:
-            if current_time is None:
+                self.stage_started_at["enhance"] = current_time
+            elif "=== Rephoto step" in s and "rephoto" not in self.stage_started_at:
                 current_time = time.time()
-            self.stage_started_at["rephoto"] = current_time
+                self.stage_started_at["rephoto"] = current_time
 
         # Record when stages end and compute elapsed time
-        if s.startswith("Cropped face count:") and "crop" in self.stage_started_at and "crop" not in self.stage_elapsed:
-            if current_time is None:
-                current_time = time.time()
-            self.stage_elapsed["crop"] = current_time - self.stage_started_at["crop"]
-        if "GFPGAN blended faces:" in s and "enhance" in self.stage_started_at and "enhance" not in self.stage_elapsed:
-            if current_time is None:
-                current_time = time.time()
-            self.stage_elapsed["enhance"] = current_time - self.stage_started_at["enhance"]
+        if has_colon:
+            if s.startswith("Cropped face count:") and "crop" in self.stage_started_at and "crop" not in self.stage_elapsed:
+                if current_time is None:
+                    current_time = time.time()
+                self.stage_elapsed["crop"] = current_time - self.stage_started_at["crop"]
+            elif "GFPGAN blended faces:" in s and "enhance" in self.stage_started_at and "enhance" not in self.stage_elapsed:
+                if current_time is None:
+                    current_time = time.time()
+                self.stage_elapsed["enhance"] = current_time - self.stage_started_at["enhance"]
 
         # === Rephoto start marker, switch phases ===
         if s.startswith("=== Rephoto step"):
@@ -2702,9 +2733,9 @@ class MainWindow(QMainWindow):
                     self.set_result_stage_overlay("Enhancing")
                 return
 
-            if s.startswith("=== GPU pre-check"):
+            if s.startswith("=== GPU pre-check") or s.startswith("=== Pre-flight check"):
                 if not suppress_all_preprocess_ui:
-                    self.set_preprocess_progress(80, "GPU pre-check")
+                    self.set_preprocess_progress(80, "Pre-flight checks")
                     self.preprocess_stage = "gpu_check"
                 return
 
@@ -2767,6 +2798,7 @@ class MainWindow(QMainWindow):
         """Clear selection/runtime preview state when user imports a new input image."""
         self.stop_quick_face_probe()
         self.quick_face_count_estimate = None
+        self._template_match_cache = {}
         self.auto_detect_faces_armed_input = None
         self.auto_detect_faces_triggered_input = None
         self.suppress_preprocess_ui_until_rephoto = False
@@ -2836,18 +2868,7 @@ class MainWindow(QMainWindow):
             "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
         )
         if file_path:
-            was_awaiting = bool(self.awaiting_face_selection)
-            self._reset_main_window_for_new_input()
-            self.input_image_edit.setText(file_path)
-            current_key = self._normalized_path_key(file_path)
-            self.auto_detect_faces_armed_input = current_key
-            self.auto_detect_faces_triggered_input = None
-            if was_awaiting:
-                self.log_box.append("Face selection canceled: new image imported.")
-            self.log_box.append(f"Selected image: {file_path}")
-            self.status_label.setText("Status: Image selected")
-            self.set_input_preview_image(Path(file_path))
-            self.refresh_quick_face_hint_from_input()
+            self.set_selected_input_image(file_path)
 
     def browse_results_root(self):
         start_dir = self.results_root_edit.text().strip() or str(self.repo_root)
@@ -3008,7 +3029,6 @@ class MainWindow(QMainWindow):
                 return float(y)
 
         # Log-log interpolation between nearest anchors (reasonable for scaling curves)
-        import math
         anchors_sorted = sorted(anchors, key=lambda t: t[0])
 
         if preset_value < anchors_sorted[0][0]:
@@ -3119,7 +3139,6 @@ class MainWindow(QMainWindow):
 
         records = []
         try:
-            import json
             with open(log_path, "r", encoding="utf-8") as f:
                 for line in f:
                     line = line.strip()
@@ -3233,8 +3252,6 @@ class MainWindow(QMainWindow):
         # -------------------------------------------------
         # 2) Learn enhancement overhead from paired on/off local timings
         # -------------------------------------------------
-        from collections import defaultdict
-
         def build_overhead_points(use_same_gpu):
             subset = []
             for p, s, g, e, rt in parsed:
@@ -3319,8 +3336,6 @@ class MainWindow(QMainWindow):
             base_points = sorted((p, sum(vals) / len(vals)) for p, vals in grouped_base.items())
 
             if len(base_points) >= 2:
-                import math
-
                 if preset_value < base_points[0][0]:
                     x0, y0 = base_points[0]
                     x1, y1 = base_points[1]
@@ -4067,7 +4082,6 @@ class MainWindow(QMainWindow):
             self._facecrop_env_name_cache = env_name
             return env_name
         try:
-            import json
             cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
             configured = str(cfg.get("FaceCropEnvName", "") or "").strip()
             if configured:
@@ -4239,6 +4253,23 @@ class MainWindow(QMainWindow):
                 )
                 self.quick_face_probe_warned = True
 
+        # Parse piggy-backed RETINA_FACE_BOX lines from the count probe so we
+        # can skip a separate retina box probe later (saves ~5-10s conda+model load).
+        if exit_status == QProcess.NormalExit and int(exit_code) == 0:
+            piggybacked_boxes = []
+            for line in (self.quick_face_probe_stdout or "").splitlines():
+                box_match = RETINA_FACE_BOX_RE.search(line.strip())
+                if box_match:
+                    bx = int(box_match.group(2))
+                    by = int(box_match.group(3))
+                    bw = int(box_match.group(4))
+                    bh = int(box_match.group(5))
+                    if bw >= 8 and bh >= 8:
+                        piggybacked_boxes.append((bx, by, bw, bh))
+            if piggybacked_boxes:
+                self._quick_probe_retina_boxes = piggybacked_boxes
+                self._quick_probe_retina_boxes_path = image_path
+
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
         self.update_run_button_for_quick_face_hint()
@@ -4308,6 +4339,20 @@ class MainWindow(QMainWindow):
     def resolve_input_face_boxes_via_retina_probe(self, image_path: Path, expected_count=None):
         if image_path is None or (not image_path.exists()):
             return []
+
+        # Check if the quick count probe already gave us retina boxes for this image.
+        cached_path = getattr(self, "_quick_probe_retina_boxes_path", None)
+        cached_boxes = getattr(self, "_quick_probe_retina_boxes", None)
+        if cached_boxes and cached_path:
+            try:
+                if self._normalized_path_key(str(image_path)) == self._normalized_path_key(cached_path):
+                    boxes = list(cached_boxes)
+                    if expected_count is not None and int(expected_count) > 0 and len(boxes) > int(expected_count):
+                        boxes = boxes[: int(expected_count)]
+                    return boxes
+            except Exception:
+                pass
+
         conda_exe = self.resolve_conda_executable()
         if not conda_exe:
             return []
@@ -5027,6 +5072,16 @@ class MainWindow(QMainWindow):
         if (crop_path is None) or (not input_path_text):
             return None
 
+        # Cache template-match results per (input_path, crop_path) to avoid
+        # expensive multi-scale cv2.matchTemplate on every hover event.
+        cache = getattr(self, "_template_match_cache", None)
+        if cache is None:
+            cache = {}
+            self._template_match_cache = cache
+        cache_key = (input_path_text, crop_path)
+        if cache_key in cache:
+            return cache[cache_key]
+
         crop_file = Path(crop_path)
         input_file = Path(input_path_text)
         if (not crop_file.exists()) or (not input_file.exists()):
@@ -5084,11 +5139,13 @@ class MainWindow(QMainWindow):
                 best = (float(max_val), int(max_loc[0]), int(max_loc[1]), int(tw), int(th))
 
         if best is None:
+            cache[cache_key] = None
             return None
 
         best_score, bx, by, bw, bh = best
         # Low-confidence matches are often false positives on repeated textures.
         if best_score < 0.20:
+            cache[cache_key] = None
             return None
 
         inv = (1.0 / input_scale) if input_scale > 0 else 1.0
@@ -5112,7 +5169,9 @@ class MainWindow(QMainWindow):
         tight_y = max(0, min(tight_y, max(0, ih - 1)))
         tight_w = max(8, min(tight_w, iw - tight_x))
         tight_h = max(8, min(tight_h, ih - tight_y))
-        return (tight_x, tight_y, tight_w, tight_h)
+        result = (tight_x, tight_y, tight_w, tight_h)
+        cache[cache_key] = result
+        return result
 
     def eventFilter(self, watched, event):
         try:
@@ -6072,7 +6131,6 @@ class MainWindow(QMainWindow):
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
             source_preset = str(self.iter_values[self.iter_slider.value()])
 
-            import json
             with open(log_path, "a", encoding="utf-8") as f:
                 for pm in self._pending_milestones:
                     record = {
@@ -6122,7 +6180,6 @@ class MainWindow(QMainWindow):
             }
 
             with open(log_path, "a", encoding="utf-8") as f:
-                import json
                 f.write(json.dumps(record) + "\n")
             self._timing_records_cache_mtime = None
 

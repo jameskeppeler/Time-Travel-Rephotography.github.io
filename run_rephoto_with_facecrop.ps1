@@ -326,12 +326,10 @@ if ($CropOnly) {
 }
 
 
-if (-not $CropOnly) {
-    $CurrentStep++
-    Write-Progress -Activity "run_rephoto_with_facecrop" `
-        -Status "GPU pre-check ($CurrentStep of $TotalSteps)" `
-        -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
-}
+$CurrentStep++
+Write-Progress -Activity "run_rephoto_with_facecrop" `
+    -Status "GPU pre-check ($CurrentStep of $TotalSteps)" `
+    -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
 
 $GFPGANInputDir = $CropOutDir
 $GFPGANSelectedInputDir = Join-Path $GFPGANRunRoot "selected_input"
@@ -356,42 +354,48 @@ if ($UseGFPGAN) {
     Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem -LiteralPath $GFPGANBlendDir  -File    -ErrorAction SilentlyContinue | Remove-Item -Force
 
-    Push-Location -LiteralPath $GFPGANRoot
-try {
-    conda run -n $GFPGANEnvName python (Join-Path $GFPGANRoot "inference_gfpgan.py") `
-        -i $GFPGANInputDir `
-        -o $GFPGANOutputDir `
-        -v $GFPGANVersion `
-        -s 1 `
-        --aligned `
-        --bg_upsampler none `
-        --suffix gfp
+    # Run GFPGAN inference + blend in a single conda run call.
+    # The blend is pure CPU Pillow work — running it in the same process avoids
+    # a second conda env activation (~5-8s saved).
+    $BlendScriptPath = Join-Path $env:TEMP "rephoto_gfpgan_infer_blend.py"
 
-    if ($LASTEXITCODE -ne 0) { throw "GFPGAN inference failed." }
-}
-finally {
-    Pop-Location
-}
+@"
+import subprocess, sys, os, glob
+from pathlib import Path
 
-    $BlendScriptPath = Join-Path $env:TEMP "rephoto_gfpgan_blend.py"
+# --- Phase 1: GFPGAN inference ---
+gfpgan_root = sys.argv[1]
+input_dir   = sys.argv[2]
+output_dir  = sys.argv[3]
+version     = sys.argv[4]
+blend_out   = sys.argv[5]
+alpha       = float(sys.argv[6])
 
-@'
+infer_script = os.path.join(gfpgan_root, "inference_gfpgan.py")
+ret = subprocess.run([
+    sys.executable, infer_script,
+    "-i", input_dir,
+    "-o", output_dir,
+    "-v", version,
+    "-s", "1",
+    "--aligned",
+    "--bg_upsampler", "none",
+    "--suffix", "gfp",
+], cwd=gfpgan_root)
+if ret.returncode != 0:
+    print("GFPGAN inference failed.", file=sys.stderr)
+    sys.exit(1)
+
+# --- Phase 2: Blend original crops with enhanced faces ---
 from PIL import Image
-import os
-import sys
-import glob
 
-orig_dir = sys.argv[1]
-enh_dir = sys.argv[2]
-out_dir = sys.argv[3]
-alpha = float(sys.argv[4])
-
-os.makedirs(out_dir, exist_ok=True)
+enh_dir = os.path.join(output_dir, "restored_faces")
+os.makedirs(blend_out, exist_ok=True)
 
 patterns = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp")
 orig_files = []
 for pattern in patterns:
-    orig_files.extend(glob.glob(os.path.join(orig_dir, pattern)))
+    orig_files.extend(glob.glob(os.path.join(input_dir, pattern)))
 
 for f in sorted(set(orig_files)):
     base = os.path.splitext(os.path.basename(f))[0]
@@ -407,23 +411,27 @@ for f in sorted(set(orig_files)):
 
     a = Image.open(f).convert("RGBA")
     b = Image.open(match).convert("RGBA").resize(a.size)
-    out = os.path.join(out_dir, base + "_blend.png")
+    out = os.path.join(blend_out, base + "_blend.png")
     Image.blend(a, b, alpha).convert("RGB").save(out)
     print(f"WROTE {out}")
-'@ | Set-Content -LiteralPath $BlendScriptPath
+"@ | Set-Content -LiteralPath $BlendScriptPath
 
+    Push-Location -LiteralPath $GFPGANRoot
     try {
         conda run -n $GFPGANEnvName python $BlendScriptPath `
+            $GFPGANRoot `
             $GFPGANInputDir `
-            (Join-Path $GFPGANOutputDir "restored_faces") `
+            $GFPGANOutputDir `
+            $GFPGANVersion `
             $GFPGANBlendDir `
             $GFPGANBlend
 
         if ($LASTEXITCODE -ne 0) {
-            throw "GFPGAN blend step failed."
+            throw "GFPGAN inference + blend failed."
         }
     }
     finally {
+        Pop-Location
         Remove-Item -LiteralPath $BlendScriptPath -Force -ErrorAction SilentlyContinue
     }
 
@@ -475,16 +483,11 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
 Write-Host "Manifest: $ManifestPath"
 Write-Host ""
 
-Write-Host "=== GPU pre-check ==="
+Write-Host "=== Pre-flight checks ==="
 
-conda run -n $RephotoEnvName python -c "import sys, torch; ok = torch.cuda.is_available(); print(f'cuda_available={ok}'); print(f'device_count={torch.cuda.device_count()}'); sys.exit(0 if ok else 1)"
-
-if ($LASTEXITCODE -ne 0) {
-  throw "CUDA is not available in $RephotoEnvName. Aborting before projector run."
-}
-
-Write-Host ""
-
+# Skip the separate GPU pre-check conda run (saves ~5-8s of env activation + torch import).
+# projector.py will fail with a clear CUDA error if the GPU is unavailable.
+# We still validate the checkpoint and script exist before starting.
 if (-not (Test-Path -LiteralPath $EncoderCkptPath)) {
     throw "Encoder checkpoint not found: $EncoderCkptPath"
 }
@@ -492,6 +495,10 @@ if (-not (Test-Path -LiteralPath $EncoderCkptPath)) {
 if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
     throw "Projector script not found: $ProjectorScriptPath"
 }
+
+Write-Host "Encoder checkpoint: OK"
+Write-Host "Projector script: OK"
+Write-Host ""
 
 # Run projector on each crop in the rephoto environment.
 Push-Location -LiteralPath $RepoRoot
