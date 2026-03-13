@@ -140,3 +140,6 @@ checkpoint
 *.pt
 *.old
 deps/
+
+# Auto-downloaded DNN face detection model files
+models/face_detector/

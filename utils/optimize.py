@@ -1,4 +1,4 @@
-﻿import math
+import math
 from argparse import (
     ArgumentParser,
     Namespace,
@@ -29,6 +29,9 @@ from utils.misc import (
     optional_string,
 )
 
+# ── AMP availability ──────────────────────────────────────────────
+_AMP_AVAILABLE = hasattr(torch.cuda.amp, "autocast") and torch.cuda.is_available()
+
 
 class OptimizerArguments:
     @staticmethod
@@ -47,6 +50,16 @@ class OptimizerArguments:
         parser.add_argument("--log_freq", type=int, default=10, help="log frequency")
         parser.add_argument("--log_visual_freq", type=int, default=50, help="log frequency")
         parser.add_argument("--progress_freq", type=int, default=10, help="tqdm description refresh interval")
+
+        # ── New optimization flags ────────────────────────────────
+        parser.add_argument("--use_amp", action="store_true", default=False,
+                            help="Enable mixed-precision (fp16) training for ~15-30%% speedup")
+        parser.add_argument("--early_stop_patience", type=int, default=0,
+                            help="Stop if loss doesn't improve for N iterations (0=disabled)")
+        parser.add_argument("--early_stop_min_delta", type=float, default=1e-4,
+                            help="Minimum relative improvement to count as progress")
+        parser.add_argument("--lr_decay", type=float, default=0.0,
+                            help="Cosine LR decay factor: final_lr = lr * lr_decay. 0=disabled")
 
     @staticmethod
     def to_string(args: Namespace) -> str:
@@ -82,6 +95,27 @@ class LatentNoiser(nn.Module):
         return latent + noise
 
 
+class _EarlyStopTracker:
+    """Tracks loss plateau for early stopping."""
+    def __init__(self, patience: int, min_delta: float):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float("inf")
+        self.wait = 0
+        self.enabled = patience > 0
+
+    def should_stop(self, loss_val: float) -> bool:
+        if not self.enabled:
+            return False
+        rel_improvement = (self.best_loss - loss_val) / max(abs(self.best_loss), 1e-12)
+        if rel_improvement > self.min_delta:
+            self.best_loss = loss_val
+            self.wait = 0
+        else:
+            self.wait += 1
+        return self.wait >= self.patience
+
+
 class Optimizer:
     @staticmethod
     def _to_float_scalar(value) -> float:
@@ -100,6 +134,7 @@ class Optimizer:
             noise_init: torch.Tensor,
             args: Namespace,
             writer: Optional[SummaryWriter] = None,
+            timing_log=None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # do not optimize generator
         generator = generator.eval()
@@ -139,6 +174,24 @@ class Optimizer:
         stop_requested = False
         pause_announced = False
 
+        # ── Mixed precision setup ─────────────────────────────────
+        use_amp = getattr(args, "use_amp", False) and _AMP_AVAILABLE
+        scaler = torch.cuda.amp.GradScaler(enabled=use_amp) if use_amp else None
+        amp_dtype = torch.float16
+
+        # ── Early stopping setup ──────────────────────────────────
+        early_stop_patience = getattr(args, "early_stop_patience", 0)
+        early_stop_delta = getattr(args, "early_stop_min_delta", 1e-4)
+        early_stopper = _EarlyStopTracker(early_stop_patience, early_stop_delta)
+
+        # ── LR decay setup ────────────────────────────────────────
+        lr_decay = getattr(args, "lr_decay", 0.0)
+        use_lr_schedule = lr_decay > 0.0 and lr_decay < 1.0
+
+        # ── Reduced logging: bump visual freq to save GPU→CPU copies ──
+        log_freq = max(1, int(getattr(args, "log_freq", 10)))
+        log_visual_freq = max(50, int(getattr(args, "log_visual_freq", 50)))
+
         def should_stop_early() -> bool:
             return bool(stop_flag_path) and os.path.exists(stop_flag_path)
 
@@ -160,6 +213,8 @@ class Optimizer:
                 print("=== Resume requested ===")
                 pause_announced = False
             return True
+
+        level_t0 = time.perf_counter()
 
         for coarse_level, steps in enumerate(args.wplus_step):
             if not wait_if_paused():
@@ -184,7 +239,25 @@ class Optimizer:
             completed_before_level = int(np.sum(args.wplus_step[:coarse_level]))
             progress_freq = max(1, int(getattr(args, "progress_freq", 10)))
 
-            print(f"Optimizing {coarse_size}x{coarse_size}")
+            # ── LR scheduler for this coarse level ────────────────
+            scheduler = None
+            if use_lr_schedule:
+                scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer, T_max=steps, eta_min=args.lr * lr_decay)
+
+            # Reset early-stop tracker per coarse level
+            early_stopper.best_loss = float("inf")
+            early_stopper.wait = 0
+
+            level_t0 = time.perf_counter()
+            print(f"Optimizing {coarse_size}x{coarse_size}" +
+                  (f" [AMP fp16]" if use_amp else "") +
+                  (f" [early-stop patience={early_stop_patience}]" if early_stopper.enabled else ""))
+            if timing_log:
+                timing_log.mark(f"coarse_level_{coarse_level}_start",
+                                resolution=f"{coarse_size}x{coarse_size}",
+                                steps=steps, use_amp=use_amp)
+
             pbar = tqdm(range(steps))
             for si in pbar:
                 if not wait_if_paused():
@@ -204,19 +277,49 @@ class Optimizer:
                     if current_milestone not in milestone_hits and current_milestone < total_steps:
                         print(f"=== Rephoto milestone === {current_milestone}")
                         milestone_hits.add(current_milestone)
+                        if timing_log:
+                            timing_log.mark(f"milestone_{current_milestone}",
+                                            iteration=completed_iters)
+
                 if noiser is None:
                     latent_noisy = latent
                 else:
                     latent_noisy = noiser(latent, niters / max(1, total_steps))
-                img_gen, _, rgbs = generator([latent_noisy], input_is_latent=True, noise=noises)
-                # TODO: use coarse_size instead of args.coarse_size for rgb_level
-                loss, losses = criterion(img_gen, degrade=degrade, noises=noises, rgbs=rgbs)
 
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                optimizer.step()
+                # ── Forward + loss (with optional AMP) ────────────
+                if use_amp:
+                    with torch.cuda.amp.autocast(dtype=amp_dtype):
+                        img_gen, _, rgbs = generator([latent_noisy], input_is_latent=True, noise=noises)
+                        loss, losses = criterion(img_gen, degrade=degrade, noises=noises, rgbs=rgbs)
+
+                    optimizer.zero_grad(set_to_none=True)
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    img_gen, _, rgbs = generator([latent_noisy], input_is_latent=True, noise=noises)
+                    # TODO: use coarse_size instead of args.coarse_size for rgb_level
+                    loss, losses = criterion(img_gen, degrade=degrade, noises=noises, rgbs=rgbs)
+
+                    optimizer.zero_grad(set_to_none=True)
+                    loss.backward()
+                    optimizer.step()
+
+                if scheduler is not None:
+                    scheduler.step()
 
                 NoiseRegularizer.normalize(noises)
+
+                # ── Early stopping check (sample every progress_freq to avoid GPU sync) ──
+                if early_stopper.enabled and si % progress_freq == 0:
+                    loss_val = cls._to_float_scalar(loss)
+                    if early_stopper.should_stop(loss_val):
+                        print(f"=== Early stop: loss plateaued at {loss_val:.4e} for {early_stop_patience} iters ===")
+                        if timing_log:
+                            timing_log.mark("early_stop_triggered",
+                                            iteration=niters, loss=loss_val,
+                                            coarse_level=coarse_level)
+                        break
 
                 # Refreshing tqdm text less often avoids frequent GPU->CPU sync for .item().
                 if si % progress_freq == 0 or si == (steps - 1):
@@ -230,11 +333,19 @@ class Optimizer:
                     if desc_parts:
                         pbar.set_description("; ".join(desc_parts))
 
-                if writer is not None and niters % args.log_freq == 0:
+                if writer is not None and niters % log_freq == 0:
                     cls.log_losses(writer, niters, loss, losses, criterion.weights)
                     cls.log_parameters(writer, niters, degrade.named_parameters())
-                if writer is not None and niters % args.log_visual_freq == 0:
+                if writer is not None and niters % log_visual_freq == 0:
                     cls.log_visuals(writer, niters, img_gen, target, degraded=degrade(img_gen), rgbs=rgbs)
+
+            level_elapsed = time.perf_counter() - level_t0
+            iters_per_sec = (si + 1) / max(level_elapsed, 0.001)
+            print(f"Level {coarse_level} done: {si+1} iters in {level_elapsed:.1f}s ({iters_per_sec:.1f} it/s)")
+            if timing_log:
+                timing_log.mark(f"coarse_level_{coarse_level}_end",
+                                iterations=si + 1, elapsed_s=round(level_elapsed, 2),
+                                iters_per_sec=round(iters_per_sec, 1))
 
             latent = torch.cat((latent_coarse, latent_fine), dim=1).detach()
             if stop_requested:
@@ -312,6 +423,3 @@ class Optimizer:
             scale = 2 ** (-(len(rgbs) - ri))
             visual = make_grid(torch.cat((rgb, rgb / scale), dim=-1), nrow=1, normalize=True, value_range=(-1, 1))
             writer.add_image(f"{prefix}to_rbg_{2 ** (ri + 2)}", visual, niters)
-
-
-

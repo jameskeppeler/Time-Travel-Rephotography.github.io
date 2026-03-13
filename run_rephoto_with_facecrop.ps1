@@ -13,6 +13,7 @@
 
     [int]$CropIndex = -1,
     [string]$SelectedCropIndices = "",
+    [string]$SelectedCropNames = "",
     [string]$StopFlagPath = "",
     [string]$PauseFlagPath = "",
 
@@ -48,7 +49,13 @@
     [double]$LR = 0.1,
     [double]$CameraLR = 0.01,
     [int]$MixLayerStart = 10,
-    [int]$MixLayerEnd = 18
+    [int]$MixLayerEnd = 18,
+
+    # Backend optimization flags
+    [switch]$UseAMP,
+    [int]$EarlyStopPatience = 0,
+    [double]$EarlyStopMinDelta = 0.0001,
+    [double]$LRDecay = 0.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -255,6 +262,7 @@ if (-not $UseExistingCrops) {
     Write-Host ""
 
     # Run face cropping in the facecrop environment.
+    $FaceCropStart = [System.Diagnostics.Stopwatch]::StartNew()
     conda run -n $FaceCropEnvName $FaceCropCommand `
         -i $TempInputDir `
         -o $CropOutDir `
@@ -264,6 +272,8 @@ if (-not $UseExistingCrops) {
         -st $Strategy `
         -ff $FaceFactor `
         -dt $DetThreshold
+    $FaceCropStart.Stop()
+    Write-Host "=== Face crop elapsed: $([math]::Round($FaceCropStart.Elapsed.TotalSeconds, 1))s ==="
 
     if ($LASTEXITCODE -ne 0) {
         throw "Face crop failed (command: $FaceCropCommand, env: $FaceCropEnvName)."
@@ -305,11 +315,79 @@ if (-not [string]::IsNullOrWhiteSpace($SelectedCropIndices)) {
     )
 }
 
-if ($RequireSelection -and $ParsedSelectedCropIndices.Count -eq 0 -and $CropIndex -lt 0) {
-    throw "RequireSelection was set, but no SelectedCropIndices were provided."
+$ParsedSelectedCropNames = @()
+if (-not [string]::IsNullOrWhiteSpace($SelectedCropNames)) {
+    $SeenSelectedCropNames = @{}
+    foreach ($RawName in ($SelectedCropNames -split '[,\s;]+')) {
+        $Name = [string]$RawName
+        if ([string]::IsNullOrWhiteSpace($Name)) {
+            continue
+        }
+        $Key = $Name.ToLowerInvariant()
+        if (-not $SeenSelectedCropNames.ContainsKey($Key)) {
+            $SeenSelectedCropNames[$Key] = $true
+            $ParsedSelectedCropNames += $Name
+        }
+    }
 }
 
-if ($ParsedSelectedCropIndices.Count -gt 0) {
+if ($RequireSelection -and $ParsedSelectedCropIndices.Count -eq 0 -and $ParsedSelectedCropNames.Count -eq 0 -and $CropIndex -lt 0) {
+    throw "RequireSelection was set, but no selected crops were provided."
+}
+
+if ($ParsedSelectedCropNames.Count -gt 0) {
+    if ($CropIndex -ge 0) {
+        throw "Use either -CropIndex or -SelectedCropNames, not both."
+    }
+    if ($ParsedSelectedCropIndices.Count -gt 0) {
+        Write-Warning "Both SelectedCropNames and SelectedCropIndices were provided. Using SelectedCropNames and ignoring SelectedCropIndices."
+    }
+
+    $CropNameToIndex = @{}
+    for ($i = 0; $i -lt $AllCropFiles.Count; $i++) {
+        $File = $AllCropFiles[$i]
+        $NameKey = $File.Name.ToLowerInvariant()
+        if (-not $CropNameToIndex.ContainsKey($NameKey)) {
+            $CropNameToIndex[$NameKey] = $i
+        }
+        $StemKey = [System.IO.Path]::GetFileNameWithoutExtension($File.Name).ToLowerInvariant()
+        if (-not $CropNameToIndex.ContainsKey($StemKey)) {
+            $CropNameToIndex[$StemKey] = $i
+        }
+    }
+
+    $NormalizedNameIndices = @()
+    foreach ($RequestedName in $ParsedSelectedCropNames) {
+        $RequestedKeys = @()
+        $RequestedKeys += $RequestedName
+        $RequestedFileName = [System.IO.Path]::GetFileName($RequestedName)
+        if (-not [string]::IsNullOrWhiteSpace($RequestedFileName)) {
+            $RequestedKeys += $RequestedFileName
+            $RequestedStem = [System.IO.Path]::GetFileNameWithoutExtension($RequestedFileName)
+            if (-not [string]::IsNullOrWhiteSpace($RequestedStem)) {
+                $RequestedKeys += $RequestedStem
+            }
+        }
+        $RequestedKeys = @($RequestedKeys | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
+
+        $MatchIndex = $null
+        foreach ($RequestedKey in $RequestedKeys) {
+            if ($CropNameToIndex.ContainsKey($RequestedKey)) {
+                $MatchIndex = [int]$CropNameToIndex[$RequestedKey]
+                break
+            }
+        }
+
+        if ($null -eq $MatchIndex) {
+            throw "Requested SelectedCropNames entry '$RequestedName' did not match any cropped face in $CropOutDir."
+        }
+        $NormalizedNameIndices += $MatchIndex
+    }
+
+    $CropFiles = @($NormalizedNameIndices | ForEach-Object { $AllCropFiles[$_] })
+    Write-Host "Selected crop names: $($ParsedSelectedCropNames -join ', ')"
+}
+elseif ($ParsedSelectedCropIndices.Count -gt 0) {
     if ($CropIndex -ge 0) {
         throw "Use either -CropIndex or -SelectedCropIndices, not both."
     }
@@ -411,7 +489,9 @@ if ret.returncode != 0:
     sys.exit(1)
 
 # --- Phase 2: Blend original crops with enhanced faces ---
-from PIL import Image
+# Use NumPy vectorized blend for ~3-5x speedup over PIL.Image.blend
+import numpy as np
+import cv2 as cv
 
 enh_dir = os.path.join(output_dir, "restored_faces")
 os.makedirs(blend_out, exist_ok=True)
@@ -433,14 +513,21 @@ for f in sorted(set(orig_files)):
         continue
     match = matches[0]
 
-    a = Image.open(f).convert("RGBA")
-    b = Image.open(match).convert("RGBA").resize(a.size)
+    a = cv.imread(f, cv.IMREAD_COLOR)
+    b = cv.imread(match, cv.IMREAD_COLOR)
+    if a is None or b is None:
+        print(f"MISSING {base}")
+        continue
+    if a.shape[:2] != b.shape[:2]:
+        b = cv.resize(b, (a.shape[1], a.shape[0]), interpolation=cv.INTER_LANCZOS4)
+    blended = np.clip(a.astype(np.float32) * (1.0 - alpha) + b.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
     out = os.path.join(blend_out, base + "_blend.png")
-    Image.blend(a, b, alpha).convert("RGB").save(out)
+    cv.imwrite(out, blended, [cv.IMWRITE_PNG_COMPRESSION, 3])
     print(f"WROTE {out}")
 "@ | Set-Content -LiteralPath $BlendScriptPath
 
     Push-Location -LiteralPath $GFPGANRoot
+    $GFPGANStart = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         conda run -n $GFPGANEnvName python $BlendScriptPath `
             $GFPGANRoot `
@@ -458,6 +545,8 @@ for f in sorted(set(orig_files)):
         Pop-Location
         Remove-Item -LiteralPath $BlendScriptPath -Force -ErrorAction SilentlyContinue
     }
+    $GFPGANStart.Stop()
+    Write-Host "=== GFPGAN elapsed: $([math]::Round($GFPGANStart.Elapsed.TotalSeconds, 1))s ==="
 
     Write-Host "GFPGAN output: $GFPGANOutputDir"
     Write-Host "GFPGAN blended faces: $GFPGANBlendDir"
@@ -480,6 +569,7 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "DetThreshold=$DetThreshold"
     "CropIndex=$CropIndex"
     "SelectedCropIndices=$SelectedCropIndices"
+    "SelectedCropNames=$SelectedCropNames"
     "StopFlagPath=$StopFlagPath"
     "PauseFlagPath=$PauseFlagPath"
     "CropOnly=$CropOnly"
@@ -586,6 +676,21 @@ try {
         Write-Host "Results: $ThisResultDir"
         Write-Host ""
 
+        $RephotoStart = [System.Diagnostics.Stopwatch]::StartNew()
+
+        # Build optional optimization flags
+        $ProjectorOptArgs = @()
+        if ($UseAMP) {
+            $ProjectorOptArgs += "--use_amp"
+        }
+        if ($EarlyStopPatience -gt 0) {
+            $ProjectorOptArgs += @("--early_stop_patience", $EarlyStopPatience)
+            $ProjectorOptArgs += @("--early_stop_min_delta", $EarlyStopMinDelta)
+        }
+        if ($LRDecay -gt 0) {
+            $ProjectorOptArgs += @("--lr_decay", $LRDecay)
+        }
+
         conda run --no-capture-output -n $RephotoEnvName python -u $ProjectorScriptPath `
             $ProjectorImagePath `
             --encoder_ckpt $EncoderCkptPath `
@@ -613,7 +718,11 @@ try {
             --wplus_step $W1 $W2 `
             --results_dir $ThisResultDir `
             $ProjectorStopFlagArgs `
-            $ProjectorPauseFlagArgs
+            $ProjectorPauseFlagArgs `
+            $ProjectorOptArgs
+
+        $RephotoStart.Stop()
+        Write-Host "=== Rephoto crop elapsed: $([math]::Round($RephotoStart.Elapsed.TotalSeconds, 1))s ==="
 
         if ($LASTEXITCODE -ne 0) {
             throw "projector.py failed for crop: $($Crop.Name)"
