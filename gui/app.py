@@ -1617,9 +1617,6 @@ class MainWindow(QMainWindow):
         self._timing_records_cache_path = None
         self._timing_records_cache_mtime = None
         self._timing_records_cache = []
-        self._haar_face_detector = None
-        self._dnn_face_net = None
-        self._dnn_download_started = False
         self._conda_executable_cache = None
         self._facecrop_env_cache_key = None
         self._facecrop_env_name_cache = None
@@ -1674,7 +1671,6 @@ class MainWindow(QMainWindow):
         self.face_box_debug_overlay_enabled = False
         self.face_box_probe_cache = {}
         self.face_box_probe_cache_max_entries = 24
-        self._face_overlay_detector_warned = False
         self.input_preview_scaled_cache_key = None
         self.input_preview_scaled_cache_pixmap = None
         self.input_preview_render_cache_key = None
@@ -2343,9 +2339,6 @@ class MainWindow(QMainWindow):
         self.load_persisted_settings()
         # Defer startup checks until after first paint to improve perceived launch responsiveness.
         QTimer.singleShot(0, lambda: self.run_startup_preflight(show_dialog=True))
-        # Pre-warm the Haar cascade detector in the background so the first face
-        # probe doesn't pay the ~1.5s cold-start penalty.
-        QTimer.singleShot(200, self._warm_up_haar_detector)
 
     # ------------------------------
     # Qt / window events
@@ -2839,8 +2832,6 @@ class MainWindow(QMainWindow):
             can_select = (not force_running)
         self.browse_button.setEnabled(can_select)
         self.input_image_edit.setEnabled(can_select)
-        if hasattr(self, "input_preview_label"):
-            self.input_preview_label.setEnabled(can_select)
 
     def set_controls_for_running(self, is_running):
         self.update_run_button_for_quick_face_hint()
@@ -3159,9 +3150,6 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Reset canceled")
             return
 
-        self.stop_quick_face_probe()
-        self.set_input_detect_overlay(False)
-        self.suppress_preprocess_ui_until_rephoto = False
         # Reset all advanced-settings values to their defaults.
         self.advanced_dialog.restore_defaults()
 
@@ -3179,9 +3167,7 @@ class MainWindow(QMainWindow):
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
         self.update_runtime_label()
-        self.quick_face_count_estimate = None
         self.update_run_button_for_quick_face_hint()
-        self.reset_face_preview_state(preserve_input_overlays=False)
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -4611,8 +4597,7 @@ Write-Output "OK"
 
         self.auto_detect_faces_triggered_input = current_key
 
-        # Try instant in-process detection (Haar/DNN + OpenCV crop) first.
-        # This handles both single-face and multi-face images without spawning subprocesses.
+        # Create preview crops from RetinaFace probe boxes (already cached).
         if self._try_fast_inprocess_face_detect(Path(current_input)):
             return
 
@@ -4887,209 +4872,30 @@ Write-Output "OK"
         self.update_run_button_for_quick_face_hint()
         self.maybe_auto_start_face_detection_from_import()
 
-    # ---- DNN SSD face detector (replaces Haar cascade) ----
-    # Uses OpenCV's Caffe SSD model: res10_300x300_ssd_iter_140000_fp16
-    # Much more accurate than Haar, very few false positives, handles
-    # varied face sizes and slight rotations.
-
-    _DNN_FACE_MODEL_DIR = None  # set once at first use
-    _DNN_FACE_PROTOTXT_URL = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt"
-    _DNN_FACE_MODEL_URL = "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20180205_fp16/res10_300x300_ssd_iter_140000_fp16.caffemodel"
-
-    def _get_dnn_face_detector_dir(self):
-        """Return (and create) the directory for cached DNN model files."""
-        if self._DNN_FACE_MODEL_DIR is not None:
-            return self._DNN_FACE_MODEL_DIR
-        model_dir = self.repo_root / "models" / "face_detector"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        MainWindow._DNN_FACE_MODEL_DIR = model_dir
-        return model_dir
-
-    def _dnn_model_paths(self):
-        """Return (prototxt_path, model_path) — does NOT download."""
-        model_dir = self._get_dnn_face_detector_dir()
-        return (model_dir / "deploy.prototxt",
-                model_dir / "res10_300x300_ssd_iter_140000_fp16.caffemodel")
-
-    def _dnn_model_ready(self):
-        """Check if both model files already exist on disk."""
-        proto, model = self._dnn_model_paths()
-        return proto.exists() and model.exists()
-
-    def _download_dnn_face_model_background(self):
-        """Start a background thread to download the DNN model files (non-blocking)."""
-        if self._dnn_model_ready():
-            return
-        if getattr(self, "_dnn_download_in_flight", False):
-            return
-        self._dnn_download_in_flight = True
-        self._dnn_download_started = True
-        import threading
-        def _do_download():
-            proto, model = self._dnn_model_paths()
-            try:
-                import urllib.request
-                if not proto.exists():
-                    print(f"[DNN] Downloading face detector prototxt...")
-                    urllib.request.urlretrieve(self._DNN_FACE_PROTOTXT_URL, str(proto))
-                if not model.exists():
-                    print(f"[DNN] Downloading face detector model (~5MB)...")
-                    urllib.request.urlretrieve(self._DNN_FACE_MODEL_URL, str(model))
-                print("[DNN] Face detector model downloaded successfully.")
-            except Exception as exc:
-                print(f"[DNN] Face detector model download failed: {exc}")
-                # Allow retry on next attempt.
-                self._dnn_download_started = False
-            finally:
-                self._dnn_download_in_flight = False
-        t = threading.Thread(target=_do_download, daemon=True)
-        t.start()
-
-    def _get_dnn_face_detector(self):
-        """Lazy-load and cache the DNN SSD face detector network.
-
-        Returns None immediately if model files aren't downloaded yet
-        (never blocks on network I/O).
-        """
-        net = getattr(self, "_dnn_face_net", None)
-        if net is not None:
-            return net
-        if not self._dnn_model_ready():
-            # Kick off background download for next time.
-            self._download_dnn_face_model_background()
-            return None
-        try:
-            import cv2
-        except ImportError:
-            return None
-        proto, model = self._dnn_model_paths()
-        try:
-            net = cv2.dnn.readNetFromCaffe(str(proto), str(model))
-            self._dnn_face_net = net
-            return net
-        except Exception as exc:
-            try:
-                self.log_box.append(f"DNN face detector load failed: {exc}")
-            except Exception:
-                pass
-            return None
-
-    def _detect_faces_dnn(self, img, conf_threshold=0.55):
-        """Detect faces using the DNN SSD model.
-
-        Returns empty list immediately if model isn't downloaded yet (never blocks).
-        """
-        import cv2
-        net = self._get_dnn_face_detector()
-        if net is None:
-            return []
-        h, w = img.shape[:2]
-        blob = cv2.dnn.blobFromImage(img, 1.0, (300, 300), [104, 117, 123], False, False)
-        net.setInput(blob)
-        detections = net.forward()
-        faces = []
-        for i in range(detections.shape[2]):
-            confidence = detections[0, 0, i, 2]
-            if confidence < conf_threshold:
-                continue
-            x1 = max(0, int(detections[0, 0, i, 3] * w))
-            y1 = max(0, int(detections[0, 0, i, 4] * h))
-            x2 = min(w, int(detections[0, 0, i, 5] * w))
-            y2 = min(h, int(detections[0, 0, i, 6] * h))
-            fw = x2 - x1
-            fh = y2 - y1
-            if fw >= 8 and fh >= 8:
-                faces.append((x1, y1, fw, fh))
-        return faces
-
-    def _warm_up_haar_detector(self):
-        """Pre-load the Haar cascade and start DNN model download in background."""
-        try:
-            import cv2
-            if self._haar_face_detector is None:
-                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-                self._haar_face_detector = cv2.CascadeClassifier(cascade_path)
-            # Start background download of DNN model (non-blocking).
-            self._download_dnn_face_model_background()
-        except Exception:
-            pass
-
     def _try_fast_inprocess_face_detect(self, image_path: Path):
-        """Detect faces and create preview crops entirely in-process using DNN SSD.
+        """Create preview crops from RetinaFace boxes obtained by the probe.
 
         Returns True if successful and the filmstrip is populated.
         The crops saved here are rough previews. When the user clicks Run,
         the PS1 wrapper re-detects and produces proper aligned crops via face-crop-plus.
         """
+        # Use RetinaFace boxes cached by _quick_face_probe_finished.
+        cached_path = getattr(self, "_quick_probe_retina_boxes_path", None)
+        cached_boxes = getattr(self, "_quick_probe_retina_boxes", None)
+        if not cached_boxes or cached_path != str(image_path):
+            return False
+
         try:
             import cv2
         except ImportError:
             return False
 
-        # Reuse cached image from estimate_faces_for_quick_hint if available,
-        # avoiding a second full disk read (~100-500ms for large images).
-        cached_path = getattr(self, "_cached_cv2_image_path", None)
-        cached_img = getattr(self, "_cached_cv2_image", None)
-        if cached_img is not None and cached_path == str(image_path):
-            img = cached_img
-        else:
-            img = cv2.imread(str(image_path))
-        # Clear the image cache — single-use.
-        self._cached_cv2_image = None
-        self._cached_cv2_image_path = None
-
+        img = cv2.imread(str(image_path))
         if img is None:
             return False
 
         h, w = img.shape[:2]
-
-        # Reuse cached detection rects from estimate_faces_for_quick_hint
-        # to skip a duplicate detection pass.
-        cached_faces = getattr(self, "_cached_detect_faces", None)
-        cached_scale = getattr(self, "_cached_detect_scale", None)
-        self._cached_detect_faces = None
-        self._cached_detect_scale = None
-
-        if cached_faces is not None and cached_scale is not None:
-            faces = cached_faces
-            scale = cached_scale
-        else:
-            # Fallback: run detection if cache is not available.
-            detect_max = 1280
-            scale = 1.0
-            if max(h, w) > detect_max:
-                scale = detect_max / max(h, w)
-                detect_img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            else:
-                detect_img = img
-
-            # Try DNN SSD first, fall back to Haar.
-            faces = self._detect_faces_dnn(detect_img, conf_threshold=0.55)
-            if not faces:
-                gray = cv2.cvtColor(detect_img, cv2.COLOR_BGR2GRAY)
-                detector = self._haar_face_detector
-                if detector is None:
-                    cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-                    detector = cv2.CascadeClassifier(cascade_path)
-                    self._haar_face_detector = detector
-                if detector is None or detector.empty():
-                    return False
-                min_dim = min(detect_img.shape[0], detect_img.shape[1])
-                min_face = max(20, int(round(min_dim * 0.025)))
-                haar_faces = detector.detectMultiScale(
-                    gray, scaleFactor=1.08, minNeighbors=5, minSize=(min_face, min_face)
-                )
-                faces = [(int(x), int(y), int(fw), int(fh)) for (x, y, fw, fh) in haar_faces]
-
-            # Apply relative-size filter.
-            if len(faces) > 0:
-                areas = [int(fw) * int(fh) for (_, _, fw, fh) in faces]
-                max_area = max(areas)
-                threshold = max_area * 0.10
-                faces = [f for f, a in zip(faces, areas) if a >= threshold]
-
-        if len(faces) < 1:
-            return False
+        faces = [(int(bx), int(by), int(bw), int(bh)) for bx, by, bw, bh in cached_boxes]
 
         # Sort faces left-to-right for consistent ordering.
         faces = sorted(faces, key=lambda r: r[0])
@@ -5112,15 +4918,11 @@ Write-Output "OK"
 
         # Crop each face and build face boxes in sync so indices always match.
         face_factor = self.advanced_dialog.face_factor_edit.value()
-        expand = max(0.3, (1.0 / max(0.1, face_factor)) - 1.0)
+        expand = max(0.10, (1.0 / max(0.1, face_factor)) - 1.0) * 0.25
         crop_paths = []
         original_boxes = []
         for idx, (fx, fy, fw, fh) in enumerate(faces):
-            # Map face box back to original image coordinates.
-            ox = int(fx / scale)
-            oy = int(fy / scale)
-            ow = int(fw / scale)
-            oh = int(fh / scale)
+            ox, oy, ow, oh = fx, fy, fw, fh
 
             # Expand the box.
             pad_x = int(ow * expand)
@@ -5161,92 +4963,22 @@ Write-Output "OK"
         self.selection_preprocess_mode = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.current_run_phase = "preprocess"
-        # Pre-set face boxes from Haar detection so initialize_face_preview_entries
+        # Pre-set face boxes from RetinaFace probe so initialize_face_preview_entries
         # doesn't trigger expensive synchronous subprocess probes.
         self.input_face_boxes = original_boxes
-        self.input_face_box_source = "cascade"
+        self.input_face_box_source = "retina_probe"
         self._inprocess_face_boxes_set = True
         self.log_box.append(f"In-process face detection: {len(crop_paths)} faces found instantly.")
         self.status_label.setText(f"Status: {len(crop_paths)} faces detected")
         self.set_preprocess_progress(100, "Preprocessing complete")
-        self._prepare_face_selection_after_preprocess()
+        self._prepare_face_selection_after_preprocess(auto_continue_single=False)
         return True
 
     def estimate_faces_for_quick_hint(self, image_path: Path):
-        """Fast fallback estimate used only for run-button hinting if precise probe is unavailable.
-
-        Uses DNN SSD face detector (much more accurate than Haar) with Haar fallback.
-        Also caches the full-resolution cv2 image and detected face rects so that
-        _try_fast_inprocess_face_detect can reuse them without a second disk read
-        or duplicate detection pass.
-        """
-        self._cached_cv2_image = None
-        self._cached_cv2_image_path = None
-        self._cached_detect_faces = None
-        self._cached_detect_scale = None
-        try:
-            import cv2
-        except Exception:
-            return None
-
-        img = cv2.imread(str(image_path))
-        if img is None:
-            return None
-
-        # Cache the full-res image for reuse by _try_fast_inprocess_face_detect.
-        self._cached_cv2_image = img
-        self._cached_cv2_image_path = str(image_path)
-
-        h, w = img.shape[:2]
-        max_side = max(h, w)
-        target_max_side = 1280
-        scale = 1.0
-        if max_side > target_max_side:
-            scale = float(target_max_side) / float(max_side)
-            nw = max(1, int(round(w * scale)))
-            nh = max(1, int(round(h * scale)))
-            small = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
-        else:
-            small = img
-
-        # Try DNN SSD detector first (much more accurate, fewer false positives).
-        faces = self._detect_faces_dnn(small, conf_threshold=0.55)
-
-        # Fallback to Haar cascade if DNN model not available.
-        if not faces:
-            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-            detector = self._haar_face_detector
-            if detector is None:
-                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-                detector = cv2.CascadeClassifier(cascade_path)
-                self._haar_face_detector = detector
-            if detector is not None and not detector.empty():
-                min_dim = min(small.shape[0], small.shape[1])
-                min_face = max(20, int(round(min_dim * 0.025)))
-                haar_faces = detector.detectMultiScale(
-                    gray,
-                    scaleFactor=1.08,
-                    minNeighbors=5,
-                    minSize=(min_face, min_face),
-                )
-                faces = [(int(x), int(y), int(fw), int(fh)) for (x, y, fw, fh) in haar_faces]
-
-        if len(faces) == 0:
-            return 0
-
-        # Filter out false positives: discard faces whose area is less than 10%
-        # of the largest detected face. Lenient threshold allows group photos
-        # where back-row faces are much smaller than front-row faces.
-        areas = [int(fw) * int(fh) for (_, _, fw, fh) in faces]
-        max_area = max(areas)
-        threshold = max_area * 0.10
-        filtered = [f for f, a in zip(faces, areas) if a >= threshold]
-
-        # Cache the filtered rects + scale so _try_fast_inprocess_face_detect
-        # can skip the detection pass entirely.
-        self._cached_detect_faces = filtered
-        self._cached_detect_scale = scale
-        return len(filtered)
+        """Placeholder — face count estimation is now handled entirely by the
+        RetinaFace probe subprocess. Returns None so the caller always
+        launches the probe."""
+        return None
 
     def refresh_quick_face_hint_from_input(self):
         image_path_text = self.input_image_edit.text().strip()
@@ -5265,30 +4997,15 @@ Write-Output "OK"
             self.set_input_detect_overlay(False)
             return
 
-        dnn_ready = self._dnn_model_ready()
-        fallback_count = self.estimate_faces_for_quick_hint(image_path)
-        self.quick_face_count_estimate = fallback_count if isinstance(fallback_count, int) else None
-        self.log_box.append(
-            f"Face estimate: {fallback_count} face(s) detected"
-            f" (DNN {'ready' if dnn_ready else 'not ready, using Haar'})"
-        )
+        # Launch RetinaFace probe for face detection.
+        # When the probe finishes, _quick_face_probe_finished will set the
+        # face count, create preview crops, and populate the filmstrip.
         self.update_run_button_for_quick_face_hint()
-        self.maybe_auto_start_face_detection_from_import(allow_during_probe=True)
-
-        # Fast path: in-process detection fully resolved (filmstrip populated).
-        # Overlay already stopped by _prepare_face_selection_after_preprocess.
-        if getattr(self, "_inprocess_preview_crops", False):
+        if self._start_quick_face_probe(image_path, fallback_count=None):
+            self.log_box.append("Detecting faces (RetinaFace)...")
             return
 
-        # In-process detection didn't produce a filmstrip.
-        # If we found face(s), launch the accurate RetinaFace probe as fallback
-        # and keep the overlay visible until the probe completes.
-        if isinstance(fallback_count, int) and fallback_count >= 1:
-            if self._start_quick_face_probe(image_path, fallback_count=fallback_count):
-                self.log_box.append("Launched RetinaFace probe for accurate detection...")
-                return
-
-        # No faces found, or probe couldn't be launched. Stop the overlay.
+        # Probe couldn't be launched. Stop the overlay.
         self.set_input_detect_overlay(False)
 
     def resolve_input_face_boxes_via_retina_probe(self, image_path: Path, expected_count=None):
@@ -5896,7 +5613,7 @@ Write-Output "OK"
         if idx < 0:
             return None
 
-        if self.input_face_box_source in ("cropper_probe", "cascade", "retina_probe") and self.input_face_boxes:
+        if self.input_face_box_source in ("cropper_probe", "retina_probe") and self.input_face_boxes:
             if idx < len(self.input_face_boxes):
                 return self.input_face_boxes[idx]
             return None
@@ -6594,55 +6311,10 @@ Write-Output "OK"
                 self.refresh_input_preview_scale()
                 return
 
-        try:
-            import cv2
-        except Exception:
-            if (not self._face_overlay_detector_warned) and expected_count and expected_count > 1:
-                self.log_box.append("OpenCV unavailable in GUI env; attempting Retina face-box probe.")
-                self._face_overlay_detector_warned = True
-            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
-            if retina_boxes:
-                self.input_face_boxes = retina_boxes
-                self.input_face_box_source = "retina_probe"
-            self.refresh_input_preview_scale()
-            return
-
-        img = cv2.imread(str(image_path))
-        if img is None:
-            self.refresh_input_preview_scale()
-            return
-
-        # Try DNN SSD first, fall back to Haar cascade.
-        boxes = self._detect_faces_dnn(img, conf_threshold=0.55)
-        if not boxes:
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            detector = self._haar_face_detector
-            if detector is None:
-                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-                detector = cv2.CascadeClassifier(cascade_path)
-                self._haar_face_detector = detector
-            if not detector.empty():
-                detected = detector.detectMultiScale(gray, scaleFactor=1.08, minNeighbors=5, minSize=(30, 30))
-                boxes = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detected]
-        if not boxes:
-            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
-            if retina_boxes:
-                self.input_face_boxes = retina_boxes
-                self.input_face_box_source = "retina_probe"
-            self.refresh_input_preview_scale()
-            return
-
-        if expected_count is not None and expected_count > 0:
-            boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)[:expected_count]
-        boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
-        if expected_count is not None and expected_count > 0 and len(boxes) < int(expected_count):
-            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
-            if len(retina_boxes) >= len(boxes):
-                boxes = retina_boxes
-                self.input_face_box_source = "retina_probe"
-        self.input_face_boxes = boxes
-        if self.input_face_box_source is None:
-            self.input_face_box_source = "cascade"
+        retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+        if retina_boxes:
+            self.input_face_boxes = retina_boxes
+            self.input_face_box_source = "retina_probe"
         self.refresh_input_preview_scale()
 
     def set_input_preview_image(self, image_path: Path | None):
@@ -6808,13 +6480,16 @@ Write-Output "OK"
                 selected_indices = [self.selected_face_preview_index]
 
         selected_boxes = []
-        for idx in selected_indices:
-            cached_box = self.hover_face_box_cache.get(idx)
-            if cached_box is None:
-                cached_box = self.resolve_hover_face_box(idx)
-                self.hover_face_box_cache[idx] = cached_box
-            if cached_box is not None:
-                selected_boxes.append((idx, cached_box))
+        # Skip drawing selection boxes for single-face images — no ambiguity.
+        show_selected = len(self.input_face_boxes) > 1 or self.awaiting_face_selection
+        if show_selected:
+            for idx in selected_indices:
+                cached_box = self.hover_face_box_cache.get(idx)
+                if cached_box is None:
+                    cached_box = self.resolve_hover_face_box(idx)
+                    self.hover_face_box_cache[idx] = cached_box
+                if cached_box is not None:
+                    selected_boxes.append((idx, cached_box))
 
         draw_debug_boxes = (bool(self.face_box_debug_overlay_enabled) or bool(self.awaiting_face_selection)) and bool(self.input_face_boxes)
         draw_hover_box = isinstance(active_idx, int) and (active_box is not None)
@@ -7356,10 +7031,14 @@ Write-Output "OK"
         self.process.start(command[0], command[1:])
         self.update_run_button_for_quick_face_hint()
 
-    def _prepare_face_selection_after_preprocess(self):
+    def _prepare_face_selection_after_preprocess(self, auto_continue_single=True):
         self.set_input_detect_overlay(False)
         crop_files = self.collect_current_crop_files()
         crop_count = len(crop_files)
+        # Update the cached face count so re-runs know the actual count
+        # and don't unnecessarily re-enter selection_preprocess_mode.
+        if crop_count > 0:
+            self.quick_face_count_estimate = crop_count
         self.set_preprocess_progress(0, "Preprocess ready")
         self.set_rephoto_progress(0, "Waiting...")
         if crop_count <= 0:
@@ -7383,12 +7062,19 @@ Write-Output "OK"
                 entry["selected"] = True
                 entry["status"] = "queued"
             self.render_face_preview_strip()
-            self.log_box.append("Single face detected. Continuing automatically...")
-            self.status_label.setText("Status: Single face detected, continuing...")
-            self.awaiting_face_selection = False
-            self.update_image_import_controls()
-            self.set_run_button_continue_mode(False)
-            QTimer.singleShot(0, self.continue_rephoto_with_selected_faces)
+            if auto_continue_single:
+                self.log_box.append("Single face detected. Continuing automatically...")
+                self.status_label.setText("Status: Single face detected, continuing...")
+                self.awaiting_face_selection = False
+                self.update_image_import_controls()
+                self.set_run_button_continue_mode(False)
+                QTimer.singleShot(0, self.continue_rephoto_with_selected_faces)
+            else:
+                self.log_box.append("Single face detected. Click Run to start.")
+                self.status_label.setText("Status: Face detected — click Run")
+                self.awaiting_face_selection = False
+                self.update_image_import_controls()
+                self.set_run_button_continue_mode(False)
             return
 
         for entry in self.face_preview_entries:
@@ -7497,6 +7183,31 @@ Write-Output "OK"
         self.log_box.append(f"Process finished with exit code: {exit_code}")
         elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
         final_output_path = None
+        was_cancelled = (self.current_run_phase == "cancelled")
+
+        # --- Cancelled run: clean up without error dialogs ---
+        if was_cancelled:
+            self.log_box.append("Run was cancelled.")
+            self.status_label.setText("Status: Run cancelled")
+            self.set_preprocess_progress(0, "Preprocess ready")
+            self.set_rephoto_progress(0, "Waiting...")
+            self.clear_result_stage_overlay()
+            self.set_input_detect_overlay(False)
+            self.selection_preprocess_mode = False
+            self.suppress_preprocess_ui_until_rephoto = False
+            self.awaiting_face_selection = False
+            self._inprocess_preview_crops = False
+            self.set_run_button_continue_mode(False)
+            self.current_run_summary_context = None
+            self.process = None
+            self.current_run_phase = "idle"
+            self.set_controls_for_running(False)
+            self.run_started_at = None
+            self.rephoto_started_at = None
+            # Preserve quick_face_count_estimate and current_crop_output_dir
+            # so re-runs can reuse existing crops without re-detecting.
+            self.update_run_button_for_quick_face_hint()
+            return
 
         if exit_code != 0 and self.active_face_preview_index is not None:
             idx = self.active_face_preview_index
@@ -7689,6 +7400,12 @@ Write-Output "OK"
                 self.status_label.setText("Status: Face selection cancelled")
                 self.reset_face_preview_state(preserve_input_overlays=True)
                 self.current_run_summary_context = None
+                self.current_run_phase = "idle"
+                self.selection_preprocess_mode = False
+                self.suppress_preprocess_ui_until_rephoto = False
+                # Preserve current_crop_output_dir and quick_face_count_estimate
+                # so re-runs can reuse existing crops.
+                self.update_run_button_for_quick_face_hint()
                 return
             self.log_box.append("No backend process is running.")
             self.status_label.setText("Status: No backend process to cancel")
@@ -7790,6 +7507,25 @@ Write-Output "OK"
         if self.selection_preprocess_mode and current_key is not None:
             self.auto_detect_faces_triggered_input = current_key
         self.set_run_button_continue_mode(False)
+
+        # --- Reuse existing crops if available (e.g. after cancel + re-run) ---
+        # Only reuse crops from the PS1 wrapper (not rough in-process previews).
+        if (
+            self.selection_preprocess_mode
+            and self.current_crop_output_dir
+            and not getattr(self, "_inprocess_preview_crops", False)
+        ):
+            existing_crops = self.collect_current_crop_files()
+            if existing_crops:
+                self.log_box.append(
+                    f"Run button clicked. Reusing {len(existing_crops)} existing crop(s)..."
+                )
+                self.selection_preprocess_mode = False
+                self.suppress_preprocess_ui_until_rephoto = False
+                self.current_run_phase = "preprocess"
+                self.set_preprocess_progress(100, "Preprocessing complete")
+                self._prepare_face_selection_after_preprocess()
+                return
 
         self._reset_wrapper_runtime_tracking()
         self._prepare_stop_flag_for_new_run()
