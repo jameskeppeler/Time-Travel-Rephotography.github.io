@@ -11,9 +11,8 @@ import math
 from collections import defaultdict
 from pathlib import Path
 
-from PySide6.QtCore import QDateTime, QEvent, QProcess, QRect, QSize, Qt, QTimer
-import random
-from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QRadialGradient, QTextCursor
+from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QRadialGradient, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -257,21 +256,7 @@ class InputDropLabel(QLabel):
 
 
 class InputDetectOverlay(QWidget):
-    """Animated particle-grain scanning overlay for import-time face detection.
-
-    Renders a heavily blurred version of the underlying photograph with thousands
-    of tiny luminous particles that fade in and dissolve across the surface,
-    each colour-sampled from the image beneath it.
-    """
-
-    # --- Particle pool tunables ---
-    _POOL_SIZE = 6000         # max concurrent particles (dense glitter)
-    _SPAWN_PER_TICK = 80      # new particles per frame (slower buildup)
-    _PARTICLE_MIN_LIFE = 12   # min lifetime in ticks (longer shimmer)
-    _PARTICLE_MAX_LIFE = 50   # max lifetime in ticks (slow dissolve)
-    _PARTICLE_MIN_R = 0.3     # min radius px (sub-pixel glitter)
-    _PARTICLE_MAX_R = 0.9     # max radius px (tiny sparkle)
-    _TICK_INTERVAL_MS = 55    # ~18 fps (more languid)
+    """Animated overlay for import-time multi-face detection on the input preview."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -281,15 +266,11 @@ class InputDetectOverlay(QWidget):
         self.dot_count = 0
         self._pulse_phase = 0.0
         self._tick_count = 0
-        self._target_rect = QRect()
-        self._blurred_backdrop = QPixmap()  # heavily blurred image
-        self._source_image = QImage()       # for colour sampling
-        self._particles = []                # [x, y, r, age, max_age, cr, cg, cb]
+        self._blurred_backdrop = QPixmap()
+        self._blurred_target_rect = QRect()
         self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(self._TICK_INTERVAL_MS)
+        self._anim_timer.setInterval(120)
         self._anim_timer.timeout.connect(self._on_tick)
-
-    # ---- geometry helpers ----
 
     def _compute_overlay_target_rect(self):
         parent = self.parentWidget()
@@ -301,7 +282,8 @@ class InputDetectOverlay(QWidget):
             parent_pix = None
         if parent_pix is None or parent_pix.isNull():
             return QRect()
-        pw, ph = int(parent_pix.width()), int(parent_pix.height())
+        pw = int(parent_pix.width())
+        ph = int(parent_pix.height())
         if pw <= 1 or ph <= 1:
             return QRect()
         x = max(0, int(round((self.width() - pw) * 0.5)))
@@ -310,118 +292,52 @@ class InputDetectOverlay(QWidget):
         h = min(ph, max(1, self.height() - y))
         return QRect(x, y, w, h)
 
-    def _rebuild_source_data(self):
-        """Capture blurred backdrop and small colour-sample image from parent."""
+    def _rebuild_blurred_backdrop(self):
         parent = self.parentWidget()
         if parent is None:
             self._blurred_backdrop = QPixmap()
-            self._source_image = QImage()
-            self._target_rect = QRect()
+            self._blurred_target_rect = QRect()
             return
-        self._target_rect = self._compute_overlay_target_rect()
-        tr = self._target_rect
-        if tr.width() <= 2 or tr.height() <= 2:
+        target_rect = self._compute_overlay_target_rect()
+        if target_rect.width() <= 2 or target_rect.height() <= 2:
             self._blurred_backdrop = QPixmap()
-            self._source_image = QImage()
+            self._blurred_target_rect = QRect()
             return
+        self._blurred_target_rect = target_rect
+
         try:
             parent_pix = parent.pixmap()
         except Exception:
             parent_pix = None
         if parent_pix is None or parent_pix.isNull():
             self._blurred_backdrop = QPixmap()
-            self._source_image = QImage()
             return
 
-        cw, ch = parent_pix.width(), parent_pix.height()
+        captured = parent_pix.copy()
+        cw = int(captured.width())
+        ch = int(captured.height())
+        if cw <= 2 or ch <= 2:
+            self._blurred_backdrop = QPixmap()
+            return
 
-        # Heavy blur: downsample to ~1/20 then upscale back — gaussian-like.
-        tiny_w = max(1, int(round(cw / 20.0)))
-        tiny_h = max(1, int(round(ch / 20.0)))
-        tiny = parent_pix.scaled(tiny_w, tiny_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        mid_w = max(1, int(round(cw / 6.0)))
-        mid_h = max(1, int(round(ch / 6.0)))
-        mid = tiny.scaled(mid_w, mid_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        # One-time blur approximation per activation: downsample then upscale.
+        sample_w = max(1, int(round(cw / 18.0)))
+        sample_h = max(1, int(round(ch / 18.0)))
+        small = captured.scaled(sample_w, sample_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        mid_w = max(1, int(round(cw / 8.0)))
+        mid_h = max(1, int(round(ch / 8.0)))
+        mid = small.scaled(mid_w, mid_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         self._blurred_backdrop = mid.scaled(cw, ch, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-
-        # Small colour-sample image (~128px) for fast per-particle lookups.
-        sample_max = 128
-        if max(cw, ch) > sample_max:
-            s = sample_max / max(cw, ch)
-            sw, sh = max(1, int(round(cw * s))), max(1, int(round(ch * s)))
-        else:
-            sw, sh = cw, ch
-        self._source_image = parent_pix.scaled(sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).toImage()
-
-    def _sample_colour(self, norm_x, norm_y):
-        """Sample RGB from source image at normalised [0,1] coords, brightened."""
-        img = self._source_image
-        if img.isNull():
-            return (220, 225, 235)
-        iw, ih = img.width(), img.height()
-        px = max(0, min(iw - 1, int(norm_x * iw)))
-        py = max(0, min(ih - 1, int(norm_y * ih)))
-        c = QColor(img.pixel(px, py))
-        # Brighten toward white for luminous sparkle.
-        r = min(255, int(c.red()   * 0.40 + 255 * 0.60))
-        g = min(255, int(c.green() * 0.40 + 255 * 0.60))
-        b = min(255, int(c.blue()  * 0.40 + 255 * 0.60))
-        return (r, g, b)
-
-    # ---- particle management ----
-
-    def _spawn_particles(self, count):
-        tr = self._target_rect
-        if tr.width() <= 2 or tr.height() <= 2:
-            return
-        rw, rh = float(tr.width()), float(tr.height())
-        rx, ry = float(tr.x()), float(tr.y())
-        pool_max = self._POOL_SIZE
-        particles = self._particles
-        rmin, rmax = self._PARTICLE_MIN_R, self._PARTICLE_MAX_R
-        lmin, lmax = self._PARTICLE_MIN_LIFE, self._PARTICLE_MAX_LIFE
-        for _ in range(count):
-            if len(particles) >= pool_max:
-                break
-            nx = random.random()
-            ny = random.random()
-            particles.append([
-                rx + nx * rw,
-                ry + ny * rh,
-                random.uniform(rmin, rmax),
-                0,
-                random.randint(lmin, lmax),
-                *self._sample_colour(nx, ny),
-            ])
-
-    def _age_particles(self):
-        self._particles = [p for p in self._particles if p[3] < p[4]]
-        for p in self._particles:
-            p[3] += 1
-
-    # ---- public interface (matches old overlay API) ----
-
-    _MIN_DISPLAY_MS = 1200  # minimum visible time so particles are actually seen
 
     def start(self, base_text="Detecting Faces"):
         self.base_text = str(base_text or "Detecting Faces")
         self.dot_count = 0
         self._pulse_phase = 0.0
         self._tick_count = 0
-        self._particles.clear()
-        self._start_epoch_ms = QDateTime.currentMSecsSinceEpoch()
-        self._deferred_stop_pending = False
         parent = self.parentWidget()
         if parent is not None:
             self.setGeometry(parent.rect().adjusted(1, 1, -1, -1))
-        self._rebuild_source_data()
-        # Pre-seed a dense particle field so frame-1 isn't sparse.
-        for _ in range(8):
-            self._spawn_particles(self._SPAWN_PER_TICK)
-            # Stagger ages so they don't all fade in simultaneously.
-            for p in self._particles:
-                if p[3] == 0:
-                    p[3] = random.randint(0, p[4] - 1)
+        self._rebuild_blurred_backdrop()
         self.setVisible(True)
         self.raise_()
         if not self._anim_timer.isActive():
@@ -429,26 +345,10 @@ class InputDetectOverlay(QWidget):
         self.update()
 
     def stop(self):
-        # Enforce minimum display time so the particle effect is actually visible.
-        if self.isVisible() and hasattr(self, "_start_epoch_ms"):
-            elapsed = QDateTime.currentMSecsSinceEpoch() - self._start_epoch_ms
-            remaining = self._MIN_DISPLAY_MS - elapsed
-            if remaining > 0:
-                if not self._deferred_stop_pending:
-                    self._deferred_stop_pending = True
-                    QTimer.singleShot(int(remaining), self._do_stop)
-                # Already waiting — ignore duplicate stop() calls.
-                return
-        self._do_stop()
-
-    def _do_stop(self):
-        self._deferred_stop_pending = False
         self._anim_timer.stop()
         self.setVisible(False)
-        self._particles.clear()
         self._blurred_backdrop = QPixmap()
-        self._source_image = QImage()
-        self._target_rect = QRect()
+        self._blurred_target_rect = QRect()
 
     def sync_geometry(self):
         parent = self.parentWidget()
@@ -458,30 +358,24 @@ class InputDetectOverlay(QWidget):
         if self.geometry() != r:
             self.setGeometry(r)
             if self.isVisible():
-                self._rebuild_source_data()
+                self._rebuild_blurred_backdrop()
         if self.isVisible():
             self.raise_()
 
     def notify_parent_pixmap_changed(self):
         if not self.isVisible():
             return
-        self._rebuild_source_data()
+        self._rebuild_blurred_backdrop()
         self.update()
 
-    # ---- animation tick ----
-
     def _on_tick(self):
-        self._pulse_phase += 0.06
+        self._pulse_phase += 0.055
         if self._pulse_phase > 6.283185307179586:
             self._pulse_phase -= 6.283185307179586
         self._tick_count += 1
-        if self._tick_count % 6 == 0:
+        if self._tick_count % 8 == 0:
             self.dot_count = (self.dot_count + 1) % 4
-        self._age_particles()
-        self._spawn_particles(self._SPAWN_PER_TICK)
         self.update()
-
-    # ---- rendering ----
 
     def paintEvent(self, event):
         if not self.isVisible():
@@ -489,43 +383,35 @@ class InputDetectOverlay(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.Antialiasing)
-            tr = self._target_rect
-            has_target = tr.width() > 2 and tr.height() > 2
+            r = self._blurred_target_rect if (self._blurred_target_rect.width() > 2 and self._blurred_target_rect.height() > 2) else QRect()
+            has_target = r.width() > 2 and r.height() > 2
+            pulse = 0.5 + 0.5 * math.sin(self._pulse_phase)
 
-            # Layer 1: Heavily blurred image backdrop.
-            if has_target and self._blurred_backdrop is not None and not self._blurred_backdrop.isNull():
-                painter.setOpacity(0.92)
-                painter.drawPixmap(tr, self._blurred_backdrop)
+            if has_target and self._blurred_backdrop is not None and (not self._blurred_backdrop.isNull()):
+                painter.setOpacity(0.70)
+                painter.drawPixmap(r, self._blurred_backdrop)
                 painter.setOpacity(1.0)
-                # Subtle dark wash to deepen contrast for the particles.
-                painter.fillRect(tr, QColor(4, 6, 12, 50))
+                veil_alpha = int(round(36 + pulse * 20))
+                painter.fillRect(r, QColor(9, 13, 20, veil_alpha))
 
-            # Layer 2: Dense particle grain.
-            painter.setPen(Qt.NoPen)
-            for px, py, pr, age, max_age, cr, cg, cb in self._particles:
-                t = age / max(1, max_age)
-                # Smooth envelope: fade-in 20%, sustain 40%, fade-out 40%.
-                if t < 0.20:
-                    alpha = t / 0.20
-                elif t < 0.60:
-                    alpha = 1.0
-                else:
-                    alpha = 1.0 - (t - 0.60) / 0.40
-                alpha = max(0.0, min(1.0, alpha))
-                a = int(round(alpha * 200))
-                if a <= 4:
-                    continue
-                painter.setBrush(QColor(cr, cg, cb, a))
-                d = max(1, int(round(pr * 2)))
-                painter.drawEllipse(int(round(px - pr)), int(round(py - pr)), d, d)
+                cx = r.x() + (r.width() * 0.5)
+                cy = r.y() + (r.height() * 0.5)
+                pulse_scale = 0.92 + (pulse * 0.20)
+                radius = max(78, int(round(min(r.width(), r.height()) * 0.48 * pulse_scale)))
+                glow_alpha = int(round(30 + pulse * 40))
+                glow = QRadialGradient(cx, cy, radius)
+                glow.setColorAt(0.0, QColor(96, 178, 255, glow_alpha))
+                glow.setColorAt(0.32, QColor(80, 156, 230, int(glow_alpha * 0.50)))
+                glow.setColorAt(0.66, QColor(62, 128, 201, int(glow_alpha * 0.14)))
+                glow.setColorAt(1.0, QColor(24, 43, 69, 0))
+                painter.fillRect(r, QBrush(glow))
 
-            # Layer 3: Text label bubble.
             text = f"{self.base_text}{'.' * self.dot_count}"
             painter.setFont(QFont("Segoe UI", 10, QFont.Medium))
             metrics = painter.fontMetrics()
             tw = metrics.horizontalAdvance(text) + 20
             th = metrics.height() + 8
-            bounds = tr if has_target else self.rect()
+            bounds = r if has_target else self.rect()
             tx = bounds.x() + max(8, (bounds.width() - tw) // 2)
             ty = bounds.y() + max(8, (bounds.height() - th) // 2)
             bubble = QRect(tx, ty, tw, th)
@@ -1617,6 +1503,7 @@ class MainWindow(QMainWindow):
         self._timing_records_cache_path = None
         self._timing_records_cache_mtime = None
         self._timing_records_cache = []
+        self._haar_face_detector = None
         self._conda_executable_cache = None
         self._facecrop_env_cache_key = None
         self._facecrop_env_name_cache = None
@@ -1671,6 +1558,7 @@ class MainWindow(QMainWindow):
         self.face_box_debug_overlay_enabled = False
         self.face_box_probe_cache = {}
         self.face_box_probe_cache_max_entries = 24
+        self._face_overlay_detector_warned = False
         self.input_preview_scaled_cache_key = None
         self.input_preview_scaled_cache_pixmap = None
         self.input_preview_render_cache_key = None
@@ -2339,6 +2227,9 @@ class MainWindow(QMainWindow):
         self.load_persisted_settings()
         # Defer startup checks until after first paint to improve perceived launch responsiveness.
         QTimer.singleShot(0, lambda: self.run_startup_preflight(show_dialog=True))
+        # Pre-warm the Haar cascade detector in the background so the first face
+        # probe doesn't pay the ~1.5s cold-start penalty.
+        QTimer.singleShot(200, self._warm_up_haar_detector)
 
     # ------------------------------
     # Qt / window events
@@ -2669,15 +2560,6 @@ class MainWindow(QMainWindow):
         self.rephoto_face_current_index = 0
         self._last_iter_progress_signature = None
 
-        # Compute milestone thresholds: all iter_values below current preset.
-        # When phase-2 iteration count crosses these, we record the elapsed time
-        # so lower quality levels get real timing data from this longer run.
-        current_preset = self.iter_values[self.iter_slider.value()]
-        all_presets = sorted(set(self.basic_iter_values + self.advanced_iter_values))
-        self._milestone_iter_thresholds = [p for p in all_presets if p < current_preset]
-        self._milestone_recorded = set()
-        self._pending_milestones = []
-
     def update_rephoto_progress_from_iteration(self, current_iter, total_iter):
         if not self.rephoto_stage_name:
             return
@@ -2832,6 +2714,8 @@ class MainWindow(QMainWindow):
             can_select = (not force_running)
         self.browse_button.setEnabled(can_select)
         self.input_image_edit.setEnabled(can_select)
+        if hasattr(self, "input_preview_label"):
+            self.input_preview_label.setEnabled(can_select)
 
     def set_controls_for_running(self, is_running):
         self.update_run_button_for_quick_face_hint()
@@ -2894,25 +2778,6 @@ class MainWindow(QMainWindow):
             self.rephoto_stage_name = "64x64"
         self.rephoto_stage_total = total
         self.update_rephoto_progress_from_iteration(current, total)
-
-        # Record milestones during phase-2 (64x64) of the first face.
-        # When the iteration count crosses a lower preset's threshold,
-        # capture the wall-clock time as a timing data point for that preset.
-        if (
-            total == self.rephoto_step_pair[1]
-            and self.rephoto_face_current_index <= 1
-            and self.run_started_at is not None
-            and self._milestone_iter_thresholds
-        ):
-            for threshold in self._milestone_iter_thresholds:
-                if current >= threshold and threshold not in self._milestone_recorded:
-                    elapsed = time.time() - self.run_started_at
-                    self._pending_milestones.append({
-                        "preset": threshold,
-                        "elapsed_seconds": elapsed,
-                    })
-                    self._milestone_recorded.add(threshold)
-
         return True
 
     def update_progress_from_line(self, line: str):
@@ -3124,8 +2989,6 @@ class MainWindow(QMainWindow):
         self.auto_detect_faces_armed_input = None
         self.auto_detect_faces_triggered_input = None
         self.suppress_preprocess_ui_until_rephoto = False
-        self._inprocess_preview_crops = False
-        self._inprocess_face_boxes_set = False
         if hasattr(self, "input_image_edit"):
             self.input_image_edit.setText("")
         self.set_input_detect_overlay(False)
@@ -3150,6 +3013,9 @@ class MainWindow(QMainWindow):
             self.status_label.setText("Status: Reset canceled")
             return
 
+        self.stop_quick_face_probe()
+        self.set_input_detect_overlay(False)
+        self.suppress_preprocess_ui_until_rephoto = False
         # Reset all advanced-settings values to their defaults.
         self.advanced_dialog.restore_defaults()
 
@@ -3167,7 +3033,9 @@ class MainWindow(QMainWindow):
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
         self.update_runtime_label()
+        self.quick_face_count_estimate = None
         self.update_run_button_for_quick_face_hint()
+        self.reset_face_preview_state(preserve_input_overlays=False)
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -3186,12 +3054,7 @@ class MainWindow(QMainWindow):
         self.log_box.append(f"Selected image: {file_path}")
         self.status_label.setText("Status: Image selected")
         self.set_input_preview_image(Path(file_path))
-        # Show the scanning overlay immediately so particles start building
-        # while the image preview paints.
-        self.set_input_detect_overlay(True, "Detecting Faces")
-        # Defer face detection to let the image preview paint and the
-        # overlay animation begin before cv2 work blocks the thread.
-        QTimer.singleShot(50, self.refresh_quick_face_hint_from_input)
+        self.refresh_quick_face_hint_from_input()
 
     def browse_for_image(self):
         if not self.can_select_new_image(show_message=True):
@@ -3849,7 +3712,6 @@ class MainWindow(QMainWindow):
         force_crop_only=None,
         force_use_existing_crops=False,
         crop_indices=None,
-        crop_names=None,
         require_selection=False,
     ):
         input_image = self.input_image_edit.text().strip()
@@ -3937,18 +3799,6 @@ class MainWindow(QMainWindow):
                 if idx >= 0:
                     normalized_crop_indices.append(idx)
             normalized_crop_indices = sorted(set(normalized_crop_indices))
-        normalized_crop_names = []
-        if crop_names is not None:
-            seen_names = set()
-            for raw_name in crop_names:
-                name = str(raw_name or "").strip()
-                if not name:
-                    continue
-                key = name.lower()
-                if key in seen_names:
-                    continue
-                seen_names.add(key)
-                normalized_crop_names.append(name)
 
         crop_only_mode = self.advanced_dialog.crop_only_checkbox.isChecked() if force_crop_only is None else bool(force_crop_only)
         if crop_only_mode:
@@ -3956,30 +3806,30 @@ class MainWindow(QMainWindow):
         else:
             if require_selection:
                 command.append("-RequireSelection")
-                if (not normalized_crop_indices) and (not normalized_crop_names):
+                if not normalized_crop_indices:
                     raise ValueError("No face selection was provided for selected-face continuation.")
             if force_use_existing_crops:
                 command.append("-UseExistingCrops")
-            if normalized_crop_names:
-                command.append("-SelectedCropNames")
-                command.append(",".join(normalized_crop_names))
             if normalized_crop_indices:
                 command.append("-SelectedCropIndices")
                 command.append(",".join(str(i) for i in normalized_crop_indices))
             # Enhancement is enabled only if: checkbox is unchecked (not disabled) AND GFPGAN is available
             enhancement_enabled = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()) and self.gfpgan_is_available()
             if enhancement_enabled:
+                blend_value = float(self.advanced_dialog.gfpgan_blend_edit.value())
+                if (not self.advanced_mode_checkbox.isChecked()) and blend_value >= 0.999:
+                    # In basic mode, full replacement tends to over-smooth local features
+                    # (especially eyes). Auto-reset to the conservative default.
+                    blend_value = float(DEFAULT_GFPGAN_BLEND)
+                    self.advanced_dialog.gfpgan_blend_edit.setValue(blend_value)
+                    self.log_box.append(
+                        f"GFPGAN blend 1.0 detected in Basic mode; reset to {blend_value:.2f} to avoid eye smearing."
+                    )
                 command.extend([
                     "-UseGFPGAN",
                     "-GFPGANBlend",
-                    self.advanced_dialog.gfpgan_blend_edit.text().strip(),
+                    f"{blend_value:.2f}",
                 ])
-
-            # Backend optimization flags (always enabled, no GUI controls needed)
-            # NOTE: -UseAMP is intentionally NOT enabled by default because StyleGAN2's
-            # custom fused CUDA ops (fused_leaky_relu, upfirdn2d) produce NaN under fp16,
-            # resulting in black output images.
-            command.extend(["-LRDecay", "0.1"])
 
         return command
 
@@ -4591,8 +4441,8 @@ Write-Output "OK"
             return
 
         quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
-        # Suppress auto-detect only when zero faces were found.
-        if quick_count == 0:
+        # Keep import auto-detect scoped to confident multi-face inputs.
+        if quick_count is None or quick_count <= 1:
             return
 
         self.auto_detect_faces_triggered_input = current_key
@@ -4602,11 +4452,8 @@ Write-Output "OK"
             return
 
         # Fall back to full PS1 wrapper if in-process detection completely failed.
-        if quick_count is not None and quick_count >= 1:
-            msg = ("Multi-face import detected. Auto-starting face detection..."
-                   if quick_count >= 2
-                   else "Face detected. Auto-starting face detection...")
-            self.log_box.append(msg)
+        if quick_count >= 2:
+            self.log_box.append("Multi-face import detected. Auto-starting face detection...")
             self.status_label.setText("Status: Auto-starting face detection...")
             QTimer.singleShot(0, self.run_wrapper)
 
@@ -4858,12 +4705,11 @@ Write-Output "OK"
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
 
-        # Probe finished — stop the "Detecting Faces" overlay.
+        # Probe finished - stop the "Detecting Faces" overlay.
         self.set_input_detect_overlay(False)
 
         # Reset the trigger guard so auto-detect can re-fire with the
-        # accurate count from the probe (it was already set to current_key
-        # during the first attempt in refresh_quick_face_hint_from_input).
+        # accurate count from the probe (it may have been set earlier).
         current_input = self.input_image_edit.text().strip()
         current_key = self._normalized_path_key(current_input)
         if current_key is not None and self.auto_detect_faces_triggered_input == current_key:
@@ -4871,6 +4717,16 @@ Write-Output "OK"
 
         self.update_run_button_for_quick_face_hint()
         self.maybe_auto_start_face_detection_from_import()
+
+    def _warm_up_haar_detector(self):
+        """Pre-load the Haar cascade so the first face probe is fast."""
+        try:
+            import cv2
+            if self._haar_face_detector is None:
+                cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+                self._haar_face_detector = cv2.CascadeClassifier(cascade_path)
+        except Exception:
+            pass
 
     def _try_fast_inprocess_face_detect(self, image_path: Path):
         """Create preview crops from RetinaFace boxes obtained by the probe.
@@ -4882,7 +4738,9 @@ Write-Output "OK"
         # Use RetinaFace boxes cached by _quick_face_probe_finished.
         cached_path = getattr(self, "_quick_probe_retina_boxes_path", None)
         cached_boxes = getattr(self, "_quick_probe_retina_boxes", None)
-        if not cached_boxes or cached_path != str(image_path):
+        if not cached_boxes:
+            return False
+        if self._normalized_path_key(str(image_path)) != self._normalized_path_key(str(cached_path)):
             return False
 
         try:
@@ -4896,15 +4754,16 @@ Write-Output "OK"
 
         h, w = img.shape[:2]
         faces = [(int(bx), int(by), int(bw), int(bh)) for bx, by, bw, bh in cached_boxes]
+        if len(faces) < 1:
+            return False
 
         # Sort faces left-to-right for consistent ordering.
         faces = sorted(faces, key=lambda r: r[0])
 
-        # Build safe output directory matching the PS1 wrapper convention:
-        # $SafeBase = ($OriginalBase -replace '[^\p{L}\p{Nd}]+', '_').Trim('_')
-        safe_base = re.sub(r'[^a-zA-Z0-9]+', '_', image_path.stem).strip('_')
-        if not safe_base:
-            safe_base = "input_image"
+        # Build safe output directory matching the PS1 wrapper convention.
+        safe_base = image_path.stem.replace(" ", "_")
+        for ch in r'[](){}!@#$%^&=+;,':
+            safe_base = safe_base.replace(ch, "_")
         crop_out_dir = self.repo_root / "preprocess" / "face_crops" / safe_base
         crop_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -4916,13 +4775,13 @@ Write-Output "OK"
                 except OSError:
                     pass
 
-        # Crop each face and build face boxes in sync so indices always match.
+        # Crop each face and keep source boxes in sync with generated crops.
         face_factor = self.advanced_dialog.face_factor_edit.value()
         expand = max(0.10, (1.0 / max(0.1, face_factor)) - 1.0) * 0.25
         crop_paths = []
         original_boxes = []
         for idx, (fx, fy, fw, fh) in enumerate(faces):
-            ox, oy, ow, oh = fx, fy, fw, fh
+            ox, oy, ow, oh = int(fx), int(fy), int(fw), int(fh)
 
             # Expand the box.
             pad_x = int(ow * expand)
@@ -4947,7 +4806,6 @@ Write-Output "OK"
             out_path = crop_out_dir / f"{safe_base}_{idx:03d}.png"
             cv2.imwrite(str(out_path), crop)
             crop_paths.append(out_path)
-            # Keep boxes in sync with crops so indices match for hover/click.
             original_boxes.append((ox, oy, ow, oh))
 
         if not crop_paths:
@@ -4963,22 +4821,52 @@ Write-Output "OK"
         self.selection_preprocess_mode = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.current_run_phase = "preprocess"
-        # Pre-set face boxes from RetinaFace probe so initialize_face_preview_entries
-        # doesn't trigger expensive synchronous subprocess probes.
         self.input_face_boxes = original_boxes
         self.input_face_box_source = "retina_probe"
-        self._inprocess_face_boxes_set = True
         self.log_box.append(f"In-process face detection: {len(crop_paths)} faces found instantly.")
         self.status_label.setText(f"Status: {len(crop_paths)} faces detected")
         self.set_preprocess_progress(100, "Preprocessing complete")
-        self._prepare_face_selection_after_preprocess(auto_continue_single=False)
+        self._prepare_face_selection_after_preprocess()
         return True
 
     def estimate_faces_for_quick_hint(self, image_path: Path):
-        """Placeholder — face count estimation is now handled entirely by the
-        RetinaFace probe subprocess. Returns None so the caller always
-        launches the probe."""
-        return None
+        """Fast fallback estimate used only for run-button hinting if precise probe is unavailable."""
+        try:
+            import cv2
+        except Exception:
+            return None
+
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return None
+
+        h, w = img.shape[:2]
+        max_side = max(h, w)
+        target_max_side = 960
+        if max_side > target_max_side:
+            scale = float(target_max_side) / float(max_side)
+            nw = max(1, int(round(w * scale)))
+            nh = max(1, int(round(h * scale)))
+            img = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        detector = self._haar_face_detector
+        if detector is None:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            detector = cv2.CascadeClassifier(cascade_path)
+            self._haar_face_detector = detector
+        if detector is None or detector.empty():
+            return None
+
+        min_dim = min(img.shape[0], img.shape[1])
+        min_face = max(28, int(round(min_dim * 0.035)))
+        faces = detector.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+            minSize=(min_face, min_face),
+        )
+        return int(len(faces))
 
     def refresh_quick_face_hint_from_input(self):
         image_path_text = self.input_image_edit.text().strip()
@@ -5613,7 +5501,7 @@ Write-Output "OK"
         if idx < 0:
             return None
 
-        if self.input_face_box_source in ("cropper_probe", "retina_probe") and self.input_face_boxes:
+        if self.input_face_box_source == "cropper_probe" and self.input_face_boxes:
             if idx < len(self.input_face_boxes):
                 return self.input_face_boxes[idx]
             return None
@@ -5957,21 +5845,10 @@ Write-Output "OK"
         idx = self.selected_face_preview_index
         if idx is None or idx < 0 or idx >= len(self.face_preview_entries):
             idx = None
-            selected_indices = self.get_selected_face_indices()
-            for selected_idx in selected_indices:
-                if selected_idx < 0 or selected_idx >= len(self.face_preview_entries):
-                    continue
-                candidate_path = self.get_face_preview_path(selected_idx)
-                if candidate_path is not None:
-                    idx = selected_idx
+            for entry in self.face_preview_entries:
+                if entry.get("status") == "done" and entry.get("result_path") is not None:
+                    idx = entry["index"]
                     break
-            if idx is None:
-                for entry in self.face_preview_entries:
-                    if entry.get("status") == "done" and entry.get("result_path") is not None:
-                        idx = entry["index"]
-                        break
-            if idx is None and selected_indices:
-                idx = selected_indices[0]
             if idx is None:
                 idx = 0
             self.selected_face_preview_index = idx
@@ -6275,11 +6152,6 @@ Write-Output "OK"
         self.render_face_preview_strip()
 
     def update_input_face_boxes_for_preview(self, expected_count=None):
-        # If in-process detection already set face boxes, skip expensive probes.
-        if getattr(self, "_inprocess_face_boxes_set", False):
-            self._inprocess_face_boxes_set = False
-            self.refresh_input_preview_scale()
-            return
         self.input_face_boxes = []
         self.input_face_box_source = None
         if expected_count is None or expected_count <= 0:
@@ -6311,10 +6183,55 @@ Write-Output "OK"
                 self.refresh_input_preview_scale()
                 return
 
-        retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
-        if retina_boxes:
-            self.input_face_boxes = retina_boxes
-            self.input_face_box_source = "retina_probe"
+        try:
+            import cv2
+        except Exception:
+            if (not self._face_overlay_detector_warned) and expected_count and expected_count > 1:
+                self.log_box.append("OpenCV unavailable in GUI env; attempting Retina face-box probe.")
+                self._face_overlay_detector_warned = True
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if retina_boxes:
+                self.input_face_boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
+            self.refresh_input_preview_scale()
+            return
+
+        img = cv2.imread(str(image_path))
+        if img is None:
+            self.refresh_input_preview_scale()
+            return
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        detector = self._haar_face_detector
+        if detector is None:
+            cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            detector = cv2.CascadeClassifier(cascade_path)
+            self._haar_face_detector = detector
+        if detector.empty():
+            self.refresh_input_preview_scale()
+            return
+
+        detected = detector.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
+        boxes = [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detected]
+        if not boxes:
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if retina_boxes:
+                self.input_face_boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
+            self.refresh_input_preview_scale()
+            return
+
+        if expected_count is not None and expected_count > 0:
+            boxes = sorted(boxes, key=lambda b: b[2] * b[3], reverse=True)[:expected_count]
+        boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
+        if expected_count is not None and expected_count > 0 and len(boxes) < int(expected_count):
+            retina_boxes = self.resolve_input_face_boxes_via_retina_probe(image_path, expected_count=expected_count)
+            if len(retina_boxes) >= len(boxes):
+                boxes = retina_boxes
+                self.input_face_box_source = "retina_probe"
+        self.input_face_boxes = boxes
+        if self.input_face_box_source is None:
+            self.input_face_box_source = "cascade"
         self.refresh_input_preview_scale()
 
     def set_input_preview_image(self, image_path: Path | None):
@@ -6480,18 +6397,15 @@ Write-Output "OK"
                 selected_indices = [self.selected_face_preview_index]
 
         selected_boxes = []
-        # Skip drawing selection boxes for single-face images — no ambiguity.
-        show_selected = len(self.input_face_boxes) > 1 or self.awaiting_face_selection
-        if show_selected:
-            for idx in selected_indices:
-                cached_box = self.hover_face_box_cache.get(idx)
-                if cached_box is None:
-                    cached_box = self.resolve_hover_face_box(idx)
-                    self.hover_face_box_cache[idx] = cached_box
-                if cached_box is not None:
-                    selected_boxes.append((idx, cached_box))
+        for idx in selected_indices:
+            cached_box = self.hover_face_box_cache.get(idx)
+            if cached_box is None:
+                cached_box = self.resolve_hover_face_box(idx)
+                self.hover_face_box_cache[idx] = cached_box
+            if cached_box is not None:
+                selected_boxes.append((idx, cached_box))
 
-        draw_debug_boxes = (bool(self.face_box_debug_overlay_enabled) or bool(self.awaiting_face_selection)) and bool(self.input_face_boxes)
+        draw_debug_boxes = bool(self.face_box_debug_overlay_enabled) and bool(self.input_face_boxes)
         draw_hover_box = isinstance(active_idx, int) and (active_box is not None)
         draw_selected_boxes = bool(selected_boxes)
         debug_boxes_sig = tuple(
@@ -6529,8 +6443,9 @@ Write-Output "OK"
                 sy = draw.height() / max(1.0, float(self.input_pixmap.height()))
 
                 if draw_debug_boxes:
-                    is_selection_mode = bool(self.awaiting_face_selection)
-                    selected_set = set(selected_indices) if is_selection_mode else set()
+                    debug_pen = QPen(QColor(102, 181, 255, 150))
+                    debug_pen.setWidth(1)
+                    painter.setPen(debug_pen)
                     painter.setFont(QFont("Segoe UI", 8))
                     for idx, box in enumerate(self.input_face_boxes):
                         x, y, bw, bh = box
@@ -6544,31 +6459,14 @@ Write-Output "OK"
                         hh = min(draw.height() - hy - 1, rh + 2)
                         if hw <= 4 or hh <= 4:
                             continue
-                        if is_selection_mode and idx in selected_set:
-                            # Selected face: solid bright border.
-                            box_pen = QPen(QColor(102, 200, 255, 220))
-                            box_pen.setWidth(2)
-                            badge_bg = QColor(39, 110, 180, 220)
-                        elif is_selection_mode:
-                            # Unselected face: dashed, dimmer — still clickable.
-                            box_pen = QPen(QColor(140, 175, 210, 120))
-                            box_pen.setWidth(1)
-                            box_pen.setStyle(Qt.DashLine)
-                            badge_bg = QColor(32, 63, 92, 150)
-                        else:
-                            # Debug-only mode (Ctrl+Shift+D).
-                            box_pen = QPen(QColor(102, 181, 255, 150))
-                            box_pen.setWidth(1)
-                            badge_bg = QColor(32, 63, 92, 190)
-                        painter.setPen(box_pen)
                         painter.drawRoundedRect(hx, hy, hw, hh, 4, 4)
                         badge_w = 16
                         badge_h = 12
                         badge_y = max(0, hy - badge_h)
-                        painter.fillRect(hx, badge_y, badge_w, badge_h, badge_bg)
+                        painter.fillRect(hx, badge_y, badge_w, badge_h, QColor(32, 63, 92, 190))
                         painter.setPen(QColor("#d8ecff"))
                         painter.drawText(hx, badge_y, badge_w, badge_h, Qt.AlignCenter, str(idx + 1))
-                        painter.setPen(box_pen)
+                        painter.setPen(debug_pen)
 
                 if draw_selected_boxes:
                     for selected_idx, selected_box in selected_boxes:
@@ -6993,11 +6891,6 @@ Write-Output "OK"
         self.stage_elapsed = {}
         self.rephoto_started_at = None
         self._last_iter_progress_signature = None
-        # Milestone tracking: record timing at sub-preset iteration checkpoints
-        # during long runs so estimates for lower quality levels improve.
-        self._pending_milestones = []
-        self._milestone_recorded = set()
-        self._milestone_iter_thresholds = []
 
     def _start_wrapper_process(self, command, status_text):
         self.append_command_preview(command)
@@ -7031,14 +6924,10 @@ Write-Output "OK"
         self.process.start(command[0], command[1:])
         self.update_run_button_for_quick_face_hint()
 
-    def _prepare_face_selection_after_preprocess(self, auto_continue_single=True):
+    def _prepare_face_selection_after_preprocess(self):
         self.set_input_detect_overlay(False)
         crop_files = self.collect_current_crop_files()
         crop_count = len(crop_files)
-        # Update the cached face count so re-runs know the actual count
-        # and don't unnecessarily re-enter selection_preprocess_mode.
-        if crop_count > 0:
-            self.quick_face_count_estimate = crop_count
         self.set_preprocess_progress(0, "Preprocess ready")
         self.set_rephoto_progress(0, "Waiting...")
         if crop_count <= 0:
@@ -7062,19 +6951,12 @@ Write-Output "OK"
                 entry["selected"] = True
                 entry["status"] = "queued"
             self.render_face_preview_strip()
-            if auto_continue_single:
-                self.log_box.append("Single face detected. Continuing automatically...")
-                self.status_label.setText("Status: Single face detected, continuing...")
-                self.awaiting_face_selection = False
-                self.update_image_import_controls()
-                self.set_run_button_continue_mode(False)
-                QTimer.singleShot(0, self.continue_rephoto_with_selected_faces)
-            else:
-                self.log_box.append("Single face detected. Click Run to start.")
-                self.status_label.setText("Status: Face detected — click Run")
-                self.awaiting_face_selection = False
-                self.update_image_import_controls()
-                self.set_run_button_continue_mode(False)
+            self.log_box.append("Single face detected. Continuing automatically...")
+            self.status_label.setText("Status: Single face detected, continuing...")
+            self.awaiting_face_selection = False
+            self.update_image_import_controls()
+            self.set_run_button_continue_mode(False)
+            QTimer.singleShot(0, self.continue_rephoto_with_selected_faces)
             return
 
         for entry in self.face_preview_entries:
@@ -7135,15 +7017,6 @@ Write-Output "OK"
         self._reset_wrapper_runtime_tracking()
         self._prepare_stop_flag_for_new_run()
 
-        selected_crop_names = []
-        for idx in selected_indices:
-            if 0 <= idx < len(self.face_preview_entries):
-                crop_path = self.face_preview_entries[idx].get("crop_path")
-                if crop_path is not None:
-                    selected_crop_names.append(Path(crop_path).name)
-
-        selected_crop_indices = selected_indices if not selected_crop_names else None
-
         # Always reuse the already-selected crop set for continuation.
         # Re-cropping here can reorder faces and break index-to-face mapping.
         reuse_crops = True
@@ -7152,8 +7025,7 @@ Write-Output "OK"
             command = self.build_wrapper_command(
                 force_crop_only=False,
                 force_use_existing_crops=reuse_crops,
-                crop_indices=selected_crop_indices,
-                crop_names=selected_crop_names if selected_crop_names else None,
+                crop_indices=selected_indices,
                 require_selection=True,
             )
         except ValueError as exc:
@@ -7183,31 +7055,6 @@ Write-Output "OK"
         self.log_box.append(f"Process finished with exit code: {exit_code}")
         elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
         final_output_path = None
-        was_cancelled = (self.current_run_phase == "cancelled")
-
-        # --- Cancelled run: clean up without error dialogs ---
-        if was_cancelled:
-            self.log_box.append("Run was cancelled.")
-            self.status_label.setText("Status: Run cancelled")
-            self.set_preprocess_progress(0, "Preprocess ready")
-            self.set_rephoto_progress(0, "Waiting...")
-            self.clear_result_stage_overlay()
-            self.set_input_detect_overlay(False)
-            self.selection_preprocess_mode = False
-            self.suppress_preprocess_ui_until_rephoto = False
-            self.awaiting_face_selection = False
-            self._inprocess_preview_crops = False
-            self.set_run_button_continue_mode(False)
-            self.current_run_summary_context = None
-            self.process = None
-            self.current_run_phase = "idle"
-            self.set_controls_for_running(False)
-            self.run_started_at = None
-            self.rephoto_started_at = None
-            # Preserve quick_face_count_estimate and current_crop_output_dir
-            # so re-runs can reuse existing crops without re-detecting.
-            self.update_run_button_for_quick_face_hint()
-            return
 
         if exit_code != 0 and self.active_face_preview_index is not None:
             idx = self.active_face_preview_index
@@ -7254,9 +7101,7 @@ Write-Output "OK"
             if (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (self.run_started_at is not None):
                 self.append_timing_log(elapsed_seconds=(time.time() - self.run_started_at), success=True, crop_only=False)
                 self.flush_pending_milestones()
-                # Refresh runtime estimates now that new timing data is available.
-                self.update_runtime_label()
-
+                
                 # Log stage timing summary
                 if self.stage_elapsed:
                     timing_items = []
@@ -7307,16 +7152,6 @@ Write-Output "OK"
                         final_preview = rephoto_path or newest
                     else:
                         final_preview = newest
-                    selected_indices = self.get_selected_face_indices()
-                    if selected_indices:
-                        current_idx = self.selected_face_preview_index
-                        if (
-                            not isinstance(current_idx, int)
-                            or current_idx < 0
-                            or current_idx >= len(self.face_preview_entries)
-                            or current_idx not in selected_indices
-                        ):
-                            self.selected_face_preview_index = selected_indices[0]
                     selected_face_preview = self.get_selected_face_preview_path()
                     if selected_face_preview is not None:
                         self.set_result_preview_image(selected_face_preview)
@@ -7400,12 +7235,6 @@ Write-Output "OK"
                 self.status_label.setText("Status: Face selection cancelled")
                 self.reset_face_preview_state(preserve_input_overlays=True)
                 self.current_run_summary_context = None
-                self.current_run_phase = "idle"
-                self.selection_preprocess_mode = False
-                self.suppress_preprocess_ui_until_rephoto = False
-                # Preserve current_crop_output_dir and quick_face_count_estimate
-                # so re-runs can reuse existing crops.
-                self.update_run_button_for_quick_face_hint()
                 return
             self.log_box.append("No backend process is running.")
             self.status_label.setText("Status: No backend process to cancel")
@@ -7507,25 +7336,6 @@ Write-Output "OK"
         if self.selection_preprocess_mode and current_key is not None:
             self.auto_detect_faces_triggered_input = current_key
         self.set_run_button_continue_mode(False)
-
-        # --- Reuse existing crops if available (e.g. after cancel + re-run) ---
-        # Only reuse crops from the PS1 wrapper (not rough in-process previews).
-        if (
-            self.selection_preprocess_mode
-            and self.current_crop_output_dir
-            and not getattr(self, "_inprocess_preview_crops", False)
-        ):
-            existing_crops = self.collect_current_crop_files()
-            if existing_crops:
-                self.log_box.append(
-                    f"Run button clicked. Reusing {len(existing_crops)} existing crop(s)..."
-                )
-                self.selection_preprocess_mode = False
-                self.suppress_preprocess_ui_until_rephoto = False
-                self.current_run_phase = "preprocess"
-                self.set_preprocess_progress(100, "Preprocessing complete")
-                self._prepare_face_selection_after_preprocess()
-                return
 
         self._reset_wrapper_runtime_tracking()
         self._prepare_stop_flag_for_new_run()
