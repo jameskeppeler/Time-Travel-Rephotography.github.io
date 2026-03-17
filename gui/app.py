@@ -8,11 +8,12 @@ import subprocess
 import shutil
 import time
 import math
+import random
 from collections import defaultdict
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QPainter, QPen, QPixmap, QRadialGradient, QTextCursor
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QRadialGradient, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -254,9 +255,28 @@ class InputDropLabel(QLabel):
         self._set_normal_style()
         event.ignore()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self.parent_window, "position_input_detect_overlay"):
+            self.parent_window.position_input_detect_overlay()
+
 
 class InputDetectOverlay(QWidget):
-    """Animated overlay for import-time multi-face detection on the input preview."""
+    """Animated particle-grain overlay for import-time face detection.
+
+    The overlay renders a blurred backdrop plus luminous sampled particles.
+    Particle coordinates are normalized so the effect remains stable while the
+    window is resized.
+    """
+
+    _POOL_SIZE = 5200
+    _SPAWN_PER_TICK = 72
+    _PARTICLE_MIN_LIFE = 12
+    _PARTICLE_MAX_LIFE = 44
+    _PARTICLE_MIN_R = 0.35
+    _PARTICLE_MAX_R = 0.95
+    _TICK_INTERVAL_MS = 55
+    _REBUILD_DEBOUNCE_MS = 90
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -266,11 +286,18 @@ class InputDetectOverlay(QWidget):
         self.dot_count = 0
         self._pulse_phase = 0.0
         self._tick_count = 0
+        self._target_rect = QRect()
         self._blurred_backdrop = QPixmap()
-        self._blurred_target_rect = QRect()
+        self._source_image = QImage()
+        # Particle: [nx, ny, r, age, max_age, cr, cg, cb]
+        self._particles = []
         self._anim_timer = QTimer(self)
-        self._anim_timer.setInterval(120)
+        self._anim_timer.setInterval(self._TICK_INTERVAL_MS)
         self._anim_timer.timeout.connect(self._on_tick)
+        self._rebuild_timer = QTimer(self)
+        self._rebuild_timer.setSingleShot(True)
+        self._rebuild_timer.setInterval(self._REBUILD_DEBOUNCE_MS)
+        self._rebuild_timer.timeout.connect(self._rebuild_source_data)
 
     def _compute_overlay_target_rect(self):
         parent = self.parentWidget()
@@ -292,18 +319,28 @@ class InputDetectOverlay(QWidget):
         h = min(ph, max(1, self.height() - y))
         return QRect(x, y, w, h)
 
-    def _rebuild_blurred_backdrop(self):
+    def _schedule_rebuild_source_data(self, immediate=False):
+        if immediate:
+            self._rebuild_timer.stop()
+            self._rebuild_source_data()
+            return
+        if not self._rebuild_timer.isActive():
+            self._rebuild_timer.start()
+
+    def _rebuild_source_data(self):
         parent = self.parentWidget()
         if parent is None:
             self._blurred_backdrop = QPixmap()
-            self._blurred_target_rect = QRect()
+            self._source_image = QImage()
+            self._target_rect = QRect()
             return
+
         target_rect = self._compute_overlay_target_rect()
+        self._target_rect = target_rect
         if target_rect.width() <= 2 or target_rect.height() <= 2:
             self._blurred_backdrop = QPixmap()
-            self._blurred_target_rect = QRect()
+            self._source_image = QImage()
             return
-        self._blurred_target_rect = target_rect
 
         try:
             parent_pix = parent.pixmap()
@@ -311,33 +348,91 @@ class InputDetectOverlay(QWidget):
             parent_pix = None
         if parent_pix is None or parent_pix.isNull():
             self._blurred_backdrop = QPixmap()
+            self._source_image = QImage()
             return
 
-        captured = parent_pix.copy()
-        cw = int(captured.width())
-        ch = int(captured.height())
+        cw = int(parent_pix.width())
+        ch = int(parent_pix.height())
         if cw <= 2 or ch <= 2:
             self._blurred_backdrop = QPixmap()
+            self._source_image = QImage()
             return
 
-        # One-time blur approximation per activation: downsample then upscale.
-        sample_w = max(1, int(round(cw / 18.0)))
-        sample_h = max(1, int(round(ch / 18.0)))
-        small = captured.scaled(sample_w, sample_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        mid_w = max(1, int(round(cw / 8.0)))
-        mid_h = max(1, int(round(ch / 8.0)))
-        mid = small.scaled(mid_w, mid_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        # Heavy blur approximation: strong downsample then upscale.
+        tiny_w = max(1, int(round(cw / 20.0)))
+        tiny_h = max(1, int(round(ch / 20.0)))
+        tiny = parent_pix.scaled(tiny_w, tiny_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        mid_w = max(1, int(round(cw / 6.0)))
+        mid_h = max(1, int(round(ch / 6.0)))
+        mid = tiny.scaled(mid_w, mid_h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
         self._blurred_backdrop = mid.scaled(cw, ch, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        # Small sample source used for particle color lookup.
+        sample_max = 128
+        if max(cw, ch) > sample_max:
+            s = sample_max / max(cw, ch)
+            sw = max(1, int(round(cw * s)))
+            sh = max(1, int(round(ch * s)))
+        else:
+            sw, sh = cw, ch
+        self._source_image = parent_pix.scaled(sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation).toImage()
+        self.update()
+
+    def _sample_colour(self, nx, ny):
+        img = self._source_image
+        if img.isNull():
+            return (220, 225, 235)
+        iw, ih = int(img.width()), int(img.height())
+        px = max(0, min(iw - 1, int(round(nx * (iw - 1)))))
+        py = max(0, min(ih - 1, int(round(ny * (ih - 1)))))
+        c = QColor(img.pixel(px, py))
+        # Lift toward white for a luminous grain look.
+        r = min(255, int(c.red() * 0.45 + 255 * 0.55))
+        g = min(255, int(c.green() * 0.45 + 255 * 0.55))
+        b = min(255, int(c.blue() * 0.45 + 255 * 0.55))
+        return (r, g, b)
+
+    def _spawn_particles(self, count):
+        tr = self._target_rect
+        if tr.width() <= 2 or tr.height() <= 2:
+            return
+        particles = self._particles
+        for _ in range(count):
+            if len(particles) >= self._POOL_SIZE:
+                break
+            nx = random.random()
+            ny = random.random()
+            particles.append([
+                nx,
+                ny,
+                random.uniform(self._PARTICLE_MIN_R, self._PARTICLE_MAX_R),
+                0,
+                random.randint(self._PARTICLE_MIN_LIFE, self._PARTICLE_MAX_LIFE),
+                *self._sample_colour(nx, ny),
+            ])
+
+    def _age_particles(self):
+        alive = []
+        for particle in self._particles:
+            particle[3] += 1
+            if particle[3] <= particle[4]:
+                alive.append(particle)
+        self._particles = alive
 
     def start(self, base_text="Detecting Faces"):
         self.base_text = str(base_text or "Detecting Faces")
         self.dot_count = 0
         self._pulse_phase = 0.0
         self._tick_count = 0
+        self._particles = []
         parent = self.parentWidget()
         if parent is not None:
             self.setGeometry(parent.rect().adjusted(1, 1, -1, -1))
-        self._rebuild_blurred_backdrop()
+        self._schedule_rebuild_source_data(immediate=True)
+        for _ in range(6):
+            self._spawn_particles(self._SPAWN_PER_TICK)
+        for particle in self._particles:
+            max_age = max(1, int(particle[4]))
+            particle[3] = random.randint(0, max_age - 1)
         self.setVisible(True)
         self.raise_()
         if not self._anim_timer.isActive():
@@ -345,36 +440,46 @@ class InputDetectOverlay(QWidget):
         self.update()
 
     def stop(self):
+        self._rebuild_timer.stop()
         self._anim_timer.stop()
         self.setVisible(False)
         self._blurred_backdrop = QPixmap()
-        self._blurred_target_rect = QRect()
+        self._source_image = QImage()
+        self._target_rect = QRect()
+        self._particles = []
 
     def sync_geometry(self):
         parent = self.parentWidget()
         if parent is None:
             return
         r = parent.rect().adjusted(1, 1, -1, -1)
+        geometry_changed = False
         if self.geometry() != r:
             self.setGeometry(r)
-            if self.isVisible():
-                self._rebuild_blurred_backdrop()
+            geometry_changed = True
+        target_rect = self._compute_overlay_target_rect()
+        target_changed = target_rect != self._target_rect
+        self._target_rect = target_rect
+        if self.isVisible() and (geometry_changed or target_changed):
+            # Debounce expensive backdrop rebuild while user drags window edges.
+            self._schedule_rebuild_source_data(immediate=False)
         if self.isVisible():
             self.raise_()
 
     def notify_parent_pixmap_changed(self):
         if not self.isVisible():
             return
-        self._rebuild_blurred_backdrop()
-        self.update()
+        self._schedule_rebuild_source_data(immediate=True)
 
     def _on_tick(self):
-        self._pulse_phase += 0.055
+        self._pulse_phase += 0.06
         if self._pulse_phase > 6.283185307179586:
             self._pulse_phase -= 6.283185307179586
         self._tick_count += 1
-        if self._tick_count % 8 == 0:
+        if self._tick_count % 6 == 0:
             self.dot_count = (self.dot_count + 1) % 4
+        self._age_particles()
+        self._spawn_particles(self._SPAWN_PER_TICK)
         self.update()
 
     def paintEvent(self, event):
@@ -383,26 +488,51 @@ class InputDetectOverlay(QWidget):
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.Antialiasing)
-            r = self._blurred_target_rect if (self._blurred_target_rect.width() > 2 and self._blurred_target_rect.height() > 2) else QRect()
+            # Always use latest target rect to keep animation anchored while resizing.
+            r = self._compute_overlay_target_rect()
+            if r != self._target_rect:
+                self._target_rect = r
             has_target = r.width() > 2 and r.height() > 2
             pulse = 0.5 + 0.5 * math.sin(self._pulse_phase)
 
             if has_target and self._blurred_backdrop is not None and (not self._blurred_backdrop.isNull()):
-                painter.setOpacity(0.70)
+                painter.setOpacity(0.92)
                 painter.drawPixmap(r, self._blurred_backdrop)
                 painter.setOpacity(1.0)
-                veil_alpha = int(round(36 + pulse * 20))
-                painter.fillRect(r, QColor(9, 13, 20, veil_alpha))
+                painter.fillRect(r, QColor(4, 6, 12, 50))
+
+                rw = float(r.width())
+                rh = float(r.height())
+                rx = float(r.x())
+                ry = float(r.y())
+                painter.setPen(Qt.NoPen)
+                for nx, ny, pr, age, max_age, cr, cg, cb in self._particles:
+                    t = age / max(1, max_age)
+                    if t < 0.2:
+                        alpha = t / 0.2
+                    elif t < 0.6:
+                        alpha = 1.0
+                    else:
+                        alpha = 1.0 - (t - 0.6) / 0.4
+                    alpha = max(0.0, min(1.0, alpha))
+                    a = int(round(alpha * 195))
+                    if a <= 4:
+                        continue
+                    px = rx + (nx * rw)
+                    py = ry + (ny * rh)
+                    painter.setBrush(QColor(int(cr), int(cg), int(cb), a))
+                    d = max(1, int(round(pr * 2)))
+                    painter.drawEllipse(int(round(px - pr)), int(round(py - pr)), d, d)
 
                 cx = r.x() + (r.width() * 0.5)
                 cy = r.y() + (r.height() * 0.5)
-                pulse_scale = 0.92 + (pulse * 0.20)
-                radius = max(78, int(round(min(r.width(), r.height()) * 0.48 * pulse_scale)))
-                glow_alpha = int(round(30 + pulse * 40))
+                pulse_scale = 0.92 + (pulse * 0.15)
+                radius = max(72, int(round(min(r.width(), r.height()) * 0.44 * pulse_scale)))
+                glow_alpha = int(round(24 + pulse * 28))
                 glow = QRadialGradient(cx, cy, radius)
-                glow.setColorAt(0.0, QColor(96, 178, 255, glow_alpha))
-                glow.setColorAt(0.32, QColor(80, 156, 230, int(glow_alpha * 0.50)))
-                glow.setColorAt(0.66, QColor(62, 128, 201, int(glow_alpha * 0.14)))
+                glow.setColorAt(0.0, QColor(96, 178, 255, glow_alpha + 16))
+                glow.setColorAt(0.34, QColor(80, 156, 230, int(glow_alpha * 0.42)))
+                glow.setColorAt(0.70, QColor(62, 128, 201, int(glow_alpha * 0.12)))
                 glow.setColorAt(1.0, QColor(24, 43, 69, 0))
                 painter.fillRect(r, QBrush(glow))
 
@@ -4890,6 +5020,7 @@ Write-Output "OK"
         # face count, create preview crops, and populate the filmstrip.
         self.update_run_button_for_quick_face_hint()
         if self._start_quick_face_probe(image_path, fallback_count=None):
+            self.set_input_detect_overlay(True, "Detecting Faces")
             self.log_box.append("Detecting faces (RetinaFace)...")
             return
 
