@@ -1267,7 +1267,7 @@ class MainWindow(QMainWindow):
             "advanced_mode": self.advanced_mode_checkbox.isChecked(),
             "results_root": self.results_root_edit.text().strip(),
             # Advanced dialog
-            "enhancement_enabled": dlg.use_gfpgan_checkbox.isChecked(),
+            "enhancement_disabled": dlg.use_gfpgan_checkbox.isChecked(),
             "gfpgan_blend": dlg.gfpgan_blend_edit.value(),
             "det_threshold": dlg.det_threshold_edit.value(),
             "face_factor": dlg.face_factor_edit.value(),
@@ -1314,7 +1314,9 @@ class MainWindow(QMainWindow):
             self.results_root_edit.setText(results_root)
 
         # Advanced dialog values
-        if "enhancement_enabled" in data:
+        if "enhancement_disabled" in data:
+            dlg.use_gfpgan_checkbox.setChecked(bool(data["enhancement_disabled"]))
+        elif "enhancement_enabled" in data:  # backward compat with old key (was semantically inverted)
             dlg.use_gfpgan_checkbox.setChecked(bool(data["enhancement_enabled"]))
         if "gfpgan_blend" in data:
             dlg.gfpgan_blend_edit.setValue(float(data["gfpgan_blend"]))
@@ -2754,7 +2756,7 @@ class MainWindow(QMainWindow):
         photo_type = self.photo_type_combo.currentText()
         approx_year = self.parse_approximate_year(self.approx_date_edit.text())
 
-        # PRIORITY 2: True photographic processes
+        # PRIORITY 1: True photographic processes
         if self.is_true_process_type(photo_type):
             return "Blue-sensitive"
 
@@ -3193,7 +3195,7 @@ class MainWindow(QMainWindow):
             self,
             "Select Input Image",
             "",
-            "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
+            "Image Files (*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp)"
         )
         if file_path:
             self.set_selected_input_image(file_path)
@@ -3212,6 +3214,7 @@ class MainWindow(QMainWindow):
 
         dlg = self.advanced_dialog
 
+        old_identity_preservation = dlg.identity_preservation_combo.currentText()
         old_tonal = dlg.tonal_transfer_combo.currentText()
         old_noise_regularize = dlg.noise_regularize_edit.value()
         old_eye = dlg.eye_preservation_combo.currentText()
@@ -3251,6 +3254,7 @@ class MainWindow(QMainWindow):
             self.approx_date_edit.setText(old_approx_date)
             self.spectral_mode_combo.setCurrentText(old_spectral_mode)
             self.spectral_sensitivity_combo.setCurrentText(old_spectral)
+            dlg.identity_preservation_combo.setCurrentText(old_identity_preservation)
             dlg.tonal_transfer_combo.setCurrentText(old_tonal)
             dlg.eye_preservation_combo.setCurrentText(old_eye)
             dlg.structure_matching_combo.setCurrentText(old_structure)
@@ -3260,7 +3264,6 @@ class MainWindow(QMainWindow):
             dlg.camera_lr_edit.setValue(old_camera_lr)
             dlg.mix_layer_start_edit.setValue(old_mix_layer_start)
             dlg.mix_layer_end_edit.setValue(old_mix_layer_end)
-            dlg.gaussian_edit.setValue(old_gaussian)
             self.update_spectral_sensitivity_ui()
             self.update_mode_controls()
             self.update_runtime_label()
@@ -7344,6 +7347,16 @@ Write-Output "OK"
         self._clear_current_pause_flag()
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
+        # Drain any remaining QProcess output that readyRead may not have delivered yet.
+        if self.process is not None:
+            remaining_out = bytes(self.process.readAllStandardOutput()).decode("utf-8", errors="replace")
+            remaining_err = bytes(self.process.readAllStandardError()).decode("utf-8", errors="replace")
+            if remaining_out:
+                self._append_process_log_text(remaining_out)
+                self._consume_process_output_lines(remaining_out, is_error=False)
+            if remaining_err:
+                self._append_process_log_text(remaining_err)
+                self._consume_process_output_lines(remaining_err, is_error=True)
         self._flush_process_log_buffer()
         if self._process_stdout_buffer:
             self.update_progress_from_line(self._process_stdout_buffer)
@@ -7433,6 +7446,8 @@ Write-Output "OK"
             else:
                 self._sync_face_preview_crop_paths()
                 self.reconcile_face_preview_results(after_epoch=self.run_started_at)
+                # Clear stale active index so compare wipe uses selected_face_preview_index.
+                self.active_face_preview_index = None
                 results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
                 newest = self.find_latest_image(results_root, self.run_started_at)
 

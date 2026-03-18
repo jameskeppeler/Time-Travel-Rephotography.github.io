@@ -422,4 +422,4 @@ class Optimizer:
         for ri, rgb in enumerate(rgbs):
             scale = 2 ** (-(len(rgbs) - ri))
             visual = make_grid(torch.cat((rgb, rgb / scale), dim=-1), nrow=1, normalize=True, value_range=(-1, 1))
-            writer.add_image(f"{prefix}to_rbg_{2 ** (ri + 2)}", visual, niters)
+            writer.add_image(f"{prefix}to_rgb_{2 ** (ri + 2)}", visual, niters)

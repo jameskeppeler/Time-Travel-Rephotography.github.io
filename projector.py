@@ -71,8 +71,11 @@ def read_images(paths: Iterable[str], max_size: Optional[int] = None):
     imgs = []
     for path in paths:
         img = Image.open(path)
-        if max_size is not None and img.width > max_size:
-            img = img.resize((max_size, max_size))
+        if max_size is not None and max(img.width, img.height) > max_size:
+            scale = max_size / max(img.width, img.height)
+            new_w = max(1, int(round(img.width * scale)))
+            new_h = max(1, int(round(img.height * scale)))
+            img = img.resize((new_w, new_h))
         img = transform(img)
         imgs.append(img)
     imgs = torch.stack(imgs, 0)
