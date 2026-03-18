@@ -3842,6 +3842,7 @@ class MainWindow(QMainWindow):
         force_crop_only=None,
         force_use_existing_crops=False,
         crop_indices=None,
+        crop_names=None,
         require_selection=False,
     ):
         input_image = self.input_image_edit.text().strip()
@@ -3929,6 +3930,18 @@ class MainWindow(QMainWindow):
                 if idx >= 0:
                     normalized_crop_indices.append(idx)
             normalized_crop_indices = sorted(set(normalized_crop_indices))
+        normalized_crop_names = []
+        if crop_names is not None:
+            seen_names = set()
+            for raw_name in crop_names:
+                name = str(raw_name or "").strip()
+                if not name:
+                    continue
+                key = name.lower()
+                if key in seen_names:
+                    continue
+                seen_names.add(key)
+                normalized_crop_names.append(name)
 
         crop_only_mode = self.advanced_dialog.crop_only_checkbox.isChecked() if force_crop_only is None else bool(force_crop_only)
         if crop_only_mode:
@@ -3936,10 +3949,13 @@ class MainWindow(QMainWindow):
         else:
             if require_selection:
                 command.append("-RequireSelection")
-                if not normalized_crop_indices:
+                if (not normalized_crop_indices) and (not normalized_crop_names):
                     raise ValueError("No face selection was provided for selected-face continuation.")
             if force_use_existing_crops:
                 command.append("-UseExistingCrops")
+            if normalized_crop_names:
+                command.append("-SelectedCropNames")
+                command.append(",".join(normalized_crop_names))
             if normalized_crop_indices:
                 command.append("-SelectedCropIndices")
                 command.append(",".join(str(i) for i in normalized_crop_indices))
@@ -4547,6 +4563,58 @@ Write-Output "OK"
         except Exception:
             return os.path.normcase(str(path_text))
 
+    def _make_safe_base_name(self, base_text):
+        raw = str(base_text or "")
+        if not raw:
+            return "input_image"
+        out = []
+        prev_sep = False
+        for ch in raw:
+            if ch.isalnum():
+                out.append(ch)
+                prev_sep = False
+            else:
+                if not prev_sep:
+                    out.append("_")
+                    prev_sep = True
+        safe = "".join(out).strip("_")
+        return safe or "input_image"
+
+    def _seed_wrapper_crop_dir_from_preview(self, input_image_path: Path):
+        if input_image_path is None or (not input_image_path.exists()):
+            return
+
+        preview_crops = []
+        for entry in self.face_preview_entries:
+            crop_path = entry.get("crop_path")
+            if crop_path is None:
+                continue
+            p = Path(crop_path)
+            if p.exists() and p.is_file():
+                preview_crops.append(p)
+        if not preview_crops:
+            return
+
+        safe_base = self._make_safe_base_name(input_image_path.stem)
+        target_dir = self.repo_root / "preprocess" / "face_crops" / safe_base
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if self._list_image_files_in_dir(target_dir):
+            return
+
+        copied = 0
+        for src in preview_crops:
+            dst = target_dir / src.name
+            try:
+                if src.resolve() != dst.resolve():
+                    shutil.copy2(src, dst)
+                copied += 1
+            except Exception:
+                continue
+
+        if copied > 0:
+            self.current_crop_output_dir = str(target_dir)
+            self.log_box.append(f"Prepared reusable crops: {target_dir}")
+
     def maybe_auto_start_face_detection_from_import(self, allow_during_probe=False):
         if not self.auto_detect_faces_on_import:
             return
@@ -4577,9 +4645,9 @@ Write-Output "OK"
 
         self.auto_detect_faces_triggered_input = current_key
 
-        # Create preview crops from RetinaFace probe boxes (already cached).
-        if self._try_fast_inprocess_face_detect(Path(current_input)):
-            return
+        # Always use wrapper preprocessing for selection flow.
+        # In-process preview crops are useful for speed, but can desync face
+        # indices and crop-path identity versus face-crop-plus outputs.
 
         # Fall back to full PS1 wrapper if in-process detection completely failed.
         if quick_count >= 2:
@@ -4818,16 +4886,19 @@ Write-Output "OK"
         # Parse piggy-backed RETINA_FACE_BOX lines from the count probe so we
         # can skip a separate retina box probe later (saves ~5-10s conda+model load).
         if exit_status == QProcess.NormalExit and int(exit_code) == 0:
-            piggybacked_boxes = []
+            piggybacked_boxes_by_index = {}
             for line in (self.quick_face_probe_stdout or "").splitlines():
                 box_match = RETINA_FACE_BOX_RE.search(line.strip())
                 if box_match:
+                    bi = int(box_match.group(1))
                     bx = int(box_match.group(2))
                     by = int(box_match.group(3))
                     bw = int(box_match.group(4))
                     bh = int(box_match.group(5))
                     if bw >= 8 and bh >= 8:
-                        piggybacked_boxes.append((bx, by, bw, bh))
+                        if bi not in piggybacked_boxes_by_index:
+                            piggybacked_boxes_by_index[bi] = (bx, by, bw, bh)
+            piggybacked_boxes = [piggybacked_boxes_by_index[i] for i in sorted(piggybacked_boxes_by_index)]
             if piggybacked_boxes:
                 self._quick_probe_retina_boxes = piggybacked_boxes
                 self._quick_probe_retina_boxes_path = image_path
@@ -4891,9 +4962,7 @@ Write-Output "OK"
         faces = sorted(faces, key=lambda r: r[0])
 
         # Build safe output directory matching the PS1 wrapper convention.
-        safe_base = image_path.stem.replace(" ", "_")
-        for ch in r'[](){}!@#$%^&=+;,':
-            safe_base = safe_base.replace(ch, "_")
+        safe_base = self._make_safe_base_name(image_path.stem)
         crop_out_dir = self.repo_root / "preprocess" / "face_crops" / safe_base
         crop_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -5092,17 +5161,20 @@ Write-Output "OK"
                 self.retina_face_box_probe_warned = True
             return []
 
-        boxes = []
+        boxes_by_index = {}
         for line in (proc.stdout or "").splitlines():
             match = RETINA_FACE_BOX_RE.search(line.strip())
             if not match:
                 continue
+            bi = int(match.group(1))
             x = int(match.group(2))
             y = int(match.group(3))
             w = int(match.group(4))
             h = int(match.group(5))
             if w >= 8 and h >= 8:
-                boxes.append((x, y, w, h))
+                if bi not in boxes_by_index:
+                    boxes_by_index[bi] = (x, y, w, h)
+        boxes = [boxes_by_index[i] for i in sorted(boxes_by_index)]
 
         if expected_count is not None and int(expected_count) > 0 and len(boxes) > int(expected_count):
             boxes = boxes[: int(expected_count)]
@@ -5198,17 +5270,20 @@ Write-Output "OK"
                 self.cropper_face_box_probe_warned = True
             return []
 
-        boxes = []
+        boxes_by_index = {}
         for line in (proc.stdout or "").splitlines():
             match = CROP_ALIGN_BOX_RE.search(line.strip())
             if not match:
                 continue
+            bi = int(match.group(1))
             x = int(match.group(2))
             y = int(match.group(3))
             w = int(match.group(4))
             h = int(match.group(5))
             if w >= 8 and h >= 8:
-                boxes.append((x, y, w, h))
+                if bi not in boxes_by_index:
+                    boxes_by_index[bi] = (x, y, w, h)
+        boxes = [boxes_by_index[i] for i in sorted(boxes_by_index)]
 
         if expected_count is not None and int(expected_count) > 0 and len(boxes) > int(expected_count):
             boxes = boxes[: int(expected_count)]
@@ -5285,6 +5360,64 @@ Write-Output "OK"
             return []
         return self._list_image_files_in_dir(newest_dir)
 
+    def _sync_face_preview_crop_paths(self):
+        if not self.face_preview_entries:
+            return
+        crop_files = []
+        if self.current_crop_output_dir:
+            crop_files = self._list_image_files_in_dir(Path(self.current_crop_output_dir))
+
+        if not crop_files:
+            input_path_text = self.input_image_edit.text().strip()
+            if input_path_text:
+                input_path = Path(input_path_text)
+                safe_base = self._make_safe_base_name(input_path.stem)
+                by_input_dir = self.repo_root / "preprocess" / "face_crops" / safe_base
+                crop_files = self._list_image_files_in_dir(by_input_dir)
+
+        if not crop_files:
+            crop_files = self.collect_current_crop_files()
+        if not crop_files:
+            return
+
+        files_by_index = {}
+        for pos, p in enumerate(crop_files):
+            idx = None
+            match = FACE_SUFFIX_INDEX_RE.search(p.stem)
+            if match:
+                try:
+                    idx = int(match.group(1))
+                except Exception:
+                    idx = None
+            if idx is None:
+                idx = int(pos)
+            if idx not in files_by_index:
+                files_by_index[idx] = p
+
+        updated = False
+        for entry in self.face_preview_entries:
+            idx = entry.get("index")
+            if not isinstance(idx, int) or idx < 0:
+                continue
+            new_path = files_by_index.get(idx)
+            if new_path is None and idx < len(crop_files):
+                new_path = crop_files[idx]
+            if new_path is None:
+                continue
+
+            current = entry.get("crop_path")
+            if current is None:
+                entry["crop_path"] = new_path
+                updated = True
+                continue
+            if self._normalized_path_key(str(current)) != self._normalized_path_key(str(new_path)):
+                entry["crop_path"] = new_path
+                updated = True
+
+        if updated:
+            self.hover_face_box_cache = {}
+            self.hover_face_box_override = None
+
     def initialize_face_preview_entries(self, expected_count=None):
         crop_files = self.collect_current_crop_files()
         if expected_count is None:
@@ -5312,6 +5445,7 @@ Write-Output "OK"
 
         self.active_face_preview_index = None
         self.selected_face_preview_index = 0 if self.face_preview_entries else None
+        self._sync_face_preview_crop_paths()
         self.update_input_face_boxes_for_preview(expected_count=expected_count)
         self.update_runtime_label()
         self.render_face_preview_strip()
@@ -5395,6 +5529,18 @@ Write-Output "OK"
             idx = entry.get("index")
             if not isinstance(idx, int):
                 continue
+            icon_mtime_ns = 0
+            icon_size = 0
+            icon_candidate = entry.get("result_path") or entry.get("crop_path")
+            if icon_candidate is not None:
+                p = Path(icon_candidate)
+                try:
+                    if p.exists():
+                        st = p.stat()
+                        icon_mtime_ns = int(getattr(st, "st_mtime_ns", int(st.st_mtime * 1_000_000_000)))
+                        icon_size = int(st.st_size)
+                except OSError:
+                    pass
             entry_signature.append(
                 (
                     idx,
@@ -5402,6 +5548,8 @@ Write-Output "OK"
                     bool(entry.get("selected", False)),
                     str(entry.get("crop_path") or ""),
                     str(entry.get("result_path") or ""),
+                    icon_mtime_ns,
+                    icon_size,
                 )
             )
         return (
@@ -5632,17 +5780,20 @@ Write-Output "OK"
         if idx < 0:
             return None
 
-        if self.input_face_box_source == "cropper_probe" and self.input_face_boxes:
-            if idx < len(self.input_face_boxes):
-                return self.input_face_boxes[idx]
-            return None
+        # Prefer detector-aligned boxes first. These are already index-aligned
+        # to cropper output and avoid template false matches.
+        if idx < len(self.input_face_boxes):
+            try:
+                x, y, w, h = [int(v) for v in self.input_face_boxes[idx]]
+            except Exception:
+                return None
+            if w >= 8 and h >= 8:
+                return (x, y, w, h)
 
-        # Correctness first: template-match hovered crop back to input image.
+        # Fallback only when detector boxes are unavailable.
         box = self.resolve_face_box_from_crop_template(idx)
         if box is not None:
             return box
-
-        # If uncertain, show no highlight rather than an incorrect one.
         return None
 
     def _input_preview_display_rect(self):
@@ -5689,7 +5840,7 @@ Write-Output "OK"
         return bool(self.face_preview_entries[idx].get("selected", False))
 
     def _resolve_input_interaction_face_boxes(self):
-        if not self.face_preview_entries or not self.input_face_boxes:
+        if not self.face_preview_entries:
             return []
         resolved = []
         for entry in self.face_preview_entries:
@@ -5698,15 +5849,14 @@ Write-Output "OK"
                 continue
             if not self._is_face_interaction_allowed(idx):
                 continue
-            if idx >= len(self.input_face_boxes):
+            if idx in self.hover_face_box_cache:
+                box = self.hover_face_box_cache.get(idx)
+            else:
+                box = self.resolve_hover_face_box(idx)
+                self.hover_face_box_cache[idx] = box
+            if box is None:
                 continue
-            box = self.input_face_boxes[idx]
-            if not isinstance(box, (tuple, list)) or len(box) != 4:
-                continue
-            try:
-                x, y, w, h = [int(v) for v in box]
-            except Exception:
-                continue
+            x, y, w, h = box
             if w < 8 or h < 8:
                 continue
             resolved.append((idx, (x, y, w, h)))
@@ -6043,6 +6193,9 @@ Write-Output "OK"
     def _get_compare_before_source_pixmap(self):
         focused_idx = self._get_focused_face_preview_index()
         crop_path = self._get_face_crop_path(focused_idx) if focused_idx is not None else None
+        if crop_path is None and focused_idx is not None:
+            self._sync_face_preview_crop_paths()
+            crop_path = self._get_face_crop_path(focused_idx)
         if crop_path is not None:
             pix = self._get_result_pixmap_cached(crop_path)
             if pix is not None and (not pix.isNull()):
@@ -6285,6 +6438,8 @@ Write-Output "OK"
     def update_input_face_boxes_for_preview(self, expected_count=None):
         self.input_face_boxes = []
         self.input_face_box_source = None
+        self.hover_face_box_cache = {}
+        self.hover_face_box_override = None
         if expected_count is None or expected_count <= 0:
             self.refresh_input_preview_scale()
             return
@@ -7076,6 +7231,7 @@ Write-Output "OK"
             return
 
         self.initialize_face_preview_entries(expected_count=crop_count)
+        self._sync_face_preview_crop_paths()
 
         if crop_count == 1:
             for entry in self.face_preview_entries:
@@ -7118,6 +7274,7 @@ Write-Output "OK"
             self.run_button.setEnabled(False)
             return
 
+        self._sync_face_preview_crop_paths()
         self.awaiting_face_selection = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.set_input_detect_overlay(False)
@@ -7148,15 +7305,23 @@ Write-Output "OK"
         self._reset_wrapper_runtime_tracking()
         self._prepare_stop_flag_for_new_run()
 
-        # Always reuse the already-selected crop set for continuation.
-        # Re-cropping here can reorder faces and break index-to-face mapping.
+        # Continuation must reuse the exact crop set shown in selection UI.
+        # Re-cropping here can remap indices and select the wrong face.
         reuse_crops = True
         self._inprocess_preview_crops = False
+
+        selected_crop_names = []
+        for idx in selected_indices:
+            crop_path = self._get_face_crop_path(idx)
+            if crop_path is not None:
+                selected_crop_names.append(crop_path.name)
+        use_selected_names = len(selected_crop_names) == len(selected_indices)
         try:
             command = self.build_wrapper_command(
                 force_crop_only=False,
                 force_use_existing_crops=reuse_crops,
-                crop_indices=selected_indices,
+                crop_indices=None if use_selected_names else selected_indices,
+                crop_names=selected_crop_names if use_selected_names else None,
                 require_selection=True,
             )
         except ValueError as exc:
@@ -7167,7 +7332,10 @@ Write-Output "OK"
             self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
             return
 
-        self.log_box.append(f"Running selected face index(es): {', '.join(str(i) for i in selected_indices)}")
+        if use_selected_names:
+            self.log_box.append(f"Running selected crop name(s): {', '.join(selected_crop_names)}")
+        else:
+            self.log_box.append(f"Running selected face index(es): {', '.join(str(i) for i in selected_indices)}")
         self._start_wrapper_process(command, "Status: Running selected face(s)...")
 
     def process_finished(self, exit_code, exit_status):
@@ -7263,6 +7431,7 @@ Write-Output "OK"
                     self.log_box.append("Crop-only run: no crop image was found.")
                     self.set_result_preview_image(None)
             else:
+                self._sync_face_preview_crop_paths()
                 self.reconcile_face_preview_results(after_epoch=self.run_started_at)
                 results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
                 newest = self.find_latest_image(results_root, self.run_started_at)
