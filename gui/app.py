@@ -203,7 +203,6 @@ class InputDropLabel(QLabel):
         self.parent_window = parent_window
         self.setAcceptDrops(True)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(340)
         self.setMouseTracking(True)
         self._set_normal_style()
 
@@ -279,8 +278,26 @@ class InputDropLabel(QLabel):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self.parent_window, "position_input_detect_overlay"):
-            self.parent_window.position_input_detect_overlay()
+        pw = self.parent_window
+        if hasattr(pw, "refresh_input_preview_scale"):
+            pw.refresh_input_preview_scale()
+        if hasattr(pw, "position_input_detect_overlay"):
+            pw.position_input_detect_overlay()
+
+
+class ResultPreviewLabel(QLabel):
+    """QLabel subclass that rescales the result preview on every resize."""
+    def __init__(self, parent_window, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.parent_window = parent_window
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        pw = self.parent_window
+        if hasattr(pw, "refresh_result_preview_scale"):
+            pw.refresh_result_preview_scale()
+        if hasattr(pw, "position_result_stage_overlay"):
+            pw.position_result_stage_overlay()
 
 
 class InputDetectOverlay(QWidget):
@@ -1273,125 +1290,8 @@ class MainWindow(QMainWindow):
         closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - iv))
         self.iter_slider.setValue(closest_index)
 
-    _SETTINGS_FILENAME = "gui_settings.json"
-
-    def _settings_path(self):
-        return self.repo_root / self._SETTINGS_FILENAME
-
-    def save_persisted_settings(self):
-        """Persist user-facing settings to a JSON file so they survive restarts."""
-        dlg = self.advanced_dialog
-        data = {
-            "photo_type": self.photo_type_combo.currentText(),
-            "approx_date": self.approx_date_edit.text().strip(),
-            "spectral_mode": self.spectral_mode_combo.currentText(),
-            "quality": self.get_selected_preset_value(),
-            "advanced_mode": self.advanced_mode_checkbox.isChecked(),
-            "results_root": self.results_root_edit.text().strip(),
-            # Advanced dialog
-            "enhancement_disabled": dlg.use_gfpgan_checkbox.isChecked(),
-            "gfpgan_blend": dlg.gfpgan_blend_edit.value(),
-            "det_threshold": dlg.det_threshold_edit.value(),
-            "face_factor": dlg.face_factor_edit.value(),
-            "gaussian": dlg.gaussian_edit.value(),
-            "identity_preservation": dlg.identity_preservation_combo.currentText(),
-            "tonal_transfer": dlg.tonal_transfer_combo.currentText(),
-            "eye_preservation": dlg.eye_preservation_combo.currentText(),
-            "structure_matching": dlg.structure_matching_combo.currentText(),
-            "vgg_appearance": dlg.vgg_appearance_combo.currentText(),
-            "noise_regularize": dlg.noise_regularize_edit.value(),
-            "lr": dlg.lr_edit.value(),
-            "camera_lr": dlg.camera_lr_edit.value(),
-            "mix_layer_start": dlg.mix_layer_start_edit.value(),
-            "mix_layer_end": dlg.mix_layer_end_edit.value(),
-        }
-        try:
-            self._settings_path().write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except Exception:
-            pass  # Non-critical; silent failure is fine.
-
-    def load_persisted_settings(self):
-        """Restore settings saved by save_persisted_settings, if available."""
-        path = self._settings_path()
-        if not path.exists():
-            return
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return
-
-        dlg = self.advanced_dialog
-        self._set_combo_if_present(self.photo_type_combo, data.get("photo_type", ""))
-        date_val = data.get("approx_date", "")
-        if date_val:
-            self.approx_date_edit.setText(date_val)
-        self._set_combo_if_present(self.spectral_mode_combo, data.get("spectral_mode", ""))
-
-        if data.get("advanced_mode", False):
-            self.advanced_mode_checkbox.setChecked(True)
-        self._set_iteration_from_value(data.get("quality", DEFAULT_ITERATION))
-
-        results_root = data.get("results_root", "")
-        if results_root:
-            self.results_root_edit.setText(results_root)
-
-        # Advanced dialog values — guard against corrupted settings
-        def _safe_float(key, fallback=None):
-            try:
-                return float(data[key])
-            except (KeyError, TypeError, ValueError):
-                return fallback
-
-        def _safe_int(key, fallback=None):
-            try:
-                return int(data[key])
-            except (KeyError, TypeError, ValueError):
-                return fallback
-
-        if "enhancement_disabled" in data:
-            dlg.use_gfpgan_checkbox.setChecked(bool(data["enhancement_disabled"]))
-        elif "enhancement_enabled" in data:  # backward compat with old key (was semantically inverted)
-            dlg.use_gfpgan_checkbox.setChecked(bool(data["enhancement_enabled"]))
-        v = _safe_float("gfpgan_blend")
-        if v is not None:
-            dlg.gfpgan_blend_edit.setValue(v)
-        v = _safe_float("det_threshold")
-        if v is not None:
-            dlg.det_threshold_edit.setValue(v)
-        v = _safe_float("face_factor")
-        if v is not None:
-            dlg.face_factor_edit.setValue(v)
-        v = _safe_float("gaussian")
-        if v is not None:
-            dlg.gaussian_edit.setValue(v)
-        self._set_combo_if_present(dlg.identity_preservation_combo, data.get("identity_preservation", ""))
-        self._set_combo_if_present(dlg.tonal_transfer_combo, data.get("tonal_transfer", ""))
-        self._set_combo_if_present(dlg.eye_preservation_combo, data.get("eye_preservation", ""))
-        self._set_combo_if_present(dlg.structure_matching_combo, data.get("structure_matching", ""))
-        self._set_combo_if_present(dlg.vgg_appearance_combo, data.get("vgg_appearance", ""))
-        v = _safe_float("noise_regularize")
-        if v is not None:
-            dlg.noise_regularize_edit.setValue(v)
-        v = _safe_float("lr")
-        if v is not None:
-            dlg.lr_edit.setValue(v)
-        v = _safe_float("camera_lr")
-        if v is not None:
-            dlg.camera_lr_edit.setValue(v)
-        v = _safe_int("mix_layer_start")
-        if v is not None:
-            dlg.mix_layer_start_edit.setValue(v)
-        v = _safe_int("mix_layer_end")
-        if v is not None:
-            dlg.mix_layer_end_edit.setValue(v)
-
-        self.update_spectral_sensitivity_ui()
-        self.update_iteration_label()
-        self.update_mode_controls()
-        self.update_runtime_label()
 
     def closeEvent(self, event):
-        self.save_persisted_settings()
         self.stop_quick_face_probe()
         super().closeEvent(event)
 
@@ -1837,9 +1737,6 @@ class MainWindow(QMainWindow):
         self.iter_values = self.basic_iter_values
 
         self.iter_slider = NoScrollSlider(Qt.Horizontal)
-        self.advanced_mode_checkbox = QCheckBox("Advanced")
-        self.advanced_mode_checkbox.setChecked(False)
-        self.advanced_mode_checkbox.toggled.connect(self.update_iteration_mode)
         self.iter_slider.setMinimum(0)
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
         self.iter_slider.setValue(1)  # default 750 (now at index 1)
@@ -1904,7 +1801,6 @@ class MainWindow(QMainWindow):
         quality_slider_row.setSpacing(10)
         quality_slider_row.addSpacing(0)
         quality_slider_row.addWidget(self.iter_slider, 1)
-        quality_slider_row.addWidget(self.advanced_mode_checkbox, 0, Qt.AlignVCenter)
 
         self.quality_widget = QWidget()
         quality_layout = QVBoxLayout()
@@ -1944,21 +1840,39 @@ class MainWindow(QMainWindow):
         self.photo_type_combo.currentTextChanged.connect(self._update_date_placeholder_for_photo_type)
         self.approx_date_edit.textChanged.connect(self.update_spectral_sensitivity_ui)
 
-        form_layout.addRow(self.make_form_label("Photo type / process"), self.photo_type_combo)
-        form_layout.addRow(self.make_form_label("Approximate date"), self.approx_date_edit)
-        form_layout.addRow(
-            self.make_label_with_info(
-                "Spectral sensitivity mode",
-                "Auto recalculates spectral sensitivity based on photo type and date; Manual preserves explicit user choice."
-            ),
-            self.spectral_mode_combo,
+        # Photo type + Approximate date on one row (equal halves)
+        photo_date_row = QHBoxLayout()
+        photo_date_row.setSpacing(6)
+        photo_date_row.setContentsMargins(0, 0, 0, 0)
+        photo_date_row.addWidget(self.photo_type_combo, 1)
+        date_label = self.make_form_label("Date")
+        date_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        photo_date_row.addWidget(date_label)
+        photo_date_row.addWidget(self.approx_date_edit, 1)
+        photo_date_widget = QWidget()
+        photo_date_widget.setLayout(photo_date_row)
+        form_layout.addRow(self.make_form_label("Photo type / process"), photo_date_widget)
+
+        # Spectral sensitivity mode + Spectral sensitivity on one row (equal halves)
+        spectral_row = QHBoxLayout()
+        spectral_row.setSpacing(6)
+        spectral_row.setContentsMargins(0, 0, 0, 0)
+        spectral_row.addWidget(self.spectral_mode_combo, 1)
+        sensitivity_label = self.make_label_with_info(
+            "Sensitivity",
+            "The historical spectral sensitivity model used by the pipeline. In Auto mode, this is computed from process type and date."
         )
+        sensitivity_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        spectral_row.addWidget(sensitivity_label)
+        spectral_row.addWidget(self.spectral_sensitivity_combo, 1)
+        spectral_widget = QWidget()
+        spectral_widget.setLayout(spectral_row)
         form_layout.addRow(
             self.make_label_with_info(
                 "Spectral sensitivity",
-                "The historical spectral sensitivity model used by the pipeline. In Auto mode, this is computed from process type and date."
+                "Auto recalculates spectral sensitivity based on photo type and date; Manual preserves explicit user choice."
             ),
-            self.spectral_sensitivity_combo,
+            spectral_widget,
         )
 
         self.advanced_settings_button = QPushButton("Advanced Settings...")
@@ -1979,7 +1893,7 @@ class MainWindow(QMainWindow):
         advanced_actions_layout.addWidget(self.advanced_settings_button)
         advanced_actions_layout.addWidget(self.reset_button)
         advanced_actions_layout.addStretch(1)
-        form_layout.addRow(self.make_form_label("Advanced"), advanced_actions_widget)
+        form_layout.addRow(advanced_actions_widget)
 
         # Add Quality row as proper form row
         form_layout.addRow(self.quality_widget)
@@ -2144,6 +2058,7 @@ class MainWindow(QMainWindow):
         preview_top_row.setStyleSheet(
             "QSplitter::handle { background-color: #3a3f47; border-radius: 2px; }"
         )
+        preview_top_row.splitterMoved.connect(self._on_splitter_moved)
 
         input_group = QWidget()
         input_layout = QVBoxLayout()
@@ -2195,7 +2110,7 @@ class MainWindow(QMainWindow):
         result_header.addWidget(result_divider, 1)
         result_layout.addLayout(result_header)
 
-        self.result_preview_label = QLabel("No result image yet.\nRun to generate a preview.")
+        self.result_preview_label = ResultPreviewLabel(self, "No result image yet.\nRun to generate a preview.")
         self.result_preview_label.setAlignment(Qt.AlignCenter)
         self.result_preview_label.setFixedHeight(300)
         self.result_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2285,6 +2200,8 @@ class MainWindow(QMainWindow):
         self.open_image_location_button.setStyleSheet(secondary_button_style)
         result_layout.addWidget(self.open_image_location_button)
 
+        self.input_preview_group = input_group
+        self.result_preview_group = result_group
         preview_top_row.addWidget(input_group)
         preview_top_row.addWidget(result_group)
         preview_top_row.setStretchFactor(0, 1)
@@ -2401,8 +2318,7 @@ class MainWindow(QMainWindow):
             self.log_box.append("GFPGAN not found (deps\\GFPGAN). Enhancement is disabled.")
         else:
             self.log_box.append("GFPGAN found. Enhancement is available.")
-        # Restore settings from previous session (quality, photo type, advanced params, etc.)
-        self.load_persisted_settings()
+        # Settings are no longer persisted between sessions; always start with defaults.
         # Defer startup checks until after first paint to improve perceived launch responsiveness.
         QTimer.singleShot(0, lambda: self.run_startup_preflight(show_dialog=True))
         # Pre-warm the Haar cascade detector in the background so the first face
@@ -2415,6 +2331,20 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.apply_responsive_layout()
+        self._update_wide_preview_dimensions()
+        self.refresh_input_preview_scale()
+        self.refresh_result_preview_scale()
+        self.position_input_detect_overlay()
+        self.position_result_stage_overlay()
+
+    def _update_wide_preview_dimensions(self):
+        """Track the current preview label width for face strip card sizing."""
+        if not getattr(self, "_wide_layout_active", False):
+            return
+        self.current_wide_preview_side = max(200, self.input_preview_label.width())
+
+    def _on_splitter_moved(self, pos, index):
+        """Rescale preview images when the user drags the splitter handle."""
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
         self.position_input_detect_overlay()
@@ -2495,49 +2425,72 @@ class MainWindow(QMainWindow):
         self._rehost_face_preview_panel(use_wide_layout)
 
         if use_wide_layout:
-            preview_side = self._compute_wide_preview_side()
-            self.current_wide_preview_side = preview_side
             self._configure_face_preview_panel_for_mode(True)
-            preview_pane_width = preview_side + 24
 
             self.content_layout.setDirection(QBoxLayout.LeftToRight)
             self.previews_splitter.setOrientation(Qt.Vertical)
-            self.previews_splitter.setHandleWidth(0)
-            self.input_preview_label.setFixedSize(preview_side, preview_side)
-            self.input_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-            self.result_preview_label.setFixedSize(preview_side, preview_side)
-            self.result_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+            self.previews_splitter.setHandleWidth(6)
+            # Fully fluid: labels expand in both directions so they
+            # continuously resize with the window.  The content_layout
+            # stretch factors (controls=2, previews=1) give the preview
+            # pane ~1/3 of the window width; the vertical splitter
+            # distributes height between input and result.
+            self.input_preview_label.setMinimumWidth(120)
+            self.input_preview_label.setMaximumWidth(16777215)
+            self.input_preview_label.setMinimumHeight(80)
+            self.input_preview_label.setMaximumHeight(16777215)
+            self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.result_preview_label.setMinimumWidth(120)
+            self.result_preview_label.setMaximumWidth(16777215)
+            self.result_preview_label.setMinimumHeight(80)
+            self.result_preview_label.setMaximumHeight(16777215)
+            self.result_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Containers expand so the splitter can resize them.
+            self.input_preview_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.result_preview_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # Labels get stretch=1 to fill container height. Do NOT set
+            # alignment — Qt's setAlignment on a layout item caps the widget
+            # at its sizeHint, defeating the stretch.
             if hasattr(self, "input_preview_layout"):
-                self.input_preview_layout.setAlignment(self.input_preview_label, Qt.AlignHCenter | Qt.AlignTop)
+                self.input_preview_layout.setStretch(1, 1)
+                self.input_preview_layout.setAlignment(self.input_preview_label, Qt.Alignment())
             if hasattr(self, "result_preview_layout"):
-                self.result_preview_layout.setAlignment(self.result_preview_label, Qt.AlignHCenter | Qt.AlignTop)
+                self.result_preview_layout.setStretch(1, 1)
+                self.result_preview_layout.setAlignment(self.result_preview_label, Qt.Alignment())
             if hasattr(self, "input_preview_footer_spacer"):
                 self.input_preview_footer_spacer.setVisible(False)
             self.controls_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-            self.previews_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-            self.previews_group.setMinimumWidth(preview_pane_width)
-            self.previews_group.setMaximumWidth(preview_pane_width)
+            self.previews_group.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.previews_group.setMinimumWidth(200)
+            self.previews_group.setMaximumWidth(16777215)
             self.previews_group.setMinimumHeight(0)
             self.previews_group.setMaximumHeight(16777215)
-            self.content_layout.addWidget(self.controls_container, 1)
+            self.content_layout.addWidget(self.controls_container, 2)
             self.content_layout.addWidget(self.face_preview_panel, 0)
-            self.content_layout.addWidget(self.previews_group, 0)
+            self.content_layout.addWidget(self.previews_group, 1)
         else:
             self._configure_face_preview_panel_for_mode(False)
             self.content_layout.setDirection(QBoxLayout.TopToBottom)
             self.previews_splitter.setOrientation(Qt.Horizontal)
             self.previews_splitter.setHandleWidth(6)
-            self.input_preview_label.setMinimumWidth(0)
+            # Clear fixedWidth from wide mode (setFixedWidth sets both min+max).
+            self.input_preview_label.setMinimumWidth(100)
             self.input_preview_label.setMaximumWidth(16777215)
+            self.input_preview_label.setMinimumHeight(0)
             self.input_preview_label.setFixedHeight(300)
             self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            self.result_preview_label.setMinimumWidth(0)
+            self.result_preview_label.setMinimumWidth(100)
             self.result_preview_label.setMaximumWidth(16777215)
+            self.result_preview_label.setMinimumHeight(0)
             self.result_preview_label.setFixedHeight(300)
             self.result_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            self.input_preview_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+            self.result_preview_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
             if hasattr(self, "input_preview_layout"):
+                self.input_preview_layout.setStretch(1, 0)  # reset label stretch
                 self.input_preview_layout.setAlignment(self.input_preview_label, Qt.Alignment())
             if hasattr(self, "result_preview_layout"):
+                self.result_preview_layout.setStretch(1, 0)  # reset label stretch
                 self.result_preview_layout.setAlignment(self.result_preview_label, Qt.Alignment())
             if hasattr(self, "input_preview_footer_spacer"):
                 if hasattr(self, "open_image_location_button"):
@@ -2558,13 +2511,6 @@ class MainWindow(QMainWindow):
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
         self.position_input_detect_overlay()
-
-    def _compute_wide_preview_side(self):
-        # Keep square previews while using fullscreen height more effectively.
-        side_by_height = int((self.height() - 190) / 2)
-        side_by_width = int((self.width() * 0.46) - 112)
-        side = min(side_by_height, side_by_width)
-        return max(320, min(700, side))
 
     def _apply_mode_layout_profile(self, use_wide_layout):
         if use_wide_layout:
@@ -2629,7 +2575,6 @@ class MainWindow(QMainWindow):
 
     def update_iteration_mode(self):
         current = self.iter_values[self.iter_slider.value()]
-        self.iter_values = self.advanced_iter_values if self.advanced_mode_checkbox.isChecked() else self.basic_iter_values
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
 
         closest_index = min(range(len(self.iter_values)), key=lambda i: abs(self.iter_values[i] - current))
@@ -2909,7 +2854,6 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.crop_only_checkbox.setEnabled(not is_running)
         self.advanced_dialog.det_threshold_edit.setEnabled(not is_running)
 
-        self.advanced_mode_checkbox.setEnabled(not is_running)
         self.iter_slider.setEnabled(not is_running)
         self.photo_type_combo.setEnabled(not is_running)
         self.approx_date_edit.setEnabled(not is_running)
@@ -3199,7 +3143,6 @@ class MainWindow(QMainWindow):
         # Reset all advanced-settings values to their defaults.
         self.advanced_dialog.restore_defaults()
 
-        self.advanced_mode_checkbox.setChecked(False)
         self.iter_values = self.basic_iter_values
         self.iter_slider.setMaximum(len(self.iter_values) - 1)
         self.iter_slider.setValue(self.basic_iter_values.index(DEFAULT_ITERATION))
@@ -4012,7 +3955,7 @@ class MainWindow(QMainWindow):
             enhancement_enabled = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()) and self.gfpgan_is_available()
             if enhancement_enabled:
                 blend_value = float(self.advanced_dialog.gfpgan_blend_edit.value())
-                if (not self.advanced_mode_checkbox.isChecked()) and blend_value >= 0.999:
+                if blend_value >= 0.999:
                     # In basic mode, full replacement tends to over-smooth local features
                     # (especially eyes). Auto-reset to the conservative default.
                     blend_value = float(DEFAULT_GFPGAN_BLEND)
@@ -6688,8 +6631,8 @@ Write-Output "OK"
     def refresh_input_preview_scale(self):
         if self.input_pixmap is None:
             return
-        w = max(1, self.input_preview_label.width() - 10)
-        h = max(1, self.input_preview_label.height() - 10)
+        w = max(1, self.input_preview_label.width() - 2)
+        h = max(1, self.input_preview_label.height() - 2)
         try:
             source_key = int(self.input_pixmap.cacheKey())
         except Exception:
@@ -6872,8 +6815,8 @@ Write-Output "OK"
     def refresh_result_preview_scale(self):
         if self.result_pixmap is None:
             return
-        w = max(1, self.result_preview_label.width() - 10)
-        h = max(1, self.result_preview_label.height() - 10)
+        w = max(1, self.result_preview_label.width() - 2)
+        h = max(1, self.result_preview_label.height() - 2)
         try:
             source_key = int(self.result_pixmap.cacheKey())
         except Exception:
@@ -7171,7 +7114,7 @@ Write-Output "OK"
                         "input_image": self.input_image_edit.text().strip(),
                         "preset": str(pm["preset"]),
                         "source_run_preset": source_preset,
-                        "advanced_mode": bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, "advanced_mode_checkbox") else False,
+                        "advanced_mode": False,
                         "enhancement": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
                         "crop_only": False,
                         "success": True,
@@ -7203,7 +7146,7 @@ Write-Output "OK"
                 "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "input_image": self.input_image_edit.text().strip(),
                 "preset": preset_val,
-                "advanced_mode": bool(self.advanced_mode_checkbox.isChecked()) if hasattr(self, "advanced_mode_checkbox") else False,
+                "advanced_mode": False,
                 "enhancement": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
                 "crop_only": bool(crop_only),
                 "success": bool(success),
