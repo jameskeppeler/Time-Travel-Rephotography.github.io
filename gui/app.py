@@ -2116,7 +2116,25 @@ class MainWindow(QMainWindow):
         result_divider.setFrameShape(QFrame.HLine)
         result_divider.setFrameShadow(QFrame.Sunken)
         result_divider.setStyleSheet("color: #3a3f47;")
+        self.result_view_toggle = QPushButton("Rephoto")
+        self.result_view_toggle.setCheckable(True)
+        self.result_view_toggle.setChecked(False)
+        self.result_view_toggle.setFixedHeight(20)
+        self.result_view_toggle.setMinimumWidth(90)
+        self.result_view_toggle.setToolTip("Toggle between Rephoto result and Recomposited result in the preview and before/after swiper.")
+        self.result_view_toggle.setStyleSheet(
+            "QPushButton { background: #2a2f38; color: #9aa0aa; border: 1px solid #565c66; "
+            "border-radius: 3px; padding: 1px 8px; font-size: 11px; }"
+            "QPushButton:checked { background: #3a5f3a; color: #c7e6c7; border-color: #5a8a5a; }"
+            "QPushButton:hover { border-color: #8090a0; }"
+        )
+        self.result_view_toggle.clicked.connect(self._on_result_view_toggle)
+        self.result_view_toggle.setVisible(False)
+        self._rephoto_result_path = None
+        self._recomposited_result_path = None
+
         result_header.addWidget(result_title)
+        result_header.addWidget(self.result_view_toggle)
         result_header.addWidget(result_divider, 1)
         result_layout.addLayout(result_header)
 
@@ -2868,6 +2886,13 @@ class MainWindow(QMainWindow):
 
     def set_controls_for_running(self, is_running):
         self.update_run_button_for_quick_face_hint()
+        if is_running:
+            # Clear recomposite toggle on new run — stale paths no longer valid
+            self._rephoto_result_path = None
+            self._recomposited_result_path = None
+            self.result_view_toggle.setVisible(False)
+            self.result_view_toggle.setChecked(False)
+            self.result_view_toggle.setText("Rephoto")
         if hasattr(self, "end_early_button"):
             self.end_early_button.setEnabled(bool(is_running))
         self.cancel_button.setEnabled(is_running)
@@ -3149,6 +3174,11 @@ class MainWindow(QMainWindow):
         self.current_run_summary_context = None
         self.set_result_preview_image(None)
         self.result_preview_label.setText("No result image yet.\nRun to generate a preview.")
+        self._rephoto_result_path = None
+        self._recomposited_result_path = None
+        self.result_view_toggle.setVisible(False)
+        self.result_view_toggle.setChecked(False)
+        self.result_view_toggle.setText("Rephoto")
         self.update_run_button_for_quick_face_hint()
 
     def reset_form_defaults(self):
@@ -7100,10 +7130,26 @@ Write-Output "OK"
             cv2.imwrite(str(ac_path), auto_colored)
             self.log_box.append(f"Auto Color corrected: {ac_path.name}")
 
+            # Store both paths for the toggle and show recomposited by default
+            self._rephoto_result_path = result_path
+            self._recomposited_result_path = ac_path
+            self.result_view_toggle.setVisible(True)
+            self.result_view_toggle.setChecked(True)
+            self.result_view_toggle.setText("Recomposited")
             self.set_result_preview_image(ac_path)
 
         except Exception as e:
             self.log_box.append(f"Recomposite failed: {e}")
+
+    def _on_result_view_toggle(self):
+        """Switch the result preview between Rephoto and Recomposited outputs."""
+        is_recomposited = self.result_view_toggle.isChecked()
+        if is_recomposited and self._recomposited_result_path is not None:
+            self.result_view_toggle.setText("Recomposited")
+            self.set_result_preview_image(self._recomposited_result_path)
+        elif self._rephoto_result_path is not None:
+            self.result_view_toggle.setText("Rephoto")
+            self.set_result_preview_image(self._rephoto_result_path)
 
     def preview_stage_image_if_found(self, image_path, stage_name):
         """Preview an image if it exists and update stage overlay."""
