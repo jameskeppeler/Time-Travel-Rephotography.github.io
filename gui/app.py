@@ -2203,12 +2203,28 @@ class MainWindow(QMainWindow):
         self.face_preview_header.setVisible(False)
         self.face_preview_strip_scroll.setVisible(False)
 
+        result_buttons_row = QHBoxLayout()
+        result_buttons_row.setContentsMargins(0, 0, 0, 0)
+        result_buttons_row.setSpacing(6)
+
         self.open_image_location_button = QPushButton("Open Image Location")
         self.open_image_location_button.clicked.connect(self.open_result_image_location)
         self.open_image_location_button.setEnabled(False)
         self.open_image_location_button.setMinimumHeight(32)
         self.open_image_location_button.setStyleSheet(secondary_button_style)
-        result_layout.addWidget(self.open_image_location_button)
+        result_buttons_row.addWidget(self.open_image_location_button)
+
+        self.recomposite_button = QPushButton("Recomposite Original")
+        self.recomposite_button.setToolTip(
+            "Apply Photoshop-style Color blend: hue/saturation from the result, luminance from the original input."
+        )
+        self.recomposite_button.clicked.connect(self.run_recomposite)
+        self.recomposite_button.setEnabled(False)
+        self.recomposite_button.setMinimumHeight(32)
+        self.recomposite_button.setStyleSheet(secondary_button_style)
+        result_buttons_row.addWidget(self.recomposite_button)
+
+        result_layout.addLayout(result_buttons_row)
 
         self.input_preview_group = input_group
         self.result_preview_group = result_group
@@ -6595,6 +6611,7 @@ Write-Output "OK"
     def set_result_preview_image(self, image_path: Path | None):
         prev_pix = self.result_pixmap
         self.open_image_location_button.setEnabled(False)
+        self.recomposite_button.setEnabled(False)
 
         if image_path is None or (not image_path.exists()):
             self.last_result_image_path = None
@@ -6615,6 +6632,7 @@ Write-Output "OK"
                 self.last_result_image_cache_key = cache_key
                 self.result_pixmap = prev_pix
                 self.open_image_location_button.setEnabled(True)
+                self._update_recomposite_button_state()
                 self.refresh_result_preview_scale()
                 self.position_result_stage_overlay()
                 return
@@ -6638,6 +6656,7 @@ Write-Output "OK"
         self.result_preview_scaled_cache_pixmap = None
         self.result_preview_last_display_key = None
         self.open_image_location_button.setEnabled(True)
+        self._update_recomposite_button_state()
         self.refresh_result_preview_scale()
         self.position_result_stage_overlay()
 
@@ -7016,6 +7035,75 @@ Write-Output "OK"
             preferred_substring="blended_faces",
             excluded_substrings=["/cmp/", "\\cmp\\"],
         )
+
+    def _update_recomposite_button_state(self):
+        """Enable the Recomposite button when we have a result image and a face crop to blend with."""
+        if not hasattr(self, "recomposite_button"):
+            return
+        has_result = self.last_result_image_path is not None
+        crop_path = self._get_recomposite_crop_path()
+        self.recomposite_button.setEnabled(has_result and crop_path is not None)
+
+    def _get_recomposite_crop_path(self):
+        """Return the face crop path for the currently selected/active face, or None."""
+        idx = self._get_focused_face_preview_index()
+        if idx is not None:
+            return self._get_face_crop_path(idx)
+        return None
+
+    def run_recomposite(self):
+        """Apply Photoshop-style Color blend + Auto Color using the face crop as the base."""
+        if self.last_result_image_path is None:
+            self.log_box.append("Recomposite: No result image available.")
+            return
+
+        crop_path = self._get_recomposite_crop_path()
+        if crop_path is None:
+            self.log_box.append("Recomposite: No face crop found for the current face.")
+            return
+
+        result_path = Path(self.last_result_image_path)
+        if not result_path.exists():
+            self.log_box.append(f"Recomposite: Result file not found: {result_path}")
+            return
+
+        try:
+            import cv2
+            repo_str = str(self.repo_root)
+            if repo_str not in sys.path:
+                sys.path.insert(0, repo_str)
+            from utils.color_blend import color_blend, auto_color_balance_after_blend
+
+            crop_img = cv2.imread(str(crop_path))
+            result_img = cv2.imread(str(result_path))
+
+            if crop_img is None or result_img is None:
+                self.log_box.append("Recomposite: Failed to read images.")
+                return
+
+            # Resize result to match face crop if dimensions differ
+            crop_h, crop_w = crop_img.shape[:2]
+            res_h, res_w = result_img.shape[:2]
+            if (res_h, res_w) != (crop_h, crop_w):
+                result_img = cv2.resize(result_img, (crop_w, crop_h), interpolation=cv2.INTER_LANCZOS4)
+
+            # Stage 1: Color blend — luminance from face crop, hue/sat from result
+            blended = color_blend(crop_img, result_img)
+
+            out_path = result_path.parent / f"{result_path.stem}_recomposited.png"
+            cv2.imwrite(str(out_path), blended)
+            self.log_box.append(f"Recomposited image saved: {out_path.name}")
+
+            # Stage 2: Auto Color correction on the blended result
+            auto_colored = auto_color_balance_after_blend(blended)
+            ac_path = result_path.parent / f"{result_path.stem}_recomposited_autocolor.png"
+            cv2.imwrite(str(ac_path), auto_colored)
+            self.log_box.append(f"Auto Color corrected: {ac_path.name}")
+
+            self.set_result_preview_image(ac_path)
+
+        except Exception as e:
+            self.log_box.append(f"Recomposite failed: {e}")
 
     def preview_stage_image_if_found(self, image_path, stage_name):
         """Preview an image if it exists and update stage overlay."""

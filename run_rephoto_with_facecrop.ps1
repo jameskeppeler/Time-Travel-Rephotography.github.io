@@ -24,6 +24,7 @@
 
     [switch]$UseGFPGAN,
     [switch]$RecompositeOriginalImage,
+    [switch]$AutoColorAfterBlend,
 
     [ValidateSet("1.3", "1.4")]
     [string]$GFPGANVersion = "1.3",
@@ -712,7 +713,8 @@ try {
         $ProjectorStopFlagArgs `
         $ProjectorPauseFlagArgs `
         $ProjectorOptArgs `
-        $(if ($RecompositeOriginalImage) { "--recomposite_original_image" } else { "" })
+        $(if ($RecompositeOriginalImage) { "--recomposite_original_image" } else { "" }) `
+        $(if ($AutoColorAfterBlend) { "--auto_color_after_blend" } else { "" })
 
     $RephotoStart.Stop()
     Write-Host "=== Batch rephoto elapsed: $([math]::Round($RephotoStart.Elapsed.TotalSeconds, 1))s ==="

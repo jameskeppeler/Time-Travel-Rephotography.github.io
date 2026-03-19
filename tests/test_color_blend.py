@@ -3,7 +3,7 @@
 import numpy as np
 import unittest
 
-from utils.color_blend import _lum, _sat, _set_lum, _clip_color, color_blend
+from utils.color_blend import _lum, _sat, _set_lum, _clip_color, color_blend, auto_color_balance_after_blend
 
 
 class TestColorBlendMath(unittest.TestCase):
@@ -106,6 +106,68 @@ class TestColorBlendImage(unittest.TestCase):
         self.assertGreaterEqual(np.min(result), 0)
         self.assertLessEqual(np.max(result), 255)
         self.assertEqual(result.dtype, np.uint8)
+
+
+class TestAutoColorBalance(unittest.TestCase):
+    """Test the post-blend Auto Color correction stage."""
+
+    def test_output_shape_and_dtype(self):
+        """Auto color should preserve shape and return uint8."""
+        img = np.random.randint(0, 256, (50, 50, 3), dtype=np.uint8)
+        result = auto_color_balance_after_blend(img)
+        self.assertEqual(result.shape, img.shape)
+        self.assertEqual(result.dtype, np.uint8)
+
+    def test_output_in_range(self):
+        """Output values should always be in [0, 255]."""
+        img = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+        result = auto_color_balance_after_blend(img)
+        self.assertGreaterEqual(np.min(result), 0)
+        self.assertLessEqual(np.max(result), 255)
+
+    def test_strength_zero_is_identity(self):
+        """With strength=0 the output should equal the input."""
+        img = np.random.randint(0, 256, (30, 30, 3), dtype=np.uint8)
+        result = auto_color_balance_after_blend(img, strength=0.0)
+        np.testing.assert_array_equal(result, img)
+
+    def test_flat_image_unchanged(self):
+        """A solid-color image should not be drastically altered."""
+        img = np.full((20, 20, 3), 128, dtype=np.uint8)
+        result = auto_color_balance_after_blend(img)
+        # All pixels are identical so percentile stretch has no room;
+        # result should be very close to the original.
+        diff = np.abs(result.astype(np.int16) - img.astype(np.int16))
+        self.assertLess(np.max(diff), 10)
+
+    def test_color_cast_reduced(self):
+        """An image with a blue cast should have the cast reduced via tonal stretch."""
+        # Create a natural-ish image with a blue tint: varied content + blue bias.
+        rng = np.random.RandomState(42)
+        base = rng.randint(40, 200, (50, 50, 3), dtype=np.uint8)
+        # Add blue cast: boost B, suppress R
+        img = base.copy()
+        img[:, :, 0] = np.clip(base[:, :, 0].astype(np.int16) + 50, 0, 255).astype(np.uint8)
+        img[:, :, 2] = np.clip(base[:, :, 2].astype(np.int16) - 30, 0, 255).astype(np.uint8)
+
+        result = auto_color_balance_after_blend(img, strength=1.0)
+        # After correction, mean channel spread should decrease.
+        orig_means = [img[:, :, ch].mean() for ch in range(3)]
+        corr_means = [result[:, :, ch].mean() for ch in range(3)]
+        original_spread = max(orig_means) - min(orig_means)
+        corrected_spread = max(corr_means) - min(corr_means)
+        self.assertLess(corrected_spread, original_spread)
+
+    def test_none_input(self):
+        """None input should return None."""
+        result = auto_color_balance_after_blend(None)
+        self.assertIsNone(result)
+
+    def test_empty_input(self):
+        """Empty image should return empty."""
+        img = np.empty((0, 0, 3), dtype=np.uint8)
+        result = auto_color_balance_after_blend(img)
+        self.assertEqual(result.size, 0)
 
 
 if __name__ == "__main__":

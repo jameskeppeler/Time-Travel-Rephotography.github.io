@@ -100,6 +100,136 @@ def color_blend(base_rgb, blend_rgb, alpha_mask=None):
     return np.clip(result, 0, 255).astype(np.uint8)
 
 
+###############################################################################
+# Post-blend Photoshop-like Auto Color correction
+#
+# This stage runs AFTER the Color blend / recomposite is complete.  It operates
+# on the final recomposited RGB image only — it never touches source layers,
+# target layers, or intermediate masks.
+#
+# Processing order:
+#   input images → color blend/composite → recomposited image
+#       → auto_color_balance_after_blend() → saved/exported output
+#
+# The algorithm approximates Photoshop's "Auto Color" by:
+#   1. Estimating dark/light reference points via percentiles (not min/max)
+#      so that outlier pixels do not dominate.
+#   2. Stretching tonal range per-channel to improve contrast.
+#   3. Detecting a global midtone color cast from approximately neutral
+#      (low-saturation) midtone pixels and applying per-channel correction
+#      to neutralize it.
+#   4. Blending the corrected result with the original at `strength` to
+#      keep the effect moderate and natural-looking.
+###############################################################################
+
+
+def auto_color_balance_after_blend(
+    image,
+    shadow_percentile=0.5,
+    highlight_percentile=99.5,
+    strength=0.6,
+    neutral_threshold=30.0,
+    protect_shadows=True,
+    protect_highlights=True,
+):
+    """Photoshop-like Auto Color correction — applied AFTER the color blend step.
+
+    Args:
+        image:               uint8 BGR image (H, W, 3) — the recomposited result.
+        shadow_percentile:   percentile for dark reference (default 0.5).
+        highlight_percentile: percentile for light reference (default 99.5).
+        strength:            blend factor 0..1 between original and corrected
+                             (0 = no change, 1 = full correction).
+        neutral_threshold:   max per-channel spread (max-min) for a pixel to be
+                             considered "neutral" when estimating midtone cast.
+        protect_shadows:     if True, reduce correction near blacks to avoid
+                             crushing shadow detail.
+        protect_highlights:  if True, reduce correction near whites to avoid
+                             blowing highlight detail.
+
+    Returns:
+        uint8 BGR image (H, W, 3) with Auto Color applied.
+    """
+    if image is None or image.size == 0:
+        return image
+
+    img = image.astype(np.float32)
+    h, w, c = img.shape
+    corrected = np.empty_like(img)
+
+    # --- Step 1: Per-channel percentile stretch (tonal range) ---------------
+    for ch in range(c):
+        channel = img[:, :, ch].ravel()
+        lo = np.percentile(channel, shadow_percentile)
+        hi = np.percentile(channel, highlight_percentile)
+        span = hi - lo
+        if span < 1.0:
+            # Channel is essentially flat — leave it alone.
+            corrected[:, :, ch] = img[:, :, ch]
+        else:
+            corrected[:, :, ch] = (img[:, :, ch] - lo) * (255.0 / span)
+
+    corrected = np.clip(corrected, 0, 255)
+
+    # --- Step 2: Midtone color-cast neutralization --------------------------
+    # Identify approximately neutral midtone pixels (low saturation, mid luma).
+    luma = 0.299 * corrected[:, :, 2] + 0.587 * corrected[:, :, 1] + 0.114 * corrected[:, :, 0]  # BGR order
+    ch_min = corrected.min(axis=2)
+    ch_max = corrected.max(axis=2)
+    spread = ch_max - ch_min  # per-pixel "saturation"
+
+    midtone_mask = (
+        (spread < neutral_threshold) &
+        (luma > 40) & (luma < 215)
+    )
+
+    if np.count_nonzero(midtone_mask) > 64:
+        # Compute mean color of neutral midtone pixels.
+        neutral_pixels = corrected[midtone_mask]  # (N, 3)
+        neutral_mean = neutral_pixels.mean(axis=0)  # (3,)
+        gray_target = neutral_mean.mean()  # target: equal channels
+
+        # Per-channel shift to neutralize the cast.
+        cast_shift = gray_target - neutral_mean  # (3,)
+
+        # Apply shift globally, scaled by strength.
+        corrected = corrected + cast_shift[np.newaxis, np.newaxis, :]
+
+    corrected = np.clip(corrected, 0, 255)
+
+    # --- Step 3: Shadow / highlight protection ------------------------------
+    # Build a soft mask that reduces correction intensity near pure black and
+    # pure white so we do not crush shadows or blow highlights.
+    if protect_shadows or protect_highlights:
+        # Luminance of the *original* image (before correction).
+        orig_luma = 0.299 * img[:, :, 2] + 0.587 * img[:, :, 1] + 0.114 * img[:, :, 0]
+        protection = np.ones((h, w), dtype=np.float32)
+
+        if protect_shadows:
+            # Ramp from 0 at luma=0 to 1 at luma=shadow_knee.
+            shadow_knee = 30.0
+            shadow_factor = np.clip(orig_luma / shadow_knee, 0, 1)
+            protection *= shadow_factor
+
+        if protect_highlights:
+            # Ramp from 1 at luma=highlight_knee down to 0 at luma=255.
+            highlight_knee = 225.0
+            highlight_factor = np.clip((255.0 - orig_luma) / (255.0 - highlight_knee), 0, 1)
+            protection *= highlight_factor
+
+        # Blend: protected regions stay closer to original.
+        protection_3ch = protection[:, :, np.newaxis]
+        corrected = img + protection_3ch * (corrected - img)
+        corrected = np.clip(corrected, 0, 255)
+
+    # --- Step 4: Global strength blend with original ------------------------
+    if strength < 1.0:
+        corrected = img + strength * (corrected - img)
+        corrected = np.clip(corrected, 0, 255)
+
+    return corrected.astype(np.uint8)
+
+
 def recomposite_face_into_image(original_image, face_crop, bbox, use_color_blend=False):
     """Place a processed face crop back into the original image.
 

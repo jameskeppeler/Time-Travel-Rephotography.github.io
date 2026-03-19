@@ -24,7 +24,7 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 from losses.joint_loss import JointLoss
-from utils.color_blend import color_blend
+from utils.color_blend import color_blend, auto_color_balance_after_blend
 from projector import (
     TimingLog,
     compact_run_tag,
@@ -169,6 +169,7 @@ def _build_parser() -> ArgumentParser:
     parser.add_argument("--pause_flag", type=str, default="", help="optional file path; if present, batch pauses")
     parser.add_argument('--rand_seed', type=int, default=None, help="random seed")
     parser.add_argument("--recomposite_original_image", action="store_true", default=False, help="after rephoto, blend final face back into original using Color blend mode")
+    parser.add_argument("--auto_color_after_blend", action="store_true", default=False, help="apply Photoshop-like Auto Color correction after recomposite")
 
     ProjectorArguments.add_stylegan_args(parser)
     ProjectorArguments.add_preprocess_args(parser)
@@ -298,6 +299,13 @@ def main():
                         recompose_path = pjoin(results_dir, "recomposited.png")
                         cv2.imwrite(recompose_path, recomposed_full)
                         print(f"Recomposited image: {recompose_path}", flush=True)
+
+                        # --- Post-blend Auto Color correction ---
+                        if getattr(args, "auto_color_after_blend", False):
+                            auto_colored = auto_color_balance_after_blend(recomposed_full)
+                            auto_color_path = pjoin(results_dir, "recomposited_autocolor.png")
+                            cv2.imwrite(auto_color_path, auto_colored)
+                            print(f"Auto Color corrected: {auto_color_path}", flush=True)
             except Exception as e:
                 print(f"Warning: Recomposite failed (non-fatal): {e}", flush=True)
 
