@@ -9,6 +9,7 @@ import shutil
 import time
 import math
 import random
+import statistics
 from collections import defaultdict
 from pathlib import Path
 
@@ -1681,6 +1682,9 @@ class MainWindow(QMainWindow):
         self.current_crop_output_dir = None
         self.current_gfpgan_output_dir = None
         self._inprocess_preview_crops = False
+        self._crop_source_input_key = None  # normalized path key of the input that produced current crops
+        self._crop_source_face_factor = None  # face_factor value used when crops were produced
+        self._pending_face_reselection = None  # set of face indices to pre-select after a re-crop
         self.current_blended_faces_dir = None
         self.current_results_dir = None
         self.current_manifest_path = None
@@ -2967,6 +2971,8 @@ class MainWindow(QMainWindow):
                     self.mark_face_running_from_crop_path(crop_path_text)
             if "Crop output dir:" in s:
                 self.current_crop_output_dir = s.split("Crop output dir:")[-1].strip()
+                self._crop_source_input_key = self._normalized_path_key(self.input_image_edit.text().strip())
+                self._crop_source_face_factor = self.advanced_dialog.face_factor_edit.value()
             elif "GFPGAN output:" in s:
                 self.current_gfpgan_output_dir = s.split("GFPGAN output:")[-1].strip()
             elif "GFPGAN blended faces:" in s:
@@ -3186,9 +3192,7 @@ class MainWindow(QMainWindow):
         self.results_root_edit.setText(str(self.repo_root / "results"))
         self.update_mode_controls()
         self.update_runtime_label()
-        self.quick_face_count_estimate = None
         self.update_run_button_for_quick_face_hint()
-        self.reset_face_preview_state(preserve_input_overlays=False)
 
         self.log_box.append("Defaults restored.")
         self.status_label.setText("Status: Defaults restored")
@@ -3580,7 +3584,7 @@ class MainWindow(QMainWindow):
             return out
 
         def avg_secs(matches):
-            return sum(s for s, _rt in matches) / len(matches)
+            return statistics.median(s for s, _rt in matches)
 
         # -------------------------------------------------
         # 1) Exact local timing match first
@@ -3621,8 +3625,8 @@ class MainWindow(QMainWindow):
             overheads = []
             for p, vals in by_preset.items():
                 if vals["on"] and vals["off"]:
-                    on_avg = sum(vals["on"]) / len(vals["on"])
-                    off_avg = sum(vals["off"]) / len(vals["off"])
+                    on_avg = statistics.median(vals["on"])
+                    off_avg = statistics.median(vals["off"])
                     overheads.append((p, max(0.0, on_avg - off_avg)))
             return sorted(overheads, key=lambda t: t[0])
 
@@ -3635,10 +3639,10 @@ class MainWindow(QMainWindow):
 
         exact_over = [ov for (p, ov) in overhead_points if p == preset_value]
         if exact_over:
-            overhead_secs = sum(exact_over) / len(exact_over)
+            overhead_secs = statistics.median(exact_over)
             overhead_note = "Exact local enhancement overhead from paired record(s) at this preset."
         elif overhead_points:
-            overhead_secs = sum(ov for (_p, ov) in overhead_points) / len(overhead_points)
+            overhead_secs = statistics.median(ov for (_p, ov) in overhead_points)
             overhead_note = f"Average local enhancement overhead from {len(overhead_points)} paired preset point(s)."
 
         # -------------------------------------------------
@@ -3678,14 +3682,14 @@ class MainWindow(QMainWindow):
 
         exact_base = [s for (p, s) in base_candidates if p == preset_value]
         if exact_base:
-            base_secs = sum(exact_base) / len(exact_base)
+            base_secs = statistics.median(exact_base)
             base_note = f"Exact local base timing from {len(exact_base)} enhancement-off record(s)."
         else:
             grouped_base = {}
             for p, s in base_candidates:
                 grouped_base.setdefault(p, []).append(s)
 
-            base_points = sorted((p, sum(vals) / len(vals)) for p, vals in grouped_base.items())
+            base_points = sorted((p, statistics.median(vals)) for p, vals in grouped_base.items())
 
             if len(base_points) >= 2:
                 if preset_value < base_points[0][0]:
@@ -4637,6 +4641,8 @@ Write-Output "OK"
 
         if copied > 0:
             self.current_crop_output_dir = str(target_dir)
+            self._crop_source_input_key = self._normalized_path_key(self.input_image_edit.text().strip())
+            self._crop_source_face_factor = self.advanced_dialog.face_factor_edit.value()
             self.log_box.append(f"Prepared reusable crops: {target_dir}")
 
     def maybe_auto_start_face_detection_from_import(self, allow_during_probe=False):
@@ -5036,6 +5042,8 @@ Write-Output "OK"
 
         # Wire up the filmstrip as if the PS1 wrapper had just finished.
         self.current_crop_output_dir = str(crop_out_dir)
+        self._crop_source_input_key = self._normalized_path_key(self.input_image_edit.text().strip())
+        self._crop_source_face_factor = self.advanced_dialog.face_factor_edit.value()
         # Flag that these are rough preview crops — the PS1 wrapper must re-crop
         # with face-crop-plus for proper alignment when the user clicks Run.
         self._inprocess_preview_crops = True
@@ -7190,8 +7198,32 @@ Write-Output "OK"
         except Exception as e:
             self.log_box.append(f"Timing log write failed: {e}")
 
-    def _reset_wrapper_runtime_tracking(self):
-        self.current_crop_output_dir = None
+    def _can_reuse_existing_crops(self, input_path_key):
+        """Check if valid face-crop-plus crops exist for the given input image."""
+        if not self.current_crop_output_dir:
+            return False
+        if self._inprocess_preview_crops:
+            # Preview crops from quick probe are not production quality
+            return False
+        if self._crop_source_input_key != input_path_key:
+            # Crops belong to a different input image
+            return False
+        # If face_factor (crop expansion) changed, crops must be regenerated
+        if self._crop_source_face_factor is not None:
+            current_ff = self.advanced_dialog.face_factor_edit.value()
+            if abs(current_ff - self._crop_source_face_factor) > 1e-6:
+                return False
+        crop_dir = Path(self.current_crop_output_dir)
+        if not crop_dir.is_dir():
+            return False
+        crop_files = self._list_image_files_in_dir(crop_dir)
+        return len(crop_files) > 0
+
+    def _reset_wrapper_runtime_tracking(self, preserve_crop_dir=False):
+        if not preserve_crop_dir:
+            self.current_crop_output_dir = None
+            self._crop_source_input_key = None
+            self._crop_source_face_factor = None
         self.current_gfpgan_output_dir = None
         self.current_blended_faces_dir = None
         self.current_results_dir = None
@@ -7270,8 +7302,12 @@ Write-Output "OK"
             QTimer.singleShot(0, self.continue_rephoto_with_selected_faces)
             return
 
+        # Restore previous face selections if this was a re-crop (expansion change)
+        reselect = self._pending_face_reselection
+        self._pending_face_reselection = None
         for entry in self.face_preview_entries:
-            entry["selected"] = False
+            idx = entry.get("index")
+            entry["selected"] = (reselect is not None and idx in reselect)
             entry["status"] = "queued"
 
         self.awaiting_face_selection = True
@@ -7516,9 +7552,18 @@ Write-Output "OK"
         self.selection_preprocess_mode = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.set_input_detect_overlay(False)
-        self.awaiting_face_selection = False
-        self.set_run_button_continue_mode(False)
         self.current_run_summary_context = None
+
+        # Re-enable face selection if crops still exist so the user can
+        # pick additional or different faces for another run.
+        has_face_entries = len(self.face_preview_entries) > 1
+        if has_face_entries and self.current_crop_output_dir:
+            self.awaiting_face_selection = True
+            self.set_run_button_continue_mode(True)
+            self.render_face_preview_strip()
+        else:
+            self.awaiting_face_selection = False
+            self.set_run_button_continue_mode(False)
 
         self.process = None
         self.set_controls_for_running(False)
@@ -7555,9 +7600,18 @@ Write-Output "OK"
             launch_error=str(process_error),
         )
         self.selection_preprocess_mode = False
-        self.awaiting_face_selection = False
-        self.set_run_button_continue_mode(False)
         self.current_run_summary_context = None
+
+        # Re-enable face selection if crops still exist.
+        has_face_entries = len(self.face_preview_entries) > 1
+        if has_face_entries and self.current_crop_output_dir:
+            self.awaiting_face_selection = True
+            self.set_run_button_continue_mode(True)
+            self.render_face_preview_strip()
+        else:
+            self.awaiting_face_selection = False
+            self.set_run_button_continue_mode(False)
+
         self.process = None
         self.set_controls_for_running(False)
         self.run_started_at = None
@@ -7656,6 +7710,108 @@ Write-Output "OK"
         current_key = self._normalized_path_key(str(input_image_path))
         self.auto_detect_faces_armed_input = None
 
+        # ----------------------------------------------------------
+        # Check if we can reuse existing crops from a previous run
+        # ----------------------------------------------------------
+        reuse_crops = (
+            not self.advanced_dialog.crop_only_checkbox.isChecked()
+            and self._can_reuse_existing_crops(current_key)
+        )
+
+        if reuse_crops:
+            quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
+            crop_dir = Path(self.current_crop_output_dir)
+            crop_files = self._list_image_files_in_dir(crop_dir)
+            crop_count = len(crop_files)
+            is_multi_face = (crop_count > 1) or (quick_count is not None and quick_count > 1)
+
+            self.log_box.append(f"Reusing {crop_count} existing crop(s) — skipping face detection and cropping.")
+
+            if is_multi_face:
+                # Multi-face: show the face selection UI using existing crops,
+                # then the user clicks Run again to continue_rephoto_with_selected_faces
+                self.stop_quick_face_probe()
+                self.set_input_detect_overlay(False)
+                self.clear_result_stage_overlay()
+                self.reset_progress_bars()
+                self.current_run_summary_context = self._capture_run_context()
+                self.current_run_phase = "preprocess"
+                self.selection_preprocess_mode = False
+                self.suppress_preprocess_ui_until_rephoto = False
+                self._inprocess_preview_crops = False
+                self._prepare_face_selection_after_preprocess()
+                return
+
+            # Single-face: skip straight to enhancement with -UseExistingCrops
+            self.stop_quick_face_probe()
+            self.set_input_detect_overlay(False)
+            self.clear_result_stage_overlay()
+            self.reset_progress_bars()
+            self.reset_face_preview_state(preserve_input_overlays=False)
+            self.current_run_summary_context = self._capture_run_context()
+            self.current_run_phase = "preprocess"
+            self.awaiting_face_selection = False
+            self.selection_preprocess_mode = False
+            self.suppress_preprocess_ui_until_rephoto = False
+            self.set_run_button_continue_mode(False)
+
+            self._reset_wrapper_runtime_tracking(preserve_crop_dir=True)
+            self._prepare_stop_flag_for_new_run()
+            self.set_preprocess_progress(100, "Crops reused")
+            self.set_rephoto_progress(0, "Starting...")
+            command = self.build_wrapper_command(
+                force_use_existing_crops=True,
+            )
+
+            self.log_box.append("Run button clicked — reusing existing crops.")
+            self._start_wrapper_process(command, "Status: Running enhancement (crops reused)...")
+            return
+
+        # ----------------------------------------------------------
+        # Re-crop only: same image, but crop expansion changed (multi-face)
+        # Face-crop-plus re-detects internally but it's fast; skip the
+        # "Detecting Faces" overlay and preserve previous face selections.
+        # ----------------------------------------------------------
+        recrop_only = (
+            not self.advanced_dialog.crop_only_checkbox.isChecked()
+            and self.current_crop_output_dir
+            and not self._inprocess_preview_crops
+            and self._crop_source_input_key == current_key
+            and self._crop_source_face_factor is not None
+            and abs(self.advanced_dialog.face_factor_edit.value() - self._crop_source_face_factor) > 1e-6
+            and len(self.face_preview_entries) > 1
+        )
+
+        if recrop_only:
+            # Save previous face selections to restore after re-crop
+            prev_selected = set(self.get_selected_face_indices())
+            self._pending_face_reselection = prev_selected if prev_selected else None
+
+            self.stop_quick_face_probe()
+            self.set_input_detect_overlay(False)
+            self.clear_result_stage_overlay()
+            self.reset_progress_bars()
+            self.current_run_summary_context = self._capture_run_context()
+            self.current_run_phase = "preprocess"
+            self.awaiting_face_selection = False
+            self.selection_preprocess_mode = True   # so process_finished routes to selection UI
+            self.suppress_preprocess_ui_until_rephoto = False  # no "Detecting Faces" overlay
+            self.set_run_button_continue_mode(False)
+
+            self._reset_wrapper_runtime_tracking()  # clear stale crop dir for fresh crops
+            self._prepare_stop_flag_for_new_run()
+            self.set_preprocess_progress(5, "Re-cropping faces...")
+            self.set_rephoto_progress(0, "Waiting...")
+
+            command = self.build_wrapper_command(force_crop_only=True)
+
+            self.log_box.append("Run button clicked — re-cropping with new expansion factor.")
+            self._start_wrapper_process(command, "Status: Re-cropping faces...")
+            return
+
+        # ----------------------------------------------------------
+        # Normal flow: run face detection + cropping from scratch
+        # ----------------------------------------------------------
         self.stop_quick_face_probe()
         self.set_input_detect_overlay(False)
         self.clear_result_stage_overlay()
