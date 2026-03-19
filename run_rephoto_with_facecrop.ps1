@@ -414,7 +414,8 @@ Write-Host ""
 Write-Host "Cropped face count: $($CropFiles.Count)"
 Write-Host ""
 
-$TotalSteps = if ($CropOnly) { 1 } else { 2 + $CropFiles.Count }
+# Batch mode: 1 crop step + 1 pre-flight/GFPGAN step + 1 batch rephoto step
+$TotalSteps = if ($CropOnly) { 1 } else { 3 }
 $CurrentStep = 1
 
 Write-Progress -Activity "run_rephoto_with_facecrop" `
@@ -608,149 +609,114 @@ if (-not (Test-Path -LiteralPath $EncoderCkptPath)) {
     throw "Encoder checkpoint not found: $EncoderCkptPath"
 }
 
-if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
-    throw "Projector script not found: $ProjectorScriptPath"
+$BatchScriptPathCheck = Join-Path $RepoRoot "projector_batch.py"
+if (-not (Test-Path -LiteralPath $BatchScriptPathCheck)) {
+    # Fall back to original projector.py check for error messaging
+    if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
+        throw "Projector script not found: $ProjectorScriptPath"
+    }
+    throw "Batch projector script not found: $BatchScriptPathCheck"
 }
 
 Write-Host "Encoder checkpoint: OK"
-Write-Host "Projector script: OK"
+Write-Host "Batch projector script: OK"
 Write-Host ""
 
-# Run projector on each crop in the rephoto environment.
+# Build batch manifest JSON for projector_batch.py
+$BatchManifestEntries = @()
+$CropOrdinal = 0
+foreach ($Crop in $CropFiles) {
+    $CropOrdinal++
+    $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
+    $ThisResultDir = Join-Path $ResultRoot ("face_{0:D3}_p{1}" -f $CropOrdinal, $Preset)
+
+    $ProjectorImagePath = $Crop.FullName
+    if ($UseGFPGAN) {
+        $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
+        if (-not (Test-Path -LiteralPath $BlendedCandidate)) {
+            throw "Expected GFPGAN blended face not found: $BlendedCandidate"
+        }
+        $ProjectorImagePath = $BlendedCandidate
+    }
+
+    New-Item -ItemType Directory -Path $ThisResultDir -Force | Out-Null
+    $BatchManifestEntries += @{ input = $ProjectorImagePath; results_dir = $ThisResultDir }
+}
+
+$BatchManifestJson = Join-Path $ResultRoot "batch_manifest.json"
+# Force array serialization even for a single face (ConvertTo-Json unwraps 1-element arrays)
+ConvertTo-Json -InputObject @($BatchManifestEntries) -Depth 3 | Set-Content -LiteralPath $BatchManifestJson -Encoding UTF8
+Write-Host "Batch manifest: $BatchManifestJson ($($BatchManifestEntries.Count) face(s))"
+Write-Host ""
+
+# Build optional optimization flags
+$ProjectorOptArgs = @()
+if ($UseAMP) {
+    $ProjectorOptArgs += "--use_amp"
+}
+if ($EarlyStopPatience -gt 0) {
+    $ProjectorOptArgs += @("--early_stop_patience", $EarlyStopPatience)
+    $ProjectorOptArgs += @("--early_stop_min_delta", $EarlyStopMinDelta)
+}
+if ($LRDecay -gt 0) {
+    $ProjectorOptArgs += @("--lr_decay", $LRDecay)
+}
+
+$ProjectorStopFlagArgs = @()
+$ProjectorPauseFlagArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($StopFlagPath)) {
+    $ProjectorStopFlagArgs = @("--stop_flag", $StopFlagPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($PauseFlagPath)) {
+    $ProjectorPauseFlagArgs = @("--pause_flag", $PauseFlagPath)
+}
+
+$BatchScriptPath = Join-Path $RepoRoot "projector_batch.py"
+
+# Run batch projector — loads models once, processes all faces sequentially.
 Push-Location -LiteralPath $RepoRoot
 try {
-    $CropOrdinal = 0
-    foreach ($Crop in $CropFiles) {
-        $PauseAnnounced = $false
-        while (-not [string]::IsNullOrWhiteSpace($PauseFlagPath) -and (Test-Path -LiteralPath $PauseFlagPath)) {
-            if (-not $PauseAnnounced) {
-                Write-Host "=== Pause requested ==="
-                $PauseAnnounced = $true
-            }
-            Start-Sleep -Milliseconds 250
-            if (-not [string]::IsNullOrWhiteSpace($StopFlagPath) -and (Test-Path -LiteralPath $StopFlagPath)) {
-                break
-            }
-        }
-        if ($PauseAnnounced) {
-            Write-Host "=== Resume requested ==="
-        }
+    $CurrentStep++
+    Write-Progress -Activity "run_rephoto_with_facecrop" `
+        -Status "Rephoto batch: $($CropFiles.Count) face(s)" `
+        -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
 
-        if (-not [string]::IsNullOrWhiteSpace($StopFlagPath) -and (Test-Path -LiteralPath $StopFlagPath)) {
-            Write-Host "Early-stop flag detected. Ending run early."
-            break
-        }
+    $RephotoStart = [System.Diagnostics.Stopwatch]::StartNew()
 
-        $CropOrdinal++
-        $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
-        # Keep per-face result folder names short to avoid Windows path-length failures.
-        $ThisResultDir = Join-Path $ResultRoot ("face_{0:D3}_p{1}" -f $CropOrdinal, $Preset)
+    conda run --no-capture-output -n $RephotoEnvName python -u $BatchScriptPath `
+        --manifest $BatchManifestJson `
+        --encoder_ckpt $EncoderCkptPath `
+        --encoder_size 256 `
+        --e4e_ckpt checkpoint/e4e_ffhq_encode.pt `
+        --e4e_size 256 `
+        --mix_layer_range $MixLayerStart $MixLayerEnd `
+        --coarse_min 32 `
+        --color_transfer $ColorTransfer `
+        --contextual $Contextual `
+        --cx_layers relu3_4 relu2_2 relu1_2 `
+        --eye $Eye `
+        --gaussian $Gaussian `
+        --spectral_sensitivity $SpectralSensitivity `
+        --recon_size 256 `
+        --vgg $VGG `
+        --vggface $VGGFace `
+        --lr $LR `
+        --noise_strength 0.0 `
+        --noise_ramp 0.75 `
+        --noise_regularize $NoiseRegularize `
+        --camera_lr $CameraLR `
+        --log_freq 10 `
+        --log_visual_freq 1000 `
+        --wplus_step $W1 $W2 `
+        $ProjectorStopFlagArgs `
+        $ProjectorPauseFlagArgs `
+        $ProjectorOptArgs
 
-        $ProjectorImagePath = $Crop.FullName
-        $ProjectorStopFlagArgs = @()
-        $ProjectorPauseFlagArgs = @()
-        if (-not [string]::IsNullOrWhiteSpace($StopFlagPath)) {
-            $ProjectorStopFlagArgs = @("--stop_flag", $StopFlagPath)
-        }
-        if (-not [string]::IsNullOrWhiteSpace($PauseFlagPath)) {
-            $ProjectorPauseFlagArgs = @("--pause_flag", $PauseFlagPath)
-        }
+    $RephotoStart.Stop()
+    Write-Host "=== Batch rephoto elapsed: $([math]::Round($RephotoStart.Elapsed.TotalSeconds, 1))s ==="
 
-        if ($UseGFPGAN) {
-            $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
-            if (-not (Test-Path -LiteralPath $BlendedCandidate)) {
-                throw "Expected GFPGAN blended face not found: $BlendedCandidate"
-            }
-            $ProjectorImagePath = $BlendedCandidate
-        }
-
-        New-Item -ItemType Directory -Path $ThisResultDir -Force | Out-Null
-
-        $CurrentStep++
-        Write-Progress -Activity "run_rephoto_with_facecrop" `
-            -Status "Rephoto crop $CurrentStep of $TotalSteps" `
-            -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
-
-        Write-Host "=== Rephoto step ==="
-        Write-Host "Crop: $($Crop.FullName)"
-        Write-Host "Results: $ThisResultDir"
-        Write-Host ""
-
-        $RephotoStart = [System.Diagnostics.Stopwatch]::StartNew()
-
-        # Build optional optimization flags
-        $ProjectorOptArgs = @()
-        if ($UseAMP) {
-            $ProjectorOptArgs += "--use_amp"
-        }
-        if ($EarlyStopPatience -gt 0) {
-            $ProjectorOptArgs += @("--early_stop_patience", $EarlyStopPatience)
-            $ProjectorOptArgs += @("--early_stop_min_delta", $EarlyStopMinDelta)
-        }
-        if ($LRDecay -gt 0) {
-            $ProjectorOptArgs += @("--lr_decay", $LRDecay)
-        }
-
-        conda run --no-capture-output -n $RephotoEnvName python -u $ProjectorScriptPath `
-            $ProjectorImagePath `
-            --encoder_ckpt $EncoderCkptPath `
-            --encoder_size 256 `
-            --e4e_ckpt checkpoint/e4e_ffhq_encode.pt `
-            --e4e_size 256 `
-            --mix_layer_range $MixLayerStart $MixLayerEnd `
-            --coarse_min 32 `
-            --color_transfer $ColorTransfer `
-            --contextual $Contextual `
-            --cx_layers relu3_4 relu2_2 relu1_2 `
-            --eye $Eye `
-            --gaussian $Gaussian `
-            --spectral_sensitivity $SpectralSensitivity `
-            --recon_size 256 `
-            --vgg $VGG `
-            --vggface $VGGFace `
-            --lr $LR `
-            --noise_strength 0.0 `
-            --noise_ramp 0.75 `
-            --noise_regularize $NoiseRegularize `
-            --camera_lr $CameraLR `
-            --log_freq 10 `
-            --log_visual_freq 1000 `
-            --wplus_step $W1 $W2 `
-            --results_dir $ThisResultDir `
-            $ProjectorStopFlagArgs `
-            $ProjectorPauseFlagArgs `
-            $ProjectorOptArgs
-
-        $RephotoStart.Stop()
-        Write-Host "=== Rephoto crop elapsed: $([math]::Round($RephotoStart.Elapsed.TotalSeconds, 1))s ==="
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "projector.py failed for crop: $($Crop.Name)"
-        }
-
-        $FinalPng = Get-ChildItem -LiteralPath $ThisResultDir -File -Filter "*.png" |
-            Where-Object {
-                $_.Name -notmatch '(-init|-rand)\.png$' -and
-                $_.Name -notmatch '_g\.png$'
-            } |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-
-        if ($null -ne $FinalPng) {
-            $SimpleFinal = Join-Path $ThisResultDir "final.png"
-            try {
-                Copy-Item -LiteralPath $FinalPng.FullName -Destination $SimpleFinal -Force
-                Write-Host "Simple final copy: $SimpleFinal"
-            }
-            catch {
-                Write-Warning "Simple final copy failed (non-fatal): $($_.Exception.Message)"
-            }
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($StopFlagPath) -and (Test-Path -LiteralPath $StopFlagPath)) {
-            Write-Host "Early-stop flag acknowledged. Finishing run now."
-            break
-        }
+    if ($LASTEXITCODE -ne 0) {
+        throw "projector_batch.py failed (exit code $LASTEXITCODE)"
     }
 }
 finally {
