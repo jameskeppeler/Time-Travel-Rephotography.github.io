@@ -150,6 +150,27 @@ class NoScrollComboBox(QComboBox):
         event.ignore()
 
 
+class NoScrollDoubleSpinBox(QDoubleSpinBox):
+    """QDoubleSpinBox variant that ignores wheel motion to prevent accidental changes."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoScrollSpinBox(QSpinBox):
+    """QSpinBox variant that ignores wheel motion to prevent accidental changes."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
+class NoScrollSlider(QSlider):
+    """QSlider variant that ignores wheel motion to prevent accidental changes."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class FaceStripToolButton(QToolButton):
     """Filmstrip card button that exposes lightweight hover callbacks."""
 
@@ -612,25 +633,25 @@ class AdvancedSettingsDialog(QDialog):
         self.use_gfpgan_checkbox = QCheckBox("Disable enhancement (GFPGAN)")
         self.use_gfpgan_checkbox.toggled.connect(self.update_enhancement_controls)
 
-        self.det_threshold_edit = QDoubleSpinBox()
+        self.det_threshold_edit = NoScrollDoubleSpinBox()
         self.det_threshold_edit.setRange(0.0, 1.0)
         self.det_threshold_edit.setSingleStep(0.01)
         self.det_threshold_edit.setDecimals(2)
         self.det_threshold_edit.setValue(0.90)
 
-        self.face_factor_edit = QDoubleSpinBox()
+        self.face_factor_edit = NoScrollDoubleSpinBox()
         self.face_factor_edit.setRange(0.10, 2.00)
         self.face_factor_edit.setSingleStep(0.01)
         self.face_factor_edit.setDecimals(2)
         self.face_factor_edit.setValue(DEFAULT_FACE_FACTOR)
 
-        self.gfpgan_blend_edit = QDoubleSpinBox()
+        self.gfpgan_blend_edit = NoScrollDoubleSpinBox()
         self.gfpgan_blend_edit.setRange(0.0, 1.0)
         self.gfpgan_blend_edit.setSingleStep(0.01)
         self.gfpgan_blend_edit.setDecimals(2)
         self.gfpgan_blend_edit.setValue(0.45)
 
-        self.gaussian_edit = QDoubleSpinBox()
+        self.gaussian_edit = NoScrollDoubleSpinBox()
         self.gaussian_edit.setRange(0.0, 5.0)
         self.gaussian_edit.setSingleStep(0.05)
         self.gaussian_edit.setDecimals(2)
@@ -656,29 +677,29 @@ class AdvancedSettingsDialog(QDialog):
         self.vgg_appearance_combo.addItems(["Off", "Lower", "Default", "Higher"])
         self.vgg_appearance_combo.setCurrentText("Default")
 
-        self.noise_regularize_edit = QDoubleSpinBox()
+        self.noise_regularize_edit = NoScrollDoubleSpinBox()
         self.noise_regularize_edit.setRange(0.0, 1000000.0)
         self.noise_regularize_edit.setSingleStep(1000.0)
         self.noise_regularize_edit.setDecimals(1)
         self.noise_regularize_edit.setValue(50000.0)
 
-        self.lr_edit = QDoubleSpinBox()
+        self.lr_edit = NoScrollDoubleSpinBox()
         self.lr_edit.setRange(0.0001, 10.0)
         self.lr_edit.setSingleStep(0.01)
         self.lr_edit.setDecimals(4)
         self.lr_edit.setValue(0.1)
 
-        self.camera_lr_edit = QDoubleSpinBox()
+        self.camera_lr_edit = NoScrollDoubleSpinBox()
         self.camera_lr_edit.setRange(0.0001, 1.0)
         self.camera_lr_edit.setSingleStep(0.001)
         self.camera_lr_edit.setDecimals(4)
         self.camera_lr_edit.setValue(0.01)
 
-        self.mix_layer_start_edit = QSpinBox()
+        self.mix_layer_start_edit = NoScrollSpinBox()
         self.mix_layer_start_edit.setRange(0, 18)
         self.mix_layer_start_edit.setValue(10)
 
-        self.mix_layer_end_edit = QSpinBox()
+        self.mix_layer_end_edit = NoScrollSpinBox()
         self.mix_layer_end_edit.setRange(0, 18)
         self.mix_layer_end_edit.setValue(18)
 
@@ -1790,7 +1811,7 @@ class MainWindow(QMainWindow):
         self.advanced_iter_values = DEFAULT_ADVANCED_ITER_VALUES
         self.iter_values = self.basic_iter_values
 
-        self.iter_slider = QSlider(Qt.Horizontal)
+        self.iter_slider = NoScrollSlider(Qt.Horizontal)
         self.advanced_mode_checkbox = QCheckBox("Advanced")
         self.advanced_mode_checkbox.setChecked(False)
         self.advanced_mode_checkbox.toggled.connect(self.update_iteration_mode)
@@ -2456,6 +2477,7 @@ class MainWindow(QMainWindow):
 
             self.content_layout.setDirection(QBoxLayout.LeftToRight)
             self.previews_splitter.setOrientation(Qt.Vertical)
+            self.previews_splitter.setHandleWidth(0)
             self.input_preview_label.setFixedSize(preview_side, preview_side)
             self.input_preview_label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
             self.result_preview_label.setFixedSize(preview_side, preview_side)
@@ -2479,6 +2501,7 @@ class MainWindow(QMainWindow):
             self._configure_face_preview_panel_for_mode(False)
             self.content_layout.setDirection(QBoxLayout.TopToBottom)
             self.previews_splitter.setOrientation(Qt.Horizontal)
+            self.previews_splitter.setHandleWidth(6)
             self.input_preview_label.setMinimumWidth(0)
             self.input_preview_label.setMaximumWidth(16777215)
             self.input_preview_label.setFixedHeight(300)
@@ -2846,8 +2869,6 @@ class MainWindow(QMainWindow):
             can_select = (not force_running)
         self.browse_button.setEnabled(can_select)
         self.input_image_edit.setEnabled(can_select)
-        if hasattr(self, "input_preview_label"):
-            self.input_preview_label.setEnabled(can_select)
 
     def set_controls_for_running(self, is_running):
         self.update_run_button_for_quick_face_hint()
