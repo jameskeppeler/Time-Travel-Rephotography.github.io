@@ -87,11 +87,17 @@ def normalize(img: torch.Tensor, mean=0.5, std=0.5):
     return (img - mean) / std
 
 
-def _load_checkpoint(path):
+def _default_map_location():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _load_checkpoint(path, map_location=None):
+    if map_location is None:
+        map_location = _default_map_location()
     try:
-        return torch.load(path, map_location="cpu", weights_only=True)
+        return torch.load(path, map_location=map_location, weights_only=True)
     except TypeError:
-        return torch.load(path, map_location="cpu")
+        return torch.load(path, map_location=map_location)
 
 
 def create_generator(args: Namespace, device: torch.device):
@@ -190,6 +196,10 @@ def main(args):
         init = Initializer(args).to(device)
         tlog.mark("encoder_loaded", gpu_mem_mb=_gpu_mem_mb())
         latent_init = init(imgs_orig)
+    # Free encoder memory — only needed for the single forward pass above.
+    del init
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     tlog.mark("latent_initialized", gpu_mem_mb=_gpu_mem_mb())
 
     # create generator

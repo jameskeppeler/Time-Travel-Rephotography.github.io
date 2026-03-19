@@ -70,12 +70,17 @@ class InitializerArguments:
 
 
 
+def _default_map_location():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def create_color_encoder(args: Namespace):
     encoder = Encoder(1, args.encoder_size, 512)
+    map_loc = _default_map_location()
     try:
-        ckpt = torch.load(args.encoder_ckpt, map_location="cpu", weights_only=True)
+        ckpt = torch.load(args.encoder_ckpt, map_location=map_loc, weights_only=True)
     except TypeError:
-        ckpt = torch.load(args.encoder_ckpt, map_location="cpu")
+        ckpt = torch.load(args.encoder_ckpt, map_location=map_loc)
     encoder.load_state_dict(ckpt["model"])
     return encoder
 

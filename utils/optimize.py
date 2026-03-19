@@ -107,6 +107,9 @@ class _EarlyStopTracker:
     def should_stop(self, loss_val: float) -> bool:
         if not self.enabled:
             return False
+        if not math.isfinite(loss_val):
+            # Diverged — stop immediately rather than waiting for patience
+            return True
         rel_improvement = (self.best_loss - loss_val) / max(abs(self.best_loss), 1e-12)
         if rel_improvement > self.min_delta:
             self.best_loss = loss_val
@@ -337,7 +340,9 @@ class Optimizer:
                     cls.log_losses(writer, niters, loss, losses, criterion.weights)
                     cls.log_parameters(writer, niters, degrade.named_parameters())
                 if writer is not None and niters % log_visual_freq == 0:
-                    cls.log_visuals(writer, niters, img_gen, target, degraded=degrade(img_gen), rgbs=rgbs)
+                    with torch.no_grad():
+                        degraded_vis = degrade(img_gen)
+                    cls.log_visuals(writer, niters, img_gen, target, degraded=degraded_vis, rgbs=rgbs)
 
             level_elapsed = time.perf_counter() - level_t0
             iters_per_sec = (si + 1) / max(level_elapsed, 0.001)

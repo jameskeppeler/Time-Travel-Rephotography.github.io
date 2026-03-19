@@ -1335,34 +1335,55 @@ class MainWindow(QMainWindow):
         if results_root:
             self.results_root_edit.setText(results_root)
 
-        # Advanced dialog values
+        # Advanced dialog values — guard against corrupted settings
+        def _safe_float(key, fallback=None):
+            try:
+                return float(data[key])
+            except (KeyError, TypeError, ValueError):
+                return fallback
+
+        def _safe_int(key, fallback=None):
+            try:
+                return int(data[key])
+            except (KeyError, TypeError, ValueError):
+                return fallback
+
         if "enhancement_disabled" in data:
             dlg.use_gfpgan_checkbox.setChecked(bool(data["enhancement_disabled"]))
         elif "enhancement_enabled" in data:  # backward compat with old key (was semantically inverted)
             dlg.use_gfpgan_checkbox.setChecked(bool(data["enhancement_enabled"]))
-        if "gfpgan_blend" in data:
-            dlg.gfpgan_blend_edit.setValue(float(data["gfpgan_blend"]))
-        if "det_threshold" in data:
-            dlg.det_threshold_edit.setValue(float(data["det_threshold"]))
-        if "face_factor" in data:
-            dlg.face_factor_edit.setValue(float(data["face_factor"]))
-        if "gaussian" in data:
-            dlg.gaussian_edit.setValue(float(data["gaussian"]))
+        v = _safe_float("gfpgan_blend")
+        if v is not None:
+            dlg.gfpgan_blend_edit.setValue(v)
+        v = _safe_float("det_threshold")
+        if v is not None:
+            dlg.det_threshold_edit.setValue(v)
+        v = _safe_float("face_factor")
+        if v is not None:
+            dlg.face_factor_edit.setValue(v)
+        v = _safe_float("gaussian")
+        if v is not None:
+            dlg.gaussian_edit.setValue(v)
         self._set_combo_if_present(dlg.identity_preservation_combo, data.get("identity_preservation", ""))
         self._set_combo_if_present(dlg.tonal_transfer_combo, data.get("tonal_transfer", ""))
         self._set_combo_if_present(dlg.eye_preservation_combo, data.get("eye_preservation", ""))
         self._set_combo_if_present(dlg.structure_matching_combo, data.get("structure_matching", ""))
         self._set_combo_if_present(dlg.vgg_appearance_combo, data.get("vgg_appearance", ""))
-        if "noise_regularize" in data:
-            dlg.noise_regularize_edit.setValue(float(data["noise_regularize"]))
-        if "lr" in data:
-            dlg.lr_edit.setValue(float(data["lr"]))
-        if "camera_lr" in data:
-            dlg.camera_lr_edit.setValue(float(data["camera_lr"]))
-        if "mix_layer_start" in data:
-            dlg.mix_layer_start_edit.setValue(int(data["mix_layer_start"]))
-        if "mix_layer_end" in data:
-            dlg.mix_layer_end_edit.setValue(int(data["mix_layer_end"]))
+        v = _safe_float("noise_regularize")
+        if v is not None:
+            dlg.noise_regularize_edit.setValue(v)
+        v = _safe_float("lr")
+        if v is not None:
+            dlg.lr_edit.setValue(v)
+        v = _safe_float("camera_lr")
+        if v is not None:
+            dlg.camera_lr_edit.setValue(v)
+        v = _safe_int("mix_layer_start")
+        if v is not None:
+            dlg.mix_layer_start_edit.setValue(v)
+        v = _safe_int("mix_layer_end")
+        if v is not None:
+            dlg.mix_layer_end_edit.setValue(v)
 
         self.update_spectral_sensitivity_ui()
         self.update_iteration_label()
