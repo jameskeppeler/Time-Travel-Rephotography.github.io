@@ -669,6 +669,9 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setDecimals(2)
         self.gfpgan_blend_edit.setValue(0.45)
 
+        self.recomposite_original_image_checkbox = QCheckBox("Recomposite Original Image")
+        self.recomposite_original_image_checkbox.setChecked(False)
+
         self.gaussian_edit = NoScrollDoubleSpinBox()
         self.gaussian_edit.setRange(0.0, 5.0)
         self.gaussian_edit.setSingleStep(0.05)
@@ -742,6 +745,13 @@ class AdvancedSettingsDialog(QDialog):
                 "Controls how strongly the enhancement result is blended into the face crop. Lower values preserve more of the original image; higher values use more of the enhanced result."
             ),
             self.gfpgan_blend_edit,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Recomposite Original Image",
+                "After rephotography, blend the processed face back into the original image using Photoshop-style Color blend (preserves original luminance with new hue/saturation)."
+            ),
+            self.recomposite_original_image_checkbox,
         )
         core_form.addRow(
             self.make_label_with_info(
@@ -3968,6 +3978,9 @@ class MainWindow(QMainWindow):
                     "-GFPGANBlend",
                     f"{blend_value:.2f}",
                 ])
+
+            if self.advanced_dialog.recomposite_original_image_checkbox.isChecked():
+                command.append("-RecompositeOriginalImage")
 
         return command
 

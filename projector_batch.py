@@ -8,6 +8,7 @@ the input image path and per-face results directory.  All other arguments
 (loss weights, learning rate, etc.) are shared across faces.
 """
 from argparse import ArgumentParser, Namespace
+import cv2
 import json
 import os
 from os.path import join as pjoin
@@ -23,6 +24,7 @@ if torch.cuda.is_available():
     torch.backends.cudnn.benchmark = True
 
 from losses.joint_loss import JointLoss
+from utils.color_blend import color_blend
 from projector import (
     TimingLog,
     compact_run_tag,
@@ -166,6 +168,7 @@ def _build_parser() -> ArgumentParser:
     parser.add_argument("--stop_flag", type=str, default="", help="optional file path; if created, batch ends early")
     parser.add_argument("--pause_flag", type=str, default="", help="optional file path; if present, batch pauses")
     parser.add_argument('--rand_seed', type=int, default=None, help="random seed")
+    parser.add_argument("--recomposite_original_image", action="store_true", default=False, help="after rephoto, blend final face back into original using Color blend mode")
 
     ProjectorArguments.add_stylegan_args(parser)
     ProjectorArguments.add_preprocess_args(parser)
@@ -267,6 +270,36 @@ def main():
                 print(f"Simple final copy: {dst}", flush=True)
         except Exception as e:
             print(f"Warning: Simple final copy failed (non-fatal): {e}", flush=True)
+
+        # Recomposite final face back into original image if requested
+        if hasattr(args, "recomposite_original_image") and args.recomposite_original_image:
+            try:
+                final_path = pjoin(results_dir, "final.png")
+                if os.path.exists(final_path) and os.path.exists(input_path):
+                    original_img = cv2.imread(input_path)
+                    final_img = cv2.imread(final_path)
+                    if original_img is not None and final_img is not None:
+                        # Approximate face box from crop path (assume square crop at center)
+                        crop_h, crop_w = final_img.shape[:2]
+                        img_h, img_w = original_img.shape[:2]
+                        x = max(0, (img_w - crop_w) // 2)
+                        y = max(0, (img_h - crop_h) // 2)
+                        bbox = (x, y, crop_w, crop_h)
+
+                        recomposed = color_blend(original_img, final_img)
+                        # Blend only within bbox to avoid recompositing the full crop outside its bounds
+                        recomposed_full = original_img.copy()
+                        actual_w = min(crop_w, img_w - x)
+                        actual_h = min(crop_h, img_h - y)
+                        if actual_w > 0 and actual_h > 0:
+                            recomposed_roi = recomposed[y:y+actual_h, x:x+actual_w]
+                            recomposed_full[y:y+actual_h, x:x+actual_w] = recomposed_roi
+
+                        recompose_path = pjoin(results_dir, "recomposited.png")
+                        cv2.imwrite(recompose_path, recomposed_full)
+                        print(f"Recomposited image: {recompose_path}", flush=True)
+            except Exception as e:
+                print(f"Warning: Recomposite failed (non-fatal): {e}", flush=True)
 
         if _check_stop_flag(stop_path):
             print("Early-stop flag acknowledged. Finishing batch now.", flush=True)

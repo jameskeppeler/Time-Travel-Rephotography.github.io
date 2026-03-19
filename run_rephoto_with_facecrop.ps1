@@ -23,6 +23,7 @@
     [switch]$RequireSelection,
 
     [switch]$UseGFPGAN,
+    [switch]$RecompositeOriginalImage,
 
     [ValidateSet("1.3", "1.4")]
     [string]$GFPGANVersion = "1.3",
@@ -710,7 +711,8 @@ try {
         --wplus_step $W1 $W2 `
         $ProjectorStopFlagArgs `
         $ProjectorPauseFlagArgs `
-        $ProjectorOptArgs
+        $ProjectorOptArgs `
+        $(if ($RecompositeOriginalImage) { "--recomposite_original_image" } else { "" })
 
     $RephotoStart.Stop()
     Write-Host "=== Batch rephoto elapsed: $([math]::Round($RephotoStart.Elapsed.TotalSeconds, 1))s ==="
