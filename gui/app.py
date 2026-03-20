@@ -2574,8 +2574,8 @@ class MainWindow(QMainWindow):
             self.content_layout.addWidget(self.controls_container, 0)
 
         self._apply_mode_layout_profile(use_wide_layout)
-        if self.face_preview_entries:
-            self.render_face_preview_strip()
+        # Always render filmstrip to show placeholders even when empty
+        self.render_face_preview_strip()
         self.refresh_input_preview_scale()
         self.refresh_result_preview_scale()
         self.position_input_detect_overlay()
@@ -5678,8 +5678,8 @@ Write-Output "OK"
             # Still ensure filmstrip is visible even if signature matches
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
-            self.face_preview_header.setVisible(bool(entries))
-            self.face_preview_strip_scroll.setVisible(bool(entries))
+            self.face_preview_header.setVisible(True)
+            self.face_preview_strip_scroll.setVisible(True)
             return
 
         self.clear_face_preview_strip_layout()
