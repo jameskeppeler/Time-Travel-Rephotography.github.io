@@ -171,21 +171,24 @@ class NoScrollSlider(QSlider):
 
 
 class FilmstripContainerWidget(QWidget):
-    """Widget that paints sprocket holes along the top and bottom to look like
-    a real film strip.  When ``show_empty_frames`` is True it also paints
-    empty film frames across the full width so the strip looks like continuous
-    unexposed film — no child widgets needed for the empty state."""
+    """Widget that paints sprocket holes and empty film frames.
 
-    SPROCKET_BAND = 12        # height of each sprocket row (top / bottom)
-    FILM_BASE     = "#22272e" # matches app dark-panel background
-    SPROCKET_BG   = "#1c2028" # slightly darker band
-    HOLE_COLOR    = "#2e343d" # punched-out hole fill (lighter than band)
-    FRAME_BG      = "#191d23" # empty frame fill
-    FRAME_BORDER  = "#2a3038" # empty frame border
+    Supports both horizontal (default) and vertical orientation.  When
+    ``show_empty_frames`` is True, empty square frames are painted across
+    the full extent of the strip so it looks like continuous unexposed film.
+    """
+
+    SPROCKET_BAND = 12
+    FILM_BASE     = "#22272e"
+    SPROCKET_BG   = "#1c2028"
+    HOLE_COLOR    = "#2e343d"
+    FRAME_BG      = "#191d23"
+    FRAME_BORDER  = "#2a3038"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.show_empty_frames = True
+        self.vertical = False  # True when filmstrip runs top-to-bottom
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -193,39 +196,64 @@ class FilmstripContainerWidget(QWidget):
         w, h = self.width(), self.height()
         band = self.SPROCKET_BAND
 
-        # Fill entire background with film base
         p.fillRect(0, 0, w, h, QColor(self.FILM_BASE))
 
-        # Top and bottom sprocket bands
+        if self.vertical:
+            self._paint_vertical(p, w, h, band)
+        else:
+            self._paint_horizontal(p, w, h, band)
+
+        p.end()
+
+    # -- horizontal (sprockets top/bottom, frames left→right) ---------------
+
+    def _paint_horizontal(self, p, w, h, band):
         p.fillRect(0, 0, w, band, QColor(self.SPROCKET_BG))
         p.fillRect(0, h - band, w, band, QColor(self.SPROCKET_BG))
 
-        # Draw sprocket holes — evenly spaced, starting near 0 so they
-        # look like they continue off both edges of the window
-        hole_w, hole_h = 8, 5
-        hole_radius = 1.5
-        spacing = 20
+        hole_w, hole_h, radius, spacing = 8, 5, 1.5, 20
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(QColor(self.HOLE_COLOR)))
         x = 6
         while x < w:
-            p.drawRoundedRect(x, (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
-            p.drawRoundedRect(x, h - band + (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
+            p.drawRoundedRect(x, (band - hole_h) // 2, hole_w, hole_h, radius, radius)
+            p.drawRoundedRect(x, h - band + (band - hole_h) // 2, hole_w, hole_h, radius, radius)
             x += spacing
 
-        # Paint empty film frames edge-to-edge when no faces are loaded
         if self.show_empty_frames:
-            frame_h = h - band * 2
-            frame_w = int(frame_h * 0.72)
+            frame_size = h - band * 2  # square
             gap = 4
             p.setPen(QPen(QColor(self.FRAME_BORDER), 1))
             p.setBrush(QBrush(QColor(self.FRAME_BG)))
             fx = 0
             while fx < w:
-                p.drawRect(fx, band, frame_w, frame_h)
-                fx += frame_w + gap
+                p.drawRect(fx, band, frame_size, frame_size)
+                fx += frame_size + gap
 
-        p.end()
+    # -- vertical (sprockets left/right, frames top→bottom) -----------------
+
+    def _paint_vertical(self, p, w, h, band):
+        p.fillRect(0, 0, band, h, QColor(self.SPROCKET_BG))
+        p.fillRect(w - band, 0, band, h, QColor(self.SPROCKET_BG))
+
+        hole_w, hole_h, radius, spacing = 5, 8, 1.5, 20
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(self.HOLE_COLOR)))
+        y = 6
+        while y < h:
+            p.drawRoundedRect((band - hole_w) // 2, y, hole_w, hole_h, radius, radius)
+            p.drawRoundedRect(w - band + (band - hole_w) // 2, y, hole_w, hole_h, radius, radius)
+            y += spacing
+
+        if self.show_empty_frames:
+            frame_size = w - band * 2  # square
+            gap = 4
+            p.setPen(QPen(QColor(self.FRAME_BORDER), 1))
+            p.setBrush(QBrush(QColor(self.FRAME_BG)))
+            fy = 0
+            while fy < h:
+                p.drawRect(band, fy, frame_size, frame_size)
+                fy += frame_size + gap
 
 
 class FaceStripToolButton(QToolButton):
@@ -2282,9 +2310,9 @@ class MainWindow(QMainWindow):
         self.face_preview_strip_filmstrip.setMinimumHeight(filmstrip_h)
         self.face_preview_strip_filmstrip.setMaximumHeight(filmstrip_h)
 
-        filmstrip_inner = QVBoxLayout(self.face_preview_strip_filmstrip)
-        filmstrip_inner.setContentsMargins(0, sprocket_band, 0, sprocket_band)
-        filmstrip_inner.setSpacing(0)
+        self.filmstrip_inner_layout = QVBoxLayout(self.face_preview_strip_filmstrip)
+        self.filmstrip_inner_layout.setContentsMargins(0, sprocket_band, 0, sprocket_band)
+        self.filmstrip_inner_layout.setSpacing(0)
 
         self.face_preview_strip_scroll = QScrollArea()
         self.face_preview_strip_scroll.setWidgetResizable(True)
@@ -2297,7 +2325,7 @@ class MainWindow(QMainWindow):
             "QScrollBar::handle:horizontal { background: #3d4450; border-radius: 2px; min-width: 30px; }"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         )
-        filmstrip_inner.addWidget(self.face_preview_strip_scroll)
+        self.filmstrip_inner_layout.addWidget(self.face_preview_strip_scroll)
 
         self.face_preview_strip_container = QWidget()
         self.face_preview_strip_container.setStyleSheet("background: transparent;")
@@ -2516,6 +2544,7 @@ class MainWindow(QMainWindow):
             return
 
         filmstrip_h = 142
+        band = FilmstripContainerWidget.SPROCKET_BAND
         if use_wide_layout:
             card_w = self._get_face_strip_card_width(True)
             panel_w = card_w + 34
@@ -2526,6 +2555,8 @@ class MainWindow(QMainWindow):
             self.face_preview_strip_filmstrip.setMaximumHeight(16777215)
             self.face_preview_strip_filmstrip.setMinimumWidth(panel_w - 8)
             self.face_preview_strip_filmstrip.setMaximumWidth(panel_w)
+            self.face_preview_strip_filmstrip.vertical = True
+            self.filmstrip_inner_layout.setContentsMargins(band, 0, band, 0)
             self.face_preview_panel.setMinimumWidth(panel_w)
             self.face_preview_panel.setMaximumWidth(panel_w)
             self.face_preview_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -2538,6 +2569,8 @@ class MainWindow(QMainWindow):
             self.face_preview_strip_filmstrip.setMaximumHeight(filmstrip_h)
             self.face_preview_strip_filmstrip.setMinimumWidth(0)
             self.face_preview_strip_filmstrip.setMaximumWidth(16777215)
+            self.face_preview_strip_filmstrip.vertical = False
+            self.filmstrip_inner_layout.setContentsMargins(0, band, 0, band)
             self.face_preview_panel.setMinimumWidth(0)
             self.face_preview_panel.setMaximumWidth(16777215)
             self.face_preview_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)

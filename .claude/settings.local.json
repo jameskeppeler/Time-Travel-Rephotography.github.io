@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(python -m unittest tests.test_color_blend -v)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\(''gui/app.py''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
+      "Bash(python -m py_compile gui/app.py)",
+      "Bash(python -m py_compile utils/optimize.py)",
+      "Bash(python -m py_compile c:/Users/james/Projects/Time-Travel-Rephotography.github.io/gui/app.py)"
+    ]
+  }
+}
