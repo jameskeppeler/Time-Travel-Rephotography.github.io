@@ -5691,12 +5691,53 @@ Write-Output "OK"
             self.face_preview_summary_label.setText("Faces: none")
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
-            # Keep filmstrip visible even when empty
+            # Keep filmstrip visible even when empty - show placeholder cards
             self.face_preview_header.setVisible(True)
             self.face_preview_strip_scroll.setVisible(True)
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
+
+            # Render placeholder cards to show waiting state
+            card_w = self._get_face_strip_card_width(wide_mode)
+            thumb_size = max(72, min(104, card_w - 24))
+            card_h = thumb_size + (50 if wide_mode else 42)
+
+            if wide_mode:
+                self.face_preview_strip_layout.addStretch(1)
+
+            # Show 4 placeholder cards
+            for i in range(4):
+                button = FaceStripToolButton()
+                button.setCheckable(False)
+                button.setEnabled(False)
+                button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+                button.setIconSize(QSize(thumb_size, thumb_size))
+                button.setFixedSize(card_w, card_h)
+                button.setFont(QFont("Segoe UI", 8))
+                button.setText(f"Face {i + 1}\nWaiting...")
+
+                # Create a gray placeholder icon
+                placeholder_pixmap = QPixmap(thumb_size, thumb_size)
+                placeholder_pixmap.fill(QColor("#2a3139"))
+                button.setIcon(QIcon(placeholder_pixmap))
+
+                # Gray disabled style
+                button.setStyleSheet(FaceStripToolButton.get_stylesheet(
+                    border_color="#3a4450",
+                    bg_color="#1a1e25",
+                    text_color="#5a6370",
+                    hover_color="#1a1e25"
+                ))
+
+                if wide_mode:
+                    self.face_preview_strip_layout.addWidget(button, 0, Qt.AlignHCenter)
+                else:
+                    self.face_preview_strip_layout.addWidget(button)
+
+            if wide_mode:
+                self.face_preview_strip_layout.addStretch(1)
+
             return
 
         # Consolidate counts into a single loop instead of N+1 iterations
