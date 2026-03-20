@@ -1777,6 +1777,7 @@ class MainWindow(QMainWindow):
         self.hover_face_box_override = None
         self.hover_face_box_cache = {}
         self.quick_face_count_estimate = None
+        self._no_faces_detected = False
         self.current_wide_preview_side = 360
         self.quick_face_probe_process = None
         self.quick_face_probe_token = 0
@@ -4467,6 +4468,7 @@ class MainWindow(QMainWindow):
                 widget.deleteLater()
 
     def reset_face_preview_state(self, preserve_input_overlays=False):
+        self._no_faces_detected = False
         self.face_preview_entries = []
         self.active_face_preview_index = None
         self.selected_face_preview_index = None
@@ -5635,6 +5637,7 @@ Write-Output "OK"
             self.hover_face_box_override = None
 
     def initialize_face_preview_entries(self, expected_count=None):
+        self._no_faces_detected = False
         crop_files = self.collect_current_crop_files()
         if expected_count is None:
             expected_count = len(crop_files)
@@ -5819,6 +5822,18 @@ Write-Output "OK"
             self._face_strip_render_signature = render_signature
             self.face_preview_strip_filmstrip.show_empty_frames = True
             self.face_preview_strip_filmstrip.update()
+
+            # Show a notice inside the filmstrip when detection found no faces
+            if self._no_faces_detected:
+                notice = QLabel("No faces detected.\nPlease try another image.")
+                notice.setAlignment(Qt.AlignCenter)
+                notice.setStyleSheet(
+                    "color: #aeb4be; background: transparent; font-size: 12px; padding: 8px;"
+                )
+                self.face_preview_strip_layout.addWidget(notice)
+                self.face_preview_strip_filmstrip.show_empty_frames = False
+                self.face_preview_strip_filmstrip.update()
+
             return
 
         # Consolidate counts into a single loop instead of N+1 iterations
@@ -7668,6 +7683,8 @@ Write-Output "OK"
         self.set_preprocess_progress(0, "Preprocess ready")
         self.set_rephoto_progress(0, "Waiting...")
         if crop_count <= 0:
+            self._no_faces_detected = True
+            self.render_face_preview_strip()
             self.log_box.append("No detected faces were found after preprocessing.")
             self.status_label.setText("Status: No faces detected")
             self.clear_result_stage_overlay()
