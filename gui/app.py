@@ -172,12 +172,20 @@ class NoScrollSlider(QSlider):
 
 class FilmstripContainerWidget(QWidget):
     """Widget that paints sprocket holes along the top and bottom to look like
-    a real film strip.  Child widgets (the scroll area) sit in the centre."""
+    a real film strip.  When ``show_empty_frames`` is True it also paints
+    empty film frames across the full width so the strip looks like continuous
+    unexposed film — no child widgets needed for the empty state."""
 
     SPROCKET_BAND = 12        # height of each sprocket row (top / bottom)
     FILM_BASE     = "#22272e" # matches app dark-panel background
     SPROCKET_BG   = "#1c2028" # slightly darker band
     HOLE_COLOR    = "#2e343d" # punched-out hole fill (lighter than band)
+    FRAME_BG      = "#191d23" # empty frame fill
+    FRAME_BORDER  = "#2a3038" # empty frame border
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.show_empty_frames = True
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -192,7 +200,7 @@ class FilmstripContainerWidget(QWidget):
         p.fillRect(0, 0, w, band, QColor(self.SPROCKET_BG))
         p.fillRect(0, h - band, w, band, QColor(self.SPROCKET_BG))
 
-        # Draw sprocket holes — evenly spaced, starting from 0 so they
+        # Draw sprocket holes — evenly spaced, starting near 0 so they
         # look like they continue off both edges of the window
         hole_w, hole_h = 8, 5
         hole_radius = 1.5
@@ -204,6 +212,18 @@ class FilmstripContainerWidget(QWidget):
             p.drawRoundedRect(x, (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
             p.drawRoundedRect(x, h - band + (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
             x += spacing
+
+        # Paint empty film frames edge-to-edge when no faces are loaded
+        if self.show_empty_frames:
+            frame_h = h - band * 2
+            frame_w = int(frame_h * 0.72)
+            gap = 4
+            p.setPen(QPen(QColor(self.FRAME_BORDER), 1))
+            p.setBrush(QBrush(QColor(self.FRAME_BG)))
+            fx = 0
+            while fx < w:
+                p.drawRect(fx, band, frame_w, frame_h)
+                fx += frame_w + gap
 
         p.end()
 
@@ -5754,10 +5774,8 @@ Write-Output "OK"
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
-
-            # Fill the entire strip with empty frames
-            self._render_filmstrip_empty_frames(wide_mode)
-
+            self.face_preview_strip_filmstrip.show_empty_frames = True
+            self.face_preview_strip_filmstrip.update()
             return
 
         # Consolidate counts into a single loop instead of N+1 iterations
@@ -5788,6 +5806,10 @@ Write-Output "OK"
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
         self.face_preview_summary_label.setText(summary)
+
+        # Faces loaded — hide the painted empty frames, show real buttons
+        self.face_preview_strip_filmstrip.show_empty_frames = False
+        self.face_preview_strip_filmstrip.update()
 
         # Always show the filmstrip, even with single face
         if hasattr(self, "face_preview_panel"):
@@ -5886,39 +5908,6 @@ Write-Output "OK"
 
         self.face_preview_strip_layout.addStretch(1)
         self._face_strip_render_signature = render_signature
-
-    def _render_filmstrip_empty_frames(self, wide_mode, count=None):
-        """Fill the strip with empty frames so it looks like continuous film."""
-        # Remove all margins so frames go edge to edge
-        self.face_preview_strip_layout.setContentsMargins(0, 0, 0, 0)
-        gap = 4
-        self.face_preview_strip_layout.setSpacing(gap)
-
-        sprocket = FilmstripContainerWidget.SPROCKET_BAND
-        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2
-        frame_h = max(40, avail_h)
-        # Slightly narrower than tall — like real 35mm film frames
-        frame_w = int(frame_h * 0.72)
-
-        if count is None:
-            strip_w = self.face_preview_strip_filmstrip.width()
-            if strip_w < 100:
-                strip_w = 1400
-            count = max(10, (strip_w // (frame_w + gap)) + 2)
-
-        for _ in range(count):
-            frame = QLabel()
-            frame.setFixedSize(frame_w, frame_h)
-            frame.setStyleSheet(
-                "QLabel {"
-                "  background-color: #191d23;"
-                "  border: 1px solid #2a3038;"
-                "}"
-            )
-            if wide_mode:
-                self.face_preview_strip_layout.addWidget(frame, 0, Qt.AlignHCenter)
-            else:
-                self.face_preview_strip_layout.addWidget(frame)
 
     def set_hover_face_preview_index(self, face_index, source="strip"):
         idx = face_index
