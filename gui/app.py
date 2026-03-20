@@ -3299,6 +3299,10 @@ class MainWindow(QMainWindow):
 
         dlg = self.advanced_dialog
 
+        # Sync advanced dialog's iteration slider with main window's basic preset
+        current_basic_value = int(self.iter_values[self.iter_slider.value()])
+        dlg.set_iteration_value(current_basic_value)
+
         old_identity_preservation = dlg.identity_preservation_combo.currentText()
         old_tonal = dlg.tonal_transfer_combo.currentText()
         old_noise_regularize = dlg.noise_regularize_edit.value()
@@ -3324,6 +3328,9 @@ class MainWindow(QMainWindow):
         old_spectral = self.spectral_sensitivity_combo.currentText()
 
         if dlg.exec() == QDialog.Accepted:
+            # Sync advanced dialog's iteration value back to main window's basic slider
+            advanced_iter_value = dlg.get_iteration_value()
+            self._set_iteration_from_value(advanced_iter_value)
             self.update_mode_controls()
             self.update_runtime_label()
             self.log_box.append("Advanced settings updated.")
@@ -3359,8 +3366,12 @@ class MainWindow(QMainWindow):
     # Runtime estimation / hardware
     # ------------------------------
     def get_selected_preset_value(self):
-        """Get the selected iteration value from advanced settings."""
-        return self.advanced_dialog.get_iteration_value()
+        """Get the selected iteration value.
+
+        Uses the basic mode slider value, which the advanced dialog syncs with
+        when it's opened/closed.
+        """
+        return int(self.iter_values[self.iter_slider.value()])
 
     def get_identity_preservation_value(self):
         preset = self.advanced_dialog.identity_preservation_combo.currentText()
