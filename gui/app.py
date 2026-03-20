@@ -5775,6 +5775,7 @@ Write-Output "OK"
             bool(selection_mode),
             bool(is_processing),
             bool(wide_mode),
+            bool(self._no_faces_detected),
             int(card_w),
             selected_idx,
             active_idx,
