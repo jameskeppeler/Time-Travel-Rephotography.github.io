@@ -5810,6 +5810,10 @@ Write-Output "OK"
             # Keep selected faces first once continuation starts.
             display_entries = sorted(entries, key=lambda e: (not bool(e.get("selected", False)), e["index"]))
 
+        # Restore margins for populated filmstrip
+        self.face_preview_strip_layout.setContentsMargins(4, 2, 4, 2)
+        self.face_preview_strip_layout.setSpacing(5)
+
         # Compute frame size to fill area between sprocket bands
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
         avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
@@ -5880,18 +5884,21 @@ Write-Output "OK"
 
     def _render_filmstrip_empty_frames(self, wide_mode, count=None):
         """Fill the strip with empty frames so it looks like continuous film."""
+        # Remove all margins so frames go edge to edge
+        self.face_preview_strip_layout.setContentsMargins(0, 0, 0, 0)
+        self.face_preview_strip_layout.setSpacing(5)
+
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
-        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
+        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2
         frame_h = max(60, avail_h)
         frame_w = frame_h  # square frames
-        gap = 6
+        gap = 5  # matches spacing
 
         if count is None:
-            # Fill the visible width with frames (+ extra to bleed off edges)
             strip_w = self.face_preview_strip_filmstrip.width()
             if strip_w < 100:
-                strip_w = 800  # fallback before first layout
-            count = max(6, (strip_w // (frame_w + gap)) + 2)
+                strip_w = 1200  # generous fallback before first layout
+            count = max(8, (strip_w // (frame_w + gap)) + 2)
 
         for _ in range(count):
             frame = QLabel()
