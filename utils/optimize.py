@@ -13,7 +13,6 @@ from typing import (
 import os
 import time
 import numpy as np
-from tqdm import tqdm
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -49,7 +48,7 @@ class OptimizerArguments:
         parser.add_argument("--log_dir", default="log/projector", help="tensorboard log directory")
         parser.add_argument("--log_freq", type=int, default=10, help="log frequency")
         parser.add_argument("--log_visual_freq", type=int, default=50, help="log frequency")
-        parser.add_argument("--progress_freq", type=int, default=10, help="tqdm description refresh interval")
+        parser.add_argument("--progress_freq", type=int, default=10, help="loss update print frequency (iterations)")
 
         # ── New optimization flags ────────────────────────────────
         parser.add_argument("--use_amp", action="store_true", default=False,
@@ -261,8 +260,9 @@ class Optimizer:
                                 resolution=f"{coarse_size}x{coarse_size}",
                                 steps=steps, use_amp=use_amp)
 
-            pbar = tqdm(range(steps))
-            for si in pbar:
+            for si in range(steps):
+                # Simple iteration counter (no fancy progress bar)
+                print(f"{si+1}/{steps}", flush=True)
                 if not wait_if_paused():
                     break
                 if should_stop_early():
@@ -324,7 +324,7 @@ class Optimizer:
                                             coarse_level=coarse_level)
                         break
 
-                # Refreshing tqdm text less often avoids frequent GPU->CPU sync for .item().
+                # Print losses periodically (avoids frequent GPU->CPU sync for .item()).
                 if si % progress_freq == 0 or si == (steps - 1):
                     desc_parts = []
                     for k, v in losses.items():
@@ -334,7 +334,7 @@ class Optimizer:
                             continue
                         desc_parts.append(f"{k}: {scalar_v: .3e}")
                     if desc_parts:
-                        pbar.set_description("; ".join(desc_parts))
+                        print("; ".join(desc_parts), flush=True)
 
                 if writer is not None and niters % log_freq == 0:
                     cls.log_losses(writer, niters, loss, losses, criterion.weights)
