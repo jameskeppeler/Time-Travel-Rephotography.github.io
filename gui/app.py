@@ -171,11 +171,16 @@ class NoScrollSlider(QSlider):
 
 
 class FilmstripContainerWidget(QWidget):
-    """Widget that paints sprocket holes and empty film frames.
+    """Widget that paints sprocket holes and decorative borders for the filmstrip.
 
     Supports both horizontal (default) and vertical orientation.  When
     ``show_empty_frames`` is True, empty square frames are painted across
     the full extent of the strip so it looks like continuous unexposed film.
+
+    NOTE: Empty frames are painted across the full visible area. When populated
+    with face buttons, the scroll area handles scrolling naturally — we only
+    paint decorative borders, not frame boundaries, so the sprocket edges stay
+    visually consistent.
     """
 
     SPROCKET_BAND = 12
@@ -2575,6 +2580,8 @@ class MainWindow(QMainWindow):
             self.face_preview_panel.setMaximumWidth(16777215)
             self.face_preview_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
             self.face_preview_auto_follow_checkbox.setText("Auto-follow latest")
+        # Invalidate render signature to force re-render of face buttons with new dimensions
+        self._face_strip_render_signature = None
 
     def _get_face_strip_card_width(self, wide_mode):
         if not wide_mode:
@@ -5876,7 +5883,8 @@ Write-Output "OK"
 
         # Compute frame size to fill area between sprocket bands
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
-        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
+        # Reserve extra space for scroll bar (5px) to prevent unwanted scrolling in populated filmstrip
+        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4 - 5
         if wide_mode:
             card_w = self._get_face_strip_card_width(wide_mode)
         else:
@@ -6378,10 +6386,27 @@ Write-Output "OK"
 
         entry = self.face_preview_entries[idx]
         preview_path = entry.get("result_path")
-        if preview_path is None:
-            crop_path = entry.get("crop_path")
-            if crop_path is not None:
-                preview_path = self._resolve_enhanced_preview_for_crop(Path(crop_path)) or crop_path
+
+        # Prefer result_path if it exists (the enhanced version)
+        if preview_path is not None:
+            p = Path(preview_path)
+            if p.exists():
+                return p
+            # If result_path was set but file doesn't exist, still prefer it over crop
+            # (it may be in progress or the file may be temporarily unavailable)
+            # Only fall through if file truly doesn't exist
+
+        # Fall back to crop path or enhanced version of crop
+        crop_path = entry.get("crop_path")
+        if crop_path is not None:
+            # Only check for enhanced version if we don't already have a result_path set
+            if preview_path is None:
+                enhanced = self._resolve_enhanced_preview_for_crop(Path(crop_path))
+                if enhanced is not None:
+                    preview_path = enhanced
+            if preview_path is None:
+                preview_path = crop_path
+
         if preview_path is None:
             return None
         p = Path(preview_path)
