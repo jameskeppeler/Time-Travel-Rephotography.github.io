@@ -5883,14 +5883,18 @@ Write-Output "OK"
 
         # Compute frame size to fill area between sprocket bands
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
-        # Reserve extra space for scroll bar (5px) to prevent unwanted scrolling in populated filmstrip
-        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4 - 5
         if wide_mode:
+            # In wide mode (vertical filmstrip): make cards square so all faces fit and scroll
             card_w = self._get_face_strip_card_width(wide_mode)
+            card_h = card_w  # Square cards in vertical layout
+            thumb_size = max(48, card_w - 8)
         else:
+            # In stacked mode (horizontal filmstrip): fill the available height
+            # Reserve extra space for scroll bar (5px) to prevent unwanted scrolling
+            avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4 - 5
             card_w = max(88, avail_h)
-        thumb_size = max(48, card_w - 8)
-        card_h = avail_h
+            card_h = avail_h
+            thumb_size = max(48, card_w - 8)
 
         if wide_mode:
             self.face_preview_strip_layout.addStretch(1)
