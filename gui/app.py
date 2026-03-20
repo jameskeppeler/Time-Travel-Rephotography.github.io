@@ -2329,6 +2329,9 @@ class MainWindow(QMainWindow):
             "QScrollBar:horizontal { height: 5px; background: #1c2028; }"
             "QScrollBar::handle:horizontal { background: #3d4450; border-radius: 2px; min-width: 30px; }"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
+            "QScrollBar:vertical { width: 5px; background: #1c2028; }"
+            "QScrollBar::handle:vertical { background: #3d4450; border-radius: 2px; min-height: 30px; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         )
         self.filmstrip_inner_layout.addWidget(self.face_preview_strip_scroll)
 
