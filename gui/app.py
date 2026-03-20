@@ -4068,9 +4068,8 @@ class MainWindow(QMainWindow):
                     "-GFPGANBlend",
                     f"{blend_value:.2f}",
                 ])
-
-            if self.advanced_dialog.recomposite_original_image_checkbox.isChecked():
-                command.append("-RecompositeOriginalImage")
+            # Recomposite is always enabled (checkbox was removed as redundant)
+            command.append("-RecompositeOriginalImage")
 
         return command
 
