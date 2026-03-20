@@ -5908,8 +5908,9 @@ Write-Output "OK"
             thumb_size = max(48, card_w - 8)
         else:
             # In stacked mode (horizontal filmstrip): fill the available height
-            # Reserve extra space for scroll bar (5px) to prevent unwanted scrolling
-            avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4 - 5
+            # Deduct: sprocket bands (x2), layout margins (top+bottom=4), scrollbar (5),
+            # and extra safety (4) to prevent sub-pixel rounding from triggering scroll
+            avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4 - 5 - 4
             card_w = max(88, avail_h)
             card_h = avail_h
             thumb_size = max(48, card_w - 8)
