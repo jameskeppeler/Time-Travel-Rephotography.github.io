@@ -170,12 +170,49 @@ class NoScrollSlider(QSlider):
         event.ignore()
 
 
-class FaceStripToolButton(QToolButton):
-    """Filmstrip card button that exposes lightweight hover callbacks."""
+class FilmstripContainerWidget(QWidget):
+    """Widget that paints sprocket holes along the top and bottom to look like
+    a real film strip.  Child widgets (the scroll area) sit in the centre."""
 
-    # Stylesheet cache to avoid regenerating for every button
+    SPROCKET_BAND = 14        # height of each sprocket row (top / bottom)
+    FILM_BASE     = "#1b1d21" # dark film-base colour
+    SPROCKET_BG   = "#111316" # band behind the holes
+    HOLE_COLOR    = "#2c3038" # punched-out hole fill
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        band = self.SPROCKET_BAND
+
+        # Fill entire background with film base
+        p.fillRect(0, 0, w, h, QColor(self.FILM_BASE))
+
+        # Top and bottom sprocket bands
+        p.fillRect(0, 0, w, band, QColor(self.SPROCKET_BG))
+        p.fillRect(0, h - band, w, band, QColor(self.SPROCKET_BG))
+
+        # Draw sprocket holes
+        hole_w, hole_h = 8, 6
+        hole_radius = 2
+        spacing = 18
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(QColor(self.HOLE_COLOR)))
+        x = 8
+        while x + hole_w < w:
+            # top holes – centred in band
+            p.drawRoundedRect(x, (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
+            # bottom holes
+            p.drawRoundedRect(x, h - band + (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
+            x += spacing
+
+        p.end()
+
+
+class FaceStripToolButton(QToolButton):
+    """Filmstrip frame button that exposes lightweight hover callbacks."""
+
     _stylesheet_cache = {}
-    # Track currently hovered button globally to avoid expensive widget tree queries
     _currently_hovered = None
 
     def __init__(self, *args, **kwargs):
@@ -186,14 +223,14 @@ class FaceStripToolButton(QToolButton):
 
     @staticmethod
     def get_stylesheet(border_color, bg_color, text_color, hover_color):
-        """Get stylesheet from cache or generate once."""
         key = (border_color, bg_color, text_color, hover_color)
         if key not in FaceStripToolButton._stylesheet_cache:
             FaceStripToolButton._stylesheet_cache[key] = (
                 "QToolButton {"
-                f" border: 1px solid {border_color}; border-radius: 5px;"
+                f" border: 1px solid {border_color};"
                 f" background-color: {bg_color}; color: {text_color}; padding: 2px; }}"
-                f"QToolButton:hover {{ background-color: {hover_color}; }}"
+                f"QToolButton:hover {{ background-color: {hover_color};"
+                f" border: 1px solid {border_color}; }}"
                 "QToolButton:checked { background-color: #1f2630; }"
             )
         return FaceStripToolButton._stylesheet_cache[key]
@@ -2219,19 +2256,34 @@ class MainWindow(QMainWindow):
         face_header_layout.addWidget(self.face_preview_auto_follow_checkbox, 0, Qt.AlignVCenter)
         self.face_preview_header.setFixedHeight(22)
 
+        # --- Filmstrip widget (sprocket-hole chrome wrapping a scroll area) ---
+        sprocket_band = FilmstripContainerWidget.SPROCKET_BAND
+        filmstrip_h = 142
+        self.face_preview_strip_filmstrip = FilmstripContainerWidget()
+        self.face_preview_strip_filmstrip.setMinimumHeight(filmstrip_h)
+        self.face_preview_strip_filmstrip.setMaximumHeight(filmstrip_h)
+
+        filmstrip_inner = QVBoxLayout(self.face_preview_strip_filmstrip)
+        filmstrip_inner.setContentsMargins(0, sprocket_band, 0, sprocket_band)
+        filmstrip_inner.setSpacing(0)
+
         self.face_preview_strip_scroll = QScrollArea()
         self.face_preview_strip_scroll.setWidgetResizable(True)
         self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.face_preview_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.face_preview_strip_scroll.setMinimumHeight(142)
-        self.face_preview_strip_scroll.setMaximumHeight(142)
         self.face_preview_strip_scroll.setStyleSheet(
-            "QScrollArea { border: 1px solid #565c66; border-radius: 4px; background: #1f2329; }"
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+            "QScrollBar:horizontal { height: 6px; background: #111316; }"
+            "QScrollBar::handle:horizontal { background: #3a4450; border-radius: 3px; min-width: 30px; }"
+            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         )
+        filmstrip_inner.addWidget(self.face_preview_strip_scroll)
 
         self.face_preview_strip_container = QWidget()
+        self.face_preview_strip_container.setStyleSheet("background: transparent;")
         self.face_preview_strip_layout = QHBoxLayout()
-        self.face_preview_strip_layout.setContentsMargins(6, 6, 6, 6)
+        self.face_preview_strip_layout.setContentsMargins(8, 2, 8, 2)
         self.face_preview_strip_layout.setSpacing(6)
         self.face_preview_strip_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.face_preview_strip_container.setLayout(self.face_preview_strip_layout)
@@ -2242,7 +2294,7 @@ class MainWindow(QMainWindow):
 
         # Filmstrip is always visible (shows empty state when no image loaded)
         self.face_preview_header.setVisible(True)
-        self.face_preview_strip_scroll.setVisible(True)
+        self.face_preview_strip_filmstrip.setVisible(True)
 
         result_buttons_row = QHBoxLayout()
         result_buttons_row.setContentsMargins(0, 0, 0, 0)
@@ -2296,7 +2348,7 @@ class MainWindow(QMainWindow):
         self.face_selection_notice_label.setVisible(False)
         face_panel_layout.addWidget(self.face_selection_notice_label)
         face_panel_layout.addWidget(self.face_preview_header)
-        face_panel_layout.addWidget(self.face_preview_strip_scroll)
+        face_panel_layout.addWidget(self.face_preview_strip_filmstrip)
         # Filmstrip panel is always visible
         self.face_preview_panel.setVisible(True)
         previews_layout.addWidget(self.face_preview_panel)
@@ -2444,16 +2496,17 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "face_preview_panel"):
             return
 
+        filmstrip_h = 142
         if use_wide_layout:
             card_w = self._get_face_strip_card_width(True)
             panel_w = card_w + 34
             self.face_preview_strip_layout.setDirection(QBoxLayout.TopToBottom)
             self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.face_preview_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            self.face_preview_strip_scroll.setMinimumHeight(0)
-            self.face_preview_strip_scroll.setMaximumHeight(16777215)
-            self.face_preview_strip_scroll.setMinimumWidth(panel_w - 8)
-            self.face_preview_strip_scroll.setMaximumWidth(panel_w)
+            self.face_preview_strip_filmstrip.setMinimumHeight(0)
+            self.face_preview_strip_filmstrip.setMaximumHeight(16777215)
+            self.face_preview_strip_filmstrip.setMinimumWidth(panel_w - 8)
+            self.face_preview_strip_filmstrip.setMaximumWidth(panel_w)
             self.face_preview_panel.setMinimumWidth(panel_w)
             self.face_preview_panel.setMaximumWidth(panel_w)
             self.face_preview_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
@@ -2462,10 +2515,10 @@ class MainWindow(QMainWindow):
             self.face_preview_strip_layout.setDirection(QBoxLayout.LeftToRight)
             self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.face_preview_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            self.face_preview_strip_scroll.setMinimumHeight(142)
-            self.face_preview_strip_scroll.setMaximumHeight(142)
-            self.face_preview_strip_scroll.setMinimumWidth(0)
-            self.face_preview_strip_scroll.setMaximumWidth(16777215)
+            self.face_preview_strip_filmstrip.setMinimumHeight(filmstrip_h)
+            self.face_preview_strip_filmstrip.setMaximumHeight(filmstrip_h)
+            self.face_preview_strip_filmstrip.setMinimumWidth(0)
+            self.face_preview_strip_filmstrip.setMaximumWidth(16777215)
             self.face_preview_panel.setMinimumWidth(0)
             self.face_preview_panel.setMaximumWidth(16777215)
             self.face_preview_panel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
@@ -4364,7 +4417,7 @@ class MainWindow(QMainWindow):
         self.clear_face_preview_strip_layout()
         # Keep filmstrip visible even when reset (shows empty state)
         self.face_preview_header.setVisible(True)
-        self.face_preview_strip_scroll.setVisible(True)
+        self.face_preview_strip_filmstrip.setVisible(True)
         if hasattr(self, "face_preview_panel"):
             self.face_preview_panel.setVisible(True)
         self.set_run_button_continue_mode(False)
@@ -5679,7 +5732,7 @@ Write-Output "OK"
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
             self.face_preview_header.setVisible(True)
-            self.face_preview_strip_scroll.setVisible(True)
+            self.face_preview_strip_filmstrip.setVisible(True)
             return
 
         self.clear_face_preview_strip_layout()
@@ -5693,75 +5746,13 @@ Write-Output "OK"
                 self.face_selection_notice_label.setVisible(False)
             # Keep filmstrip visible even when empty - show placeholder cards
             self.face_preview_header.setVisible(True)
-            self.face_preview_strip_scroll.setVisible(True)
+            self.face_preview_strip_filmstrip.setVisible(True)
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
 
             # Render empty filmstrip frames as placeholders
-            card_w = self._get_face_strip_card_width(wide_mode)
-            thumb_size = max(72, min(104, card_w - 24))
-            card_h = thumb_size + (50 if wide_mode else 42)
-
-            if wide_mode:
-                self.face_preview_strip_layout.addStretch(1)
-
-            for i in range(4):
-                button = FaceStripToolButton()
-                button.setCheckable(False)
-                button.setEnabled(False)
-                button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-                button.setIconSize(QSize(thumb_size, thumb_size))
-                button.setFixedSize(card_w, card_h)
-                button.setFont(QFont("Segoe UI", 8))
-                button.setText("")
-
-                # Draw an empty filmstrip frame
-                pm = QPixmap(thumb_size, thumb_size)
-                pm.fill(QColor(0, 0, 0, 0))
-                p = QPainter(pm)
-                p.setRenderHint(QPainter.Antialiasing)
-                frame_color = QColor("#3a4450")
-                # Outer frame border
-                p.setPen(QPen(frame_color, 1.5))
-                p.setBrush(QBrush(QColor("#1a1e25")))
-                p.drawRoundedRect(2, 2, thumb_size - 4, thumb_size - 4, 4, 4)
-                # Sprocket holes along top and bottom edges
-                hole_color = QColor("#2a3139")
-                p.setPen(Qt.NoPen)
-                p.setBrush(QBrush(hole_color))
-                hole_w, hole_h = 6, 4
-                hole_y_top = 5
-                hole_y_bot = thumb_size - 5 - hole_h
-                spacing = (thumb_size - 12) / 5
-                for h in range(5):
-                    hx = int(6 + h * spacing)
-                    p.drawRoundedRect(hx, hole_y_top, hole_w, hole_h, 1, 1)
-                    p.drawRoundedRect(hx, hole_y_bot, hole_w, hole_h, 1, 1)
-                # Inner empty frame area with dashed border
-                inner_margin = 14
-                inner_rect = QRect(inner_margin, inner_margin,
-                                   thumb_size - inner_margin * 2,
-                                   thumb_size - inner_margin * 2)
-                dash_pen = QPen(QColor("#4a5466"), 1, Qt.DashLine)
-                p.setPen(dash_pen)
-                p.setBrush(Qt.NoBrush)
-                p.drawRect(inner_rect)
-                p.end()
-
-                button.setIcon(QIcon(pm))
-                button.setStyleSheet(
-                    "QToolButton { border: none; background: transparent; }"
-                    "QToolButton:disabled { background: transparent; }"
-                )
-
-                if wide_mode:
-                    self.face_preview_strip_layout.addWidget(button, 0, Qt.AlignHCenter)
-                else:
-                    self.face_preview_strip_layout.addWidget(button)
-
-            if wide_mode:
-                self.face_preview_strip_layout.addStretch(1)
+            self._render_filmstrip_empty_frames(wide_mode, count=5)
 
             return
 
@@ -5805,7 +5796,7 @@ Write-Output "OK"
         if hasattr(self, "face_preview_auto_follow_checkbox"):
             self.face_preview_auto_follow_checkbox.setVisible(not selection_mode)
         self.face_preview_header.setVisible(True)
-        self.face_preview_strip_scroll.setVisible(True)
+        self.face_preview_strip_filmstrip.setVisible(True)
 
         status_style_map = {
             "queued": "#3d4450",
@@ -5820,9 +5811,15 @@ Write-Output "OK"
             # Keep selected faces first once continuation starts.
             display_entries = sorted(entries, key=lambda e: (not bool(e.get("selected", False)), e["index"]))
 
-        card_w = self._get_face_strip_card_width(wide_mode)
-        thumb_size = max(72, min(104, card_w - 24))
-        card_h = thumb_size + (50 if wide_mode else 42)
+        # Compute frame size to fill area between sprocket bands
+        sprocket = FilmstripContainerWidget.SPROCKET_BAND
+        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
+        if wide_mode:
+            card_w = self._get_face_strip_card_width(wide_mode)
+        else:
+            card_w = max(88, avail_h)
+        thumb_size = max(48, card_w - 8)
+        card_h = avail_h
 
         if wide_mode:
             self.face_preview_strip_layout.addStretch(1)
@@ -5832,7 +5829,7 @@ Write-Output "OK"
             status = entry.get("status", "queued")
             is_selected = bool(entry.get("selected", False))
             if selection_mode:
-                label = "Selected" if is_selected else "Skipped"
+                label = "Selected" if is_selected else ""
             else:
                 label = status.capitalize()
             icon_path = entry.get("result_path") or entry.get("crop_path")
@@ -5845,24 +5842,25 @@ Write-Output "OK"
             button.setIconSize(QSize(thumb_size, thumb_size))
             button.setFixedSize(card_w, card_h)
             button.setCursor(Qt.PointingHandCursor)
-            button.setFont(QFont("Segoe UI", 8))
-            button.setText(f"Face {idx + 1}\n{label}")
+            button.setFont(QFont("Segoe UI", 7))
+            button.setText(f"{idx + 1}")
             button.setIcon(self._make_face_thumb_icon(icon_path, str(idx + 1), muted=is_muted, thumb_size=thumb_size))
-            if selection_mode:
-                accent = "#1f6fd9" if is_selected else "#525a66"
+
+            # Film-frame styling: no rounded corners, dark exposed-film look
+            if button.isChecked():
+                border = "#4a9eff"
+            elif selection_mode:
+                border = "#1f6fd9" if is_selected else "#2a2e35"
             else:
-                accent = status_style_map.get(status, "#3d4450")
-            border = "#1a73e8" if button.isChecked() else accent
+                border = status_style_map.get(status, "#2a2e35")
             if is_muted:
-                accent = "#3e4652"
-                border = accent if not button.isChecked() else "#5b6778"
-                text_color = "#748091"
-                bg_color = "#171b20"
-                hover_color = "#1b2026"
+                text_color = "#606878"
+                bg_color = "#0e1013"
+                hover_color = "#151820"
             else:
-                text_color = "#d6dbe3"
-                bg_color = "#232830"
-                hover_color = "#29303a"
+                text_color = "#c8cdd5"
+                bg_color = "#0e1013"
+                hover_color = "#1a1e28"
             button.setStyleSheet(FaceStripToolButton.get_stylesheet(border, bg_color, text_color, hover_color))
             if is_muted and (not selection_mode) and is_processing:
                 button.setEnabled(False)
@@ -5880,6 +5878,35 @@ Write-Output "OK"
 
         self.face_preview_strip_layout.addStretch(1)
         self._face_strip_render_signature = render_signature
+
+    def _render_filmstrip_empty_frames(self, wide_mode, count=5):
+        """Render empty film frames as placeholders in the filmstrip."""
+        frame_w = 88 if not wide_mode else max(72, self._get_face_strip_card_width(True) - 8)
+        frame_h = frame_w  # square frames
+        sprocket = FilmstripContainerWidget.SPROCKET_BAND
+        total_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
+        if total_h > 0:
+            frame_h = min(frame_w, total_h)
+
+        if wide_mode:
+            self.face_preview_strip_layout.addStretch(1)
+
+        for _ in range(count):
+            frame_label = QLabel()
+            frame_label.setFixedSize(frame_w, frame_h)
+            frame_label.setStyleSheet(
+                "QLabel {"
+                "  background-color: #0e1013;"
+                "  border: 1px solid #2a2e35;"
+                "}"
+            )
+            if wide_mode:
+                self.face_preview_strip_layout.addWidget(frame_label, 0, Qt.AlignHCenter)
+            else:
+                self.face_preview_strip_layout.addWidget(frame_label)
+
+        if wide_mode:
+            self.face_preview_strip_layout.addStretch(1)
 
     def set_hover_face_preview_index(self, face_index, source="strip"):
         idx = face_index
