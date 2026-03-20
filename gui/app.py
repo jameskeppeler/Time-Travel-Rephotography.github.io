@@ -5672,6 +5672,11 @@ Write-Output "OK"
             wide_mode=wide_mode,
         )
         if self._face_strip_render_signature == render_signature:
+            # Still ensure filmstrip is visible even if signature matches
+            if hasattr(self, "face_preview_panel"):
+                self.face_preview_panel.setVisible(True)
+            self.face_preview_header.setVisible(bool(entries))
+            self.face_preview_strip_scroll.setVisible(bool(entries))
             return
 
         self.clear_face_preview_strip_layout()
