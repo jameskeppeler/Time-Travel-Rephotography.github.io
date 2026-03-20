@@ -174,10 +174,10 @@ class FilmstripContainerWidget(QWidget):
     """Widget that paints sprocket holes along the top and bottom to look like
     a real film strip.  Child widgets (the scroll area) sit in the centre."""
 
-    SPROCKET_BAND = 14        # height of each sprocket row (top / bottom)
-    FILM_BASE     = "#1b1d21" # dark film-base colour
-    SPROCKET_BG   = "#111316" # band behind the holes
-    HOLE_COLOR    = "#2c3038" # punched-out hole fill
+    SPROCKET_BAND = 12        # height of each sprocket row (top / bottom)
+    FILM_BASE     = "#22272e" # matches app dark-panel background
+    SPROCKET_BG   = "#1c2028" # slightly darker band
+    HOLE_COLOR    = "#2e343d" # punched-out hole fill (lighter than band)
 
     def paintEvent(self, event):
         p = QPainter(self)
@@ -192,17 +192,16 @@ class FilmstripContainerWidget(QWidget):
         p.fillRect(0, 0, w, band, QColor(self.SPROCKET_BG))
         p.fillRect(0, h - band, w, band, QColor(self.SPROCKET_BG))
 
-        # Draw sprocket holes
-        hole_w, hole_h = 8, 6
-        hole_radius = 2
-        spacing = 18
+        # Draw sprocket holes — evenly spaced, starting from 0 so they
+        # look like they continue off both edges of the window
+        hole_w, hole_h = 8, 5
+        hole_radius = 1.5
+        spacing = 20
         p.setPen(Qt.NoPen)
         p.setBrush(QBrush(QColor(self.HOLE_COLOR)))
-        x = 8
-        while x + hole_w < w:
-            # top holes – centred in band
+        x = 6
+        while x < w:
             p.drawRoundedRect(x, (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
-            # bottom holes
             p.drawRoundedRect(x, h - band + (band - hole_h) // 2, hole_w, hole_h, hole_radius, hole_radius)
             x += spacing
 
@@ -2274,8 +2273,8 @@ class MainWindow(QMainWindow):
         self.face_preview_strip_scroll.setStyleSheet(
             "QScrollArea { border: none; background: transparent; }"
             "QScrollArea > QWidget > QWidget { background: transparent; }"
-            "QScrollBar:horizontal { height: 6px; background: #111316; }"
-            "QScrollBar::handle:horizontal { background: #3a4450; border-radius: 3px; min-width: 30px; }"
+            "QScrollBar:horizontal { height: 5px; background: #1c2028; }"
+            "QScrollBar::handle:horizontal { background: #3d4450; border-radius: 2px; min-width: 30px; }"
             "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }"
         )
         filmstrip_inner.addWidget(self.face_preview_strip_scroll)
@@ -2283,8 +2282,8 @@ class MainWindow(QMainWindow):
         self.face_preview_strip_container = QWidget()
         self.face_preview_strip_container.setStyleSheet("background: transparent;")
         self.face_preview_strip_layout = QHBoxLayout()
-        self.face_preview_strip_layout.setContentsMargins(8, 2, 8, 2)
-        self.face_preview_strip_layout.setSpacing(6)
+        self.face_preview_strip_layout.setContentsMargins(4, 2, 4, 2)
+        self.face_preview_strip_layout.setSpacing(5)
         self.face_preview_strip_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.face_preview_strip_container.setLayout(self.face_preview_strip_layout)
         self.face_preview_strip_container.setMouseTracking(True)
@@ -5846,21 +5845,21 @@ Write-Output "OK"
             button.setText(f"{idx + 1}")
             button.setIcon(self._make_face_thumb_icon(icon_path, str(idx + 1), muted=is_muted, thumb_size=thumb_size))
 
-            # Film-frame styling: no rounded corners, dark exposed-film look
+            # Frame styling matching app color scheme
             if button.isChecked():
                 border = "#4a9eff"
             elif selection_mode:
-                border = "#1f6fd9" if is_selected else "#2a2e35"
+                border = "#1f6fd9" if is_selected else "#2a3038"
             else:
-                border = status_style_map.get(status, "#2a2e35")
+                border = status_style_map.get(status, "#2a3038")
             if is_muted:
                 text_color = "#606878"
-                bg_color = "#0e1013"
-                hover_color = "#151820"
+                bg_color = "#191d23"
+                hover_color = "#1e2430"
             else:
                 text_color = "#c8cdd5"
-                bg_color = "#0e1013"
-                hover_color = "#1a1e28"
+                bg_color = "#191d23"
+                hover_color = "#232a35"
             button.setStyleSheet(FaceStripToolButton.get_stylesheet(border, bg_color, text_color, hover_color))
             if is_muted and (not selection_mode) and is_processing:
                 button.setEnabled(False)
@@ -5879,34 +5878,34 @@ Write-Output "OK"
         self.face_preview_strip_layout.addStretch(1)
         self._face_strip_render_signature = render_signature
 
-    def _render_filmstrip_empty_frames(self, wide_mode, count=5):
-        """Render empty film frames as placeholders in the filmstrip."""
-        frame_w = 88 if not wide_mode else max(72, self._get_face_strip_card_width(True) - 8)
-        frame_h = frame_w  # square frames
+    def _render_filmstrip_empty_frames(self, wide_mode, count=None):
+        """Fill the strip with empty frames so it looks like continuous film."""
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
-        total_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
-        if total_h > 0:
-            frame_h = min(frame_w, total_h)
+        avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4
+        frame_h = max(60, avail_h)
+        frame_w = frame_h  # square frames
+        gap = 6
 
-        if wide_mode:
-            self.face_preview_strip_layout.addStretch(1)
+        if count is None:
+            # Fill the visible width with frames (+ extra to bleed off edges)
+            strip_w = self.face_preview_strip_filmstrip.width()
+            if strip_w < 100:
+                strip_w = 800  # fallback before first layout
+            count = max(6, (strip_w // (frame_w + gap)) + 2)
 
         for _ in range(count):
-            frame_label = QLabel()
-            frame_label.setFixedSize(frame_w, frame_h)
-            frame_label.setStyleSheet(
+            frame = QLabel()
+            frame.setFixedSize(frame_w, frame_h)
+            frame.setStyleSheet(
                 "QLabel {"
-                "  background-color: #0e1013;"
-                "  border: 1px solid #2a2e35;"
+                "  background-color: #191d23;"
+                "  border: 1px solid #2a3038;"
                 "}"
             )
             if wide_mode:
-                self.face_preview_strip_layout.addWidget(frame_label, 0, Qt.AlignHCenter)
+                self.face_preview_strip_layout.addWidget(frame, 0, Qt.AlignHCenter)
             else:
-                self.face_preview_strip_layout.addWidget(frame_label)
-
-        if wide_mode:
-            self.face_preview_strip_layout.addStretch(1)
+                self.face_preview_strip_layout.addWidget(frame)
 
     def set_hover_face_preview_index(self, face_index, source="strip"):
         idx = face_index
