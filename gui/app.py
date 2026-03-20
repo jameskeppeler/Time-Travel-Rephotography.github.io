@@ -5807,7 +5807,12 @@ Write-Output "OK"
         else:
             self.face_preview_strip_layout.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         if not entries:
-            self.face_preview_summary_label.setText("Faces: none")
+            if self._no_faces_detected:
+                self.face_preview_summary_label.setText("No faces detected — try another image")
+                self.face_preview_summary_label.setStyleSheet("color: #d4a054;")
+            else:
+                self.face_preview_summary_label.setText("Faces: none")
+                self.face_preview_summary_label.setStyleSheet("color: #aeb4be;")
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
             if hasattr(self, "face_select_all_button"):
@@ -5821,20 +5826,23 @@ Write-Output "OK"
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
-            self.face_preview_strip_filmstrip.show_empty_frames = True
-            self.face_preview_strip_filmstrip.update()
 
-            # Show a notice inside the filmstrip when detection found no faces
             if self._no_faces_detected:
+                # Show a centered notice inside the filmstrip
+                self.face_preview_strip_filmstrip.show_empty_frames = False
                 notice = QLabel("No faces detected.\nPlease try another image.")
                 notice.setAlignment(Qt.AlignCenter)
+                notice.setWordWrap(True)
                 notice.setStyleSheet(
-                    "color: #aeb4be; background: transparent; font-size: 12px; padding: 8px;"
+                    "color: #d4a054; background: transparent; font-size: 13px; padding: 12px;"
                 )
+                notice.setMinimumHeight(60)
+                self.face_preview_strip_layout.setAlignment(Qt.AlignCenter)
                 self.face_preview_strip_layout.addWidget(notice)
-                self.face_preview_strip_filmstrip.show_empty_frames = False
-                self.face_preview_strip_filmstrip.update()
+            else:
+                self.face_preview_strip_filmstrip.show_empty_frames = True
 
+            self.face_preview_strip_filmstrip.update()
             return
 
         # Consolidate counts into a single loop instead of N+1 iterations
@@ -5865,6 +5873,7 @@ Write-Output "OK"
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
         self.face_preview_summary_label.setText(summary)
+        self.face_preview_summary_label.setStyleSheet("color: #aeb4be;")
 
         # Faces loaded — hide the painted empty frames, show real buttons
         self.face_preview_strip_filmstrip.show_empty_frames = False
