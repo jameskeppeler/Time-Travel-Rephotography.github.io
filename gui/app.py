@@ -2146,6 +2146,7 @@ class MainWindow(QMainWindow):
         self.result_preview_label.setMouseTracking(True)
         self.result_preview_label.installEventFilter(self)
         self._compare_wipe_active = False
+        self._compare_wipe_last_pos = None  # Throttle: min Manhattan distance before scaling
         result_layout.addWidget(self.result_preview_label)
 
         # Stage overlay label for animated stage indicator
@@ -3176,6 +3177,7 @@ class MainWindow(QMainWindow):
         self.result_preview_label.setText("No result image yet.\nRun to generate a preview.")
         self._rephoto_result_path = None
         self._recomposited_result_path = None
+        self._compare_wipe_last_pos = None  # Reset wipe throttle
         self.result_view_toggle.setVisible(False)
         self.result_view_toggle.setChecked(False)
         self.result_view_toggle.setText("Rephoto")
@@ -6080,6 +6082,7 @@ Write-Output "OK"
                 elif et in (QEvent.Leave, QEvent.HoverLeave):
                     if self._compare_wipe_active:
                         self._compare_wipe_active = False
+                        self._compare_wipe_last_pos = None  # Reset throttle for next wipe
                         self.refresh_result_preview_scale()
                     return False
 
@@ -6903,13 +6906,25 @@ Write-Output "OK"
         self.result_preview_label.setPixmap(scaled)
 
     def _apply_compare_wipe(self, mouse_pos):
-        """Composite a left=input / right=result wipe on the result preview label."""
+        """Composite a left=input / right=result wipe on the result preview label.
+
+        Throttled: only rescales if mouse moved > 4px since last scale to avoid
+        excessive CPU cost on continuous MouseMove events (60+ Hz).
+        """
         label = self.result_preview_label
         lw, lh = label.width() - 10, label.height() - 10
         if lw < 10 or lh < 10:
             return
 
-        # Scale both to the same display size.
+        # Throttle: skip if mouse moved < 4 pixels (Manhattan distance)
+        if self._compare_wipe_last_pos is not None:
+            dx = abs(mouse_pos.x() - self._compare_wipe_last_pos.x())
+            dy = abs(mouse_pos.y() - self._compare_wipe_last_pos.y())
+            if dx + dy < 4:
+                return
+        self._compare_wipe_last_pos = mouse_pos
+
+        # Scale both to the same display size (cached from previous call if unchanged)
         result_scaled = self.result_pixmap.scaled(lw, lh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         sw, sh = result_scaled.width(), result_scaled.height()
         if sw <= 0 or sh <= 0:

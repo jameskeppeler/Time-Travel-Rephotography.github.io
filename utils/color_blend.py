@@ -58,6 +58,8 @@ def _clip_color(rgb):
 def color_blend(base_rgb, blend_rgb, alpha_mask=None):
     """Photoshop Color blend mode: hue + saturation from blend, luminance from base.
 
+    Vectorized implementation using NumPy broadcasting for performance.
+
     Args:
         base_rgb: uint8 BGR image (H, W, 3) — provides luminance
         blend_rgb: uint8 BGR image (H, W, 3) — provides hue + saturation
@@ -71,31 +73,48 @@ def color_blend(base_rgb, blend_rgb, alpha_mask=None):
     blend = blend_rgb.astype(np.float32)
 
     h, w, _ = base.shape
-    result = np.zeros((h, w, 3), dtype=np.float32)
 
-    # Per-pixel color blend
-    for i in range(h):
-        for j in range(w):
-            base_pix = base[i, j]
-            blend_pix = blend[i, j]
+    # Vectorized per-pixel operations using NumPy broadcasting (no Python loops)
+    # Extract luminance from base: shape (H, W)
+    base_lum = 0.299 * base[:, :, 0] + 0.587 * base[:, :, 1] + 0.114 * base[:, :, 2]
 
-            # Extract luminance from base
-            base_lum = _lum(base_pix)
+    # Recolor blend to base luminance via SetLum: lum_target - current_lum + rgb
+    blend_lum = 0.299 * blend[:, :, 0] + 0.587 * blend[:, :, 1] + 0.114 * blend[:, :, 2]
+    delta_lum = base_lum - blend_lum  # (H, W)
+    recolored = blend + delta_lum[:, :, np.newaxis]
 
-            # Take hue + saturation from blend
-            # Reconstruct RGB with blend hue/sat but base luminance
-            sat_blend = _sat(blend_pix)
+    # ClipColor: ensure channels in [0, 255] while preserving luminance
+    ch_min = recolored.min(axis=2)  # (H, W)
+    ch_max = recolored.max(axis=2)  # (H, W)
 
-            # Recolor blend to target luminance
-            recolored = _set_lum(blend_pix, base_lum)
-            recolored = _clip_color(recolored)
+    # Clamp negative values
+    neg_mask = ch_min < 0
+    if np.any(neg_mask):
+        recolored[neg_mask] = (
+            base_lum[neg_mask, np.newaxis] +
+            (recolored[neg_mask] - base_lum[neg_mask, np.newaxis]) *
+            (base_lum[neg_mask, np.newaxis] / (base_lum[neg_mask, np.newaxis] - ch_min[neg_mask, np.newaxis]))
+        )
+        ch_min = recolored.min(axis=2)
+        ch_max = recolored.max(axis=2)
 
-            if alpha_mask is not None and alpha_mask[i, j] < 1.0:
-                # Blend toward base where alpha < 1
-                alpha = alpha_mask[i, j]
-                result[i, j] = base_pix * (1 - alpha) + recolored * alpha
-            else:
-                result[i, j] = recolored
+    # Clamp overflow values
+    overflow_mask = ch_max > 255
+    if np.any(overflow_mask):
+        recolored[overflow_mask] = (
+            base_lum[overflow_mask, np.newaxis] +
+            (recolored[overflow_mask] - base_lum[overflow_mask, np.newaxis]) *
+            ((255.0 - base_lum[overflow_mask, np.newaxis]) / (ch_max[overflow_mask, np.newaxis] - base_lum[overflow_mask, np.newaxis]))
+        )
+
+    recolored = np.clip(recolored, 0, 255)
+
+    # Apply alpha mask if provided
+    if alpha_mask is not None:
+        alpha = alpha_mask[:, :, np.newaxis]  # (H, W, 1)
+        result = base * (1 - alpha) + recolored * alpha
+    else:
+        result = recolored
 
     return np.clip(result, 0, 255).astype(np.uint8)
 
