@@ -173,14 +173,34 @@ class NoScrollSlider(QSlider):
 class FaceStripToolButton(QToolButton):
     """Filmstrip card button that exposes lightweight hover callbacks."""
 
+    # Stylesheet cache to avoid regenerating for every button
+    _stylesheet_cache = {}
+    # Track currently hovered button globally to avoid expensive widget tree queries
+    _currently_hovered = None
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setMouseTracking(True)
         self.hover_enter_callback = None
         self.hover_leave_callback = None
 
+    @staticmethod
+    def get_stylesheet(border_color, bg_color, text_color, hover_color):
+        """Get stylesheet from cache or generate once."""
+        key = (border_color, bg_color, text_color, hover_color)
+        if key not in FaceStripToolButton._stylesheet_cache:
+            FaceStripToolButton._stylesheet_cache[key] = (
+                "QToolButton {"
+                f" border: 1px solid {border_color}; border-radius: 5px;"
+                f" background-color: {bg_color}; color: {text_color}; padding: 2px; }}"
+                f"QToolButton:hover {{ background-color: {hover_color}; }}"
+                "QToolButton:checked { background-color: #1f2630; }"
+            )
+        return FaceStripToolButton._stylesheet_cache[key]
+
     def enterEvent(self, event):
         super().enterEvent(event)
+        FaceStripToolButton._currently_hovered = self
         if callable(self.hover_enter_callback):
             self.hover_enter_callback()
 
@@ -190,6 +210,7 @@ class FaceStripToolButton(QToolButton):
             self.hover_enter_callback()
 
     def leaveEvent(self, event):
+        FaceStripToolButton._currently_hovered = None
         if callable(self.hover_leave_callback):
             self.hover_leave_callback()
         super().leaveEvent(event)
@@ -1677,7 +1698,8 @@ class MainWindow(QMainWindow):
         self.quick_face_probe_last_error = ""
         self._process_stdout_buffer = ""
         self._process_stderr_buffer = ""
-        self._process_log_pending_text = ""
+        self._process_log_pending_text = []  # Use list for O(1) append instead of string +=
+        self._process_log_pending_text_bytes = 0  # Track size instead of len(string)
         self._process_log_flush_queued = False
         self.retina_face_box_probe_warned = False
         self.cropper_face_box_probe_warned = False
@@ -5669,8 +5691,17 @@ Write-Output "OK"
             self._face_strip_render_signature = render_signature
             return
 
+        # Consolidate counts into a single loop instead of N+1 iterations
+        selected_count = done_count = fail_count = 0
+        for e in entries:
+            if bool(e.get("selected", False)):
+                selected_count += 1
+            if e.get("status") == "done":
+                done_count += 1
+            if e.get("status") == "failed":
+                fail_count += 1
+
         if selection_mode:
-            selected_count = len([e for e in entries if bool(e.get("selected", False))])
             self.run_button.setEnabled(selected_count > 0)
             summary = f"Selected: {selected_count}/{len(entries)}"
             if hasattr(self, "face_selection_notice_label"):
@@ -5679,8 +5710,6 @@ Write-Output "OK"
                 )
                 self.face_selection_notice_label.setVisible(True)
         else:
-            done_count = sum(1 for e in entries if e.get("status") == "done")
-            fail_count = sum(1 for e in entries if e.get("status") == "failed")
             if wide_mode:
                 summary = f"Faces {len(entries)} | Done {done_count}"
             else:
@@ -5768,13 +5797,7 @@ Write-Output "OK"
                 text_color = "#d6dbe3"
                 bg_color = "#232830"
                 hover_color = "#29303a"
-            button.setStyleSheet(
-                "QToolButton {"
-                f" border: 1px solid {border}; border-radius: 5px;"
-                f" background-color: {bg_color}; color: {text_color}; padding: 2px; }}"
-                f"QToolButton:hover {{ background-color: {hover_color}; }}"
-                "QToolButton:checked { background-color: #1f2630; }"
-            )
+            button.setStyleSheet(FaceStripToolButton.get_stylesheet(border, bg_color, text_color, hover_color))
             if is_muted and (not selection_mode) and is_processing:
                 button.setEnabled(False)
             button.setProperty("faceIndex", idx)
@@ -5837,9 +5860,11 @@ Write-Output "OK"
             self.refresh_input_preview_scale()
 
     def _cursor_face_preview_index(self):
-        widget = QApplication.widgetAt(QCursor.pos())
-        while widget is not None and (not isinstance(widget, FaceStripToolButton)):
-            widget = widget.parentWidget()
+        """Get the face index of the currently hovered button.
+
+        Optimized to use cached hover state instead of expensive widget tree queries.
+        """
+        widget = FaceStripToolButton._currently_hovered
         if not isinstance(widget, FaceStripToolButton):
             return None
         try:
@@ -7268,10 +7293,14 @@ Write-Output "OK"
     def _append_process_log_text(self, text: str):
         if not text:
             return
-        self._process_log_pending_text += text
+        self._process_log_pending_text.append(text)
+        self._process_log_pending_text_bytes += len(text)
         # Keep pending text bounded in case backend emits very large bursts.
-        if len(self._process_log_pending_text) > 500000:
-            self._process_log_pending_text = self._process_log_pending_text[-500000:]
+        if self._process_log_pending_text_bytes > 500000:
+            # Join, truncate, and reset list
+            joined = "".join(self._process_log_pending_text)[-500000:]
+            self._process_log_pending_text = [joined]
+            self._process_log_pending_text_bytes = len(joined)
         if self._process_log_flush_queued:
             return
         self._process_log_flush_queued = True
@@ -7279,10 +7308,11 @@ Write-Output "OK"
 
     def _flush_process_log_buffer(self):
         self._process_log_flush_queued = False
-        text = self._process_log_pending_text
-        if not text:
+        if not self._process_log_pending_text:
             return
-        self._process_log_pending_text = ""
+        text = "".join(self._process_log_pending_text)
+        self._process_log_pending_text = []
+        self._process_log_pending_text_bytes = 0
         text = text.replace("\r", "\n")
         cursor = self.log_box.textCursor()
         cursor.movePosition(QTextCursor.End)
@@ -7456,7 +7486,8 @@ Write-Output "OK"
         self.run_started_at = time.time()
         self._process_stdout_buffer = ""
         self._process_stderr_buffer = ""
-        self._process_log_pending_text = ""
+        self._process_log_pending_text = []  # Use list for O(1) append
+        self._process_log_pending_text_bytes = 0
         self._process_log_flush_queued = False
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.start()

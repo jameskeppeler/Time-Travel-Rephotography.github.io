@@ -261,8 +261,9 @@ class Optimizer:
                                 steps=steps, use_amp=use_amp)
 
             for si in range(steps):
-                # Simple iteration counter (no fancy progress bar)
-                print(f"{si+1}/{steps}", flush=True)
+                # Print iteration counter every 50 steps to reduce logging overhead
+                if si % 50 == 0 or si == steps - 1:
+                    print(f"{si+1}/{steps}", flush=True)
                 if not wait_if_paused():
                     break
                 if should_stop_early():
