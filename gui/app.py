@@ -7180,11 +7180,70 @@ Write-Output "OK"
             return
 
         img_path = self.last_result_image_path.resolve()
-        folder = str(img_path.parent)
+        results_dir = img_path.parent
 
-        os.startfile(folder)
+        # Organize results folder: move intermediate files, keep only final outputs
+        self._organize_results_folder(results_dir)
+
+        os.startfile(str(results_dir))
         QApplication.clipboard().setText(str(img_path))
         self.log_box.append("Opened containing folder. Image path copied to clipboard.")
+
+    def _organize_results_folder(self, results_dir: Path):
+        """Organize results folder to show only final outputs.
+
+        Keeps: original image, face crop, final.png, recomposited*.png
+        Moves everything else to an 'intermediates' subfolder.
+        """
+        try:
+            results_dir = Path(results_dir)
+            intermediates_dir = results_dir / "intermediates"
+
+            # Files to keep (suffixes/patterns)
+            keep_patterns = {
+                "final.png",
+                "recomposited.png",
+                "recomposited_autocolor.png",
+                "final_recomposited.png",
+                "final_recomposited_autocolor.png",
+            }
+
+            # Try to copy original input image if available
+            input_text = self.input_image_edit.text().strip() if hasattr(self, "input_image_edit") else ""
+            if input_text and os.path.isfile(input_text):
+                try:
+                    src = Path(input_text)
+                    dst = results_dir / f"original_{src.name}"
+                    if not dst.exists():
+                        shutil.copy2(src, dst)
+                except Exception:
+                    pass
+
+            # Try to copy face crop if available
+            crop_path = self._get_recomposite_crop_path()
+            if crop_path is not None:
+                try:
+                    crop_path = Path(crop_path)
+                    dst = results_dir / f"crop_{crop_path.name}"
+                    if not dst.exists():
+                        shutil.copy2(crop_path, dst)
+                except Exception:
+                    pass
+
+            # Move intermediate files to subfolder
+            if not intermediates_dir.exists():
+                intermediates_dir.mkdir(exist_ok=True)
+
+            for item in results_dir.iterdir():
+                if item.is_file() and item.name not in keep_patterns and not item.name.startswith("original_") and not item.name.startswith("crop_"):
+                    try:
+                        shutil.move(str(item), str(intermediates_dir / item.name))
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            # Non-fatal; don't block opening the folder
+            pass
 
     def _append_process_log_text(self, text: str):
         if not text:
