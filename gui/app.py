@@ -2240,8 +2240,9 @@ class MainWindow(QMainWindow):
         self.face_preview_strip_scroll.viewport().setMouseTracking(True)
         self.face_preview_strip_scroll.viewport().installEventFilter(self)
 
-        self.face_preview_header.setVisible(False)
-        self.face_preview_strip_scroll.setVisible(False)
+        # Filmstrip is always visible (shows empty state when no image loaded)
+        self.face_preview_header.setVisible(True)
+        self.face_preview_strip_scroll.setVisible(True)
 
         result_buttons_row = QHBoxLayout()
         result_buttons_row.setContentsMargins(0, 0, 0, 0)
@@ -2296,7 +2297,8 @@ class MainWindow(QMainWindow):
         face_panel_layout.addWidget(self.face_selection_notice_label)
         face_panel_layout.addWidget(self.face_preview_header)
         face_panel_layout.addWidget(self.face_preview_strip_scroll)
-        self.face_preview_panel.setVisible(False)
+        # Filmstrip panel is always visible
+        self.face_preview_panel.setVisible(True)
         previews_layout.addWidget(self.face_preview_panel)
 
         # Settings section with input image and form layout
@@ -4360,10 +4362,11 @@ class MainWindow(QMainWindow):
         self.awaiting_face_selection = False
         self.face_preview_summary_label.setText("Faces: none")
         self.clear_face_preview_strip_layout()
-        self.face_preview_header.setVisible(False)
-        self.face_preview_strip_scroll.setVisible(False)
+        # Keep filmstrip visible even when reset (shows empty state)
+        self.face_preview_header.setVisible(True)
+        self.face_preview_strip_scroll.setVisible(True)
         if hasattr(self, "face_preview_panel"):
-            self.face_preview_panel.setVisible(False)
+            self.face_preview_panel.setVisible(True)
         self.set_run_button_continue_mode(False)
         self._face_strip_render_signature = None
 
@@ -5688,10 +5691,11 @@ Write-Output "OK"
             self.face_preview_summary_label.setText("Faces: none")
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
-            self.face_preview_header.setVisible(False)
-            self.face_preview_strip_scroll.setVisible(False)
+            # Keep filmstrip visible even when empty
+            self.face_preview_header.setVisible(True)
+            self.face_preview_strip_scroll.setVisible(True)
             if hasattr(self, "face_preview_panel"):
-                self.face_preview_panel.setVisible(False)
+                self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
             return
 
