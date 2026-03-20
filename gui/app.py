@@ -5743,15 +5743,20 @@ Write-Output "OK"
             self.face_preview_summary_label.setText("Faces: none")
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
-            # Keep filmstrip visible even when empty - show placeholder cards
+            if hasattr(self, "face_select_all_button"):
+                self.face_select_all_button.setVisible(False)
+            if hasattr(self, "face_select_none_button"):
+                self.face_select_none_button.setVisible(False)
+            if hasattr(self, "face_preview_auto_follow_checkbox"):
+                self.face_preview_auto_follow_checkbox.setVisible(False)
             self.face_preview_header.setVisible(True)
             self.face_preview_strip_filmstrip.setVisible(True)
             if hasattr(self, "face_preview_panel"):
                 self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
 
-            # Render empty filmstrip frames as placeholders
-            self._render_filmstrip_empty_frames(wide_mode, count=5)
+            # Fill the entire strip with empty frames
+            self._render_filmstrip_empty_frames(wide_mode)
 
             return
 
@@ -5886,19 +5891,20 @@ Write-Output "OK"
         """Fill the strip with empty frames so it looks like continuous film."""
         # Remove all margins so frames go edge to edge
         self.face_preview_strip_layout.setContentsMargins(0, 0, 0, 0)
-        self.face_preview_strip_layout.setSpacing(5)
+        gap = 4
+        self.face_preview_strip_layout.setSpacing(gap)
 
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
         avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2
-        frame_h = max(60, avail_h)
-        frame_w = frame_h  # square frames
-        gap = 5  # matches spacing
+        frame_h = max(40, avail_h)
+        # Slightly narrower than tall — like real 35mm film frames
+        frame_w = int(frame_h * 0.72)
 
         if count is None:
             strip_w = self.face_preview_strip_filmstrip.width()
             if strip_w < 100:
-                strip_w = 1200  # generous fallback before first layout
-            count = max(8, (strip_w // (frame_w + gap)) + 2)
+                strip_w = 1400
+            count = max(10, (strip_w // (frame_w + gap)) + 2)
 
         for _ in range(count):
             frame = QLabel()
