@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 # ============================================================================
 
 # Quality/iteration presets
-DEFAULT_BASIC_ITER_VALUES = [375, 750, 1500, 3000, 6000, 18000]
+DEFAULT_BASIC_ITER_VALUES = [375, 750, 1500, 3000]
 DEFAULT_ADVANCED_ITER_VALUES = [375, 750] + list(range(1000, 20001, 1000))
 DEFAULT_ITERATION = 750
 
@@ -65,8 +65,6 @@ QUALITY_PRESET_LABELS = {
     750: "Standard",
     1500: "High",
     3000: "Very High",
-    6000: "Ultra",
-    18000: "Maximum",
 }
 
 # Typical date ranges shown as placeholder hints when a photo type is selected.
@@ -669,9 +667,6 @@ class AdvancedSettingsDialog(QDialog):
         self.gfpgan_blend_edit.setDecimals(2)
         self.gfpgan_blend_edit.setValue(0.45)
 
-        self.recomposite_original_image_checkbox = QCheckBox("Recomposite Original Image")
-        self.recomposite_original_image_checkbox.setChecked(False)
-
         self.gaussian_edit = NoScrollDoubleSpinBox()
         self.gaussian_edit.setRange(0.0, 5.0)
         self.gaussian_edit.setSingleStep(0.05)
@@ -724,6 +719,28 @@ class AdvancedSettingsDialog(QDialog):
         self.mix_layer_end_edit.setRange(0, 18)
         self.mix_layer_end_edit.setValue(18)
 
+        # Iteration slider for advanced mode
+        self.iter_slider = NoScrollSlider(Qt.Horizontal)
+        self.iter_slider.setMinimum(0)
+        self.iter_slider.setMaximum(len(DEFAULT_ADVANCED_ITER_VALUES) - 1)
+        self.iter_slider.setValue(1)  # default 750
+        self.iter_slider.setTickPosition(QSlider.TicksBelow)
+        self.iter_slider.setTickInterval(1)
+
+        self.iter_value_label = QLabel("750")
+        self.iter_value_label.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.iter_value_label.setMinimumWidth(50)
+
+        self.iter_slider.valueChanged.connect(self._update_iter_display)
+
+        iter_layout = QHBoxLayout()
+        iter_layout.setContentsMargins(0, 0, 0, 0)
+        iter_layout.setSpacing(10)
+        iter_layout.addWidget(self.iter_slider, 1)
+        iter_layout.addWidget(self.iter_value_label, 0)
+        iter_widget = QWidget()
+        iter_widget.setLayout(iter_layout)
+
         # populate tabs with labels containing info icons
         core_form.addRow(
             self.make_label_with_info(
@@ -745,13 +762,6 @@ class AdvancedSettingsDialog(QDialog):
                 "Controls how strongly the enhancement result is blended into the face crop. Lower values preserve more of the original image; higher values use more of the enhanced result."
             ),
             self.gfpgan_blend_edit,
-        )
-        core_form.addRow(
-            self.make_label_with_info(
-                "Recomposite Original Image",
-                "After rephotography, blend the processed face back into the original image using Photoshop-style Color blend (preserves original luminance with new hue/saturation)."
-            ),
-            self.recomposite_original_image_checkbox,
         )
         core_form.addRow(
             self.make_label_with_info(
@@ -846,6 +856,13 @@ class AdvancedSettingsDialog(QDialog):
             ),
             self.mix_layer_end_edit,
         )
+        exp_form.addRow(
+            self.make_label_with_info(
+                "Optimization iterations",
+                "Controls the number of optimization steps. Higher values usually improve results but take longer. Advanced mode allows fine-grained control beyond basic presets."
+            ),
+            iter_widget,
+        )
 
         self.update_enhancement_controls()
 
@@ -872,6 +889,7 @@ class AdvancedSettingsDialog(QDialog):
         self.det_threshold_edit.setValue(DEFAULT_DET_THRESHOLD)
         self.face_factor_edit.setValue(DEFAULT_FACE_FACTOR)
         self.gaussian_edit.setValue(DEFAULT_GAUSSIAN)
+        self.set_iteration_value(DEFAULT_ITERATION)
         self.identity_preservation_combo.setCurrentText("Default")
         self.tonal_transfer_combo.setCurrentText("Default")
         self.eye_preservation_combo.setCurrentText("Default")
@@ -882,6 +900,26 @@ class AdvancedSettingsDialog(QDialog):
         self.camera_lr_edit.setValue(DEFAULT_CAMERA_LR)
         self.mix_layer_start_edit.setValue(DEFAULT_MIX_LAYER_START)
         self.mix_layer_end_edit.setValue(DEFAULT_MIX_LAYER_END)
+
+    def _update_iter_display(self):
+        """Update the iteration value label when slider moves."""
+        idx = self.iter_slider.value()
+        value = DEFAULT_ADVANCED_ITER_VALUES[idx]
+        self.iter_value_label.setText(str(value))
+
+    def get_iteration_value(self):
+        """Get the currently selected iteration value."""
+        idx = self.iter_slider.value()
+        return DEFAULT_ADVANCED_ITER_VALUES[idx]
+
+    def set_iteration_value(self, iteration_value):
+        """Set the iteration slider to the closest matching value."""
+        try:
+            iv = int(iteration_value)
+        except Exception:
+            iv = DEFAULT_ITERATION
+        closest_index = min(range(len(DEFAULT_ADVANCED_ITER_VALUES)), key=lambda i: abs(DEFAULT_ADVANCED_ITER_VALUES[i] - iv))
+        self.iter_slider.setValue(closest_index)
 
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
@@ -3271,6 +3309,7 @@ class MainWindow(QMainWindow):
         old_camera_lr = dlg.camera_lr_edit.value()
         old_mix_layer_start = dlg.mix_layer_start_edit.value()
         old_mix_layer_end = dlg.mix_layer_end_edit.value()
+        old_iter = dlg.get_iteration_value()
         old_strategy = dlg.strategy_combo.currentText()
         old_crop_only = dlg.crop_only_checkbox.isChecked()
         old_use_gfpgan = dlg.use_gfpgan_checkbox.isChecked()
@@ -3296,6 +3335,7 @@ class MainWindow(QMainWindow):
             dlg.face_factor_edit.setValue(old_face_factor)
             dlg.gfpgan_blend_edit.setValue(old_gfpgan_blend)
             dlg.gaussian_edit.setValue(old_gaussian)
+            dlg.set_iteration_value(old_iter)
             # Restore main window spectral widgets
             self.photo_type_combo.setCurrentText(old_photo_type)
             self.approx_date_edit.setText(old_approx_date)
@@ -3319,7 +3359,8 @@ class MainWindow(QMainWindow):
     # Runtime estimation / hardware
     # ------------------------------
     def get_selected_preset_value(self):
-        return int(self.iter_values[self.iter_slider.value()])
+        """Get the selected iteration value from advanced settings."""
+        return self.advanced_dialog.get_iteration_value()
 
     def get_identity_preservation_value(self):
         preset = self.advanced_dialog.identity_preservation_combo.currentText()
