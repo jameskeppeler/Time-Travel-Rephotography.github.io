@@ -5719,22 +5719,14 @@ Write-Output "OK"
                 self.face_selection_notice_label.setVisible(False)
         self.face_preview_summary_label.setText(summary)
 
-        if len(entries) <= 1:
-            if hasattr(self, "face_selection_notice_label"):
-                self.face_selection_notice_label.setVisible(False)
-            self.face_preview_header.setVisible(False)
-            self.face_preview_strip_scroll.setVisible(False)
-            if hasattr(self, "face_preview_panel"):
-                self.face_preview_panel.setVisible(False)
-            self._face_strip_render_signature = render_signature
-            return
-
+        # Always show the filmstrip, even with single face
         if hasattr(self, "face_preview_panel"):
             self.face_preview_panel.setVisible(True)
         if hasattr(self, "face_select_all_button"):
-            self.face_select_all_button.setVisible(selection_mode)
+            # Hide select all/none buttons when single face or not in selection mode
+            self.face_select_all_button.setVisible(selection_mode and len(entries) > 1)
         if hasattr(self, "face_select_none_button"):
-            self.face_select_none_button.setVisible(selection_mode)
+            self.face_select_none_button.setVisible(selection_mode and len(entries) > 1)
         if hasattr(self, "face_preview_auto_follow_checkbox"):
             self.face_preview_auto_follow_checkbox.setVisible(not selection_mode)
         self.face_preview_header.setVisible(True)
