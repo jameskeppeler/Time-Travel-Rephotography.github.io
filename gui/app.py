@@ -5698,7 +5698,7 @@ Write-Output "OK"
                 self.face_preview_panel.setVisible(True)
             self._face_strip_render_signature = render_signature
 
-            # Render placeholder cards to show waiting state
+            # Render empty filmstrip frames as placeholders
             card_w = self._get_face_strip_card_width(wide_mode)
             thumb_size = max(72, min(104, card_w - 24))
             card_h = thumb_size + (50 if wide_mode else 42)
@@ -5706,7 +5706,6 @@ Write-Output "OK"
             if wide_mode:
                 self.face_preview_strip_layout.addStretch(1)
 
-            # Show 4 placeholder cards
             for i in range(4):
                 button = FaceStripToolButton()
                 button.setCheckable(False)
@@ -5715,20 +5714,46 @@ Write-Output "OK"
                 button.setIconSize(QSize(thumb_size, thumb_size))
                 button.setFixedSize(card_w, card_h)
                 button.setFont(QFont("Segoe UI", 8))
-                button.setText(f"Face {i + 1}\nWaiting...")
+                button.setText("")
 
-                # Create a gray placeholder icon
-                placeholder_pixmap = QPixmap(thumb_size, thumb_size)
-                placeholder_pixmap.fill(QColor("#2a3139"))
-                button.setIcon(QIcon(placeholder_pixmap))
+                # Draw an empty filmstrip frame
+                pm = QPixmap(thumb_size, thumb_size)
+                pm.fill(QColor(0, 0, 0, 0))
+                p = QPainter(pm)
+                p.setRenderHint(QPainter.Antialiasing)
+                frame_color = QColor("#3a4450")
+                # Outer frame border
+                p.setPen(QPen(frame_color, 1.5))
+                p.setBrush(QBrush(QColor("#1a1e25")))
+                p.drawRoundedRect(2, 2, thumb_size - 4, thumb_size - 4, 4, 4)
+                # Sprocket holes along top and bottom edges
+                hole_color = QColor("#2a3139")
+                p.setPen(Qt.NoPen)
+                p.setBrush(QBrush(hole_color))
+                hole_w, hole_h = 6, 4
+                hole_y_top = 5
+                hole_y_bot = thumb_size - 5 - hole_h
+                spacing = (thumb_size - 12) / 5
+                for h in range(5):
+                    hx = int(6 + h * spacing)
+                    p.drawRoundedRect(hx, hole_y_top, hole_w, hole_h, 1, 1)
+                    p.drawRoundedRect(hx, hole_y_bot, hole_w, hole_h, 1, 1)
+                # Inner empty frame area with dashed border
+                inner_margin = 14
+                inner_rect = QRect(inner_margin, inner_margin,
+                                   thumb_size - inner_margin * 2,
+                                   thumb_size - inner_margin * 2)
+                dash_pen = QPen(QColor("#4a5466"), 1, Qt.DashLine)
+                p.setPen(dash_pen)
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(inner_rect)
+                p.end()
 
-                # Gray disabled style
-                button.setStyleSheet(FaceStripToolButton.get_stylesheet(
-                    border_color="#3a4450",
-                    bg_color="#1a1e25",
-                    text_color="#5a6370",
-                    hover_color="#1a1e25"
-                ))
+                button.setIcon(QIcon(pm))
+                button.setStyleSheet(
+                    "QToolButton { border: none; background: transparent; }"
+                    "QToolButton:disabled { background: transparent; }"
+                )
 
                 if wide_mode:
                     self.face_preview_strip_layout.addWidget(button, 0, Qt.AlignHCenter)
