@@ -761,7 +761,7 @@ class AdvancedSettingsDialog(QDialog):
         presets_info_button.setCursor(Qt.PointingHandCursor)
         presets_info_button.setToolTip(
             "<b>Quality Presets</b><br/>"
-            "<b>Quick:</b> Fast processing, lower loss weights (identity/tonal/eye/structure all set to Lower), higher learning rate (0.15), lower noise regularization (10000). "
+            "<b>Quick:</b> Fast processing, lower loss weights (identity/tonal/eye/structure set to Lower, VGG appearance off), higher learning rate (0.15), lower noise regularization (10000). "
             "Good for quick previews and iterative testing.<br/><br/>"
             "<b>Balanced:</b> Recommended defaults. Moderate loss weights (all set to Default), standard learning rate (0.1), standard noise regularization (50000). "
             "Best for most historical photos where quality and speed matter equally.<br/><br/>"
@@ -1854,6 +1854,7 @@ class MainWindow(QMainWindow):
         self.face_preview_entries = []
         self.active_face_preview_index = None
         self.selected_face_preview_index = None
+        self._user_inspecting_completed_face = False  # True when user manually clicked a completed face during processing
         self.hover_face_preview_index = None
         self.hover_face_preview_source = None
         self.hover_face_box_override = None
@@ -2440,8 +2441,8 @@ class MainWindow(QMainWindow):
         self.face_preview_summary_label = QLabel("Faces: none")
         self.face_preview_summary_label.setStyleSheet("color: #aeb4be;")
         self.face_preview_summary_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        face_header_layout.addWidget(self.face_preview_summary_label, 0, Qt.AlignVCenter)
-        face_header_layout.addStretch(1)
+        self.face_preview_summary_label.setMinimumWidth(0)
+        face_header_layout.addWidget(self.face_preview_summary_label, 1, Qt.AlignVCenter)
 
         self.face_select_all_button = QPushButton("All")
         self.face_select_all_button.setMinimumHeight(20)
@@ -2714,21 +2715,25 @@ class MainWindow(QMainWindow):
         self.face_preview_strip_container.setMaximumHeight(16777215)
 
         if use_wide_layout:
-            card_w = self._get_face_strip_card_width(True)
-            panel_w = card_w + 34
+            base_card_w = self._get_face_strip_card_width(True)
+            # Filmstrip width = card + sprocket bands on each side.
+            # Painted frame_size = filmstrip_w - 2*band = base_card_w.
+            # Keep the rail wide enough for the header text row as well.
+            min_panel_w = self._get_face_preview_header_min_width()
+            filmstrip_w = max(base_card_w + 2 * band, min_panel_w)
+            panel_w = filmstrip_w
             self.face_preview_strip_layout.setDirection(QBoxLayout.TopToBottom)
             self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.face_preview_strip_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             self.face_preview_strip_filmstrip.setMinimumHeight(0)
             self.face_preview_strip_filmstrip.setMaximumHeight(16777215)
-            self.face_preview_strip_filmstrip.setMinimumWidth(panel_w - 8)
-            self.face_preview_strip_filmstrip.setMaximumWidth(panel_w)
+            self.face_preview_strip_filmstrip.setFixedWidth(filmstrip_w)
             self.face_preview_strip_filmstrip.vertical = True
             self.filmstrip_inner_layout.setContentsMargins(band, 0, band, 0)
             self.face_preview_panel.setMinimumWidth(panel_w)
             self.face_preview_panel.setMaximumWidth(panel_w)
             self.face_preview_panel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-            self.face_preview_auto_follow_checkbox.setText("Auto-follow")
+            self.face_preview_auto_follow_checkbox.setText("Follow")
         else:
             self.face_preview_strip_layout.setDirection(QBoxLayout.LeftToRight)
             self.face_preview_strip_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
@@ -2746,12 +2751,35 @@ class MainWindow(QMainWindow):
         # Invalidate render signature to force re-render of face buttons with new dimensions
         self._face_strip_render_signature = None
 
+    def _get_face_preview_header_min_width(self):
+        if not hasattr(self, "face_preview_header"):
+            return 160
+        layout = self.face_preview_header.layout()
+        spacing = layout.spacing() if layout is not None else 5
+        margin_lr = 0
+        if layout is not None:
+            margins = layout.contentsMargins()
+            margin_lr = margins.left() + margins.right()
+        fm = self.face_preview_summary_label.fontMetrics()
+
+        # Account for both header states: summary+follow and selected+all+none.
+        summary_follow = fm.horizontalAdvance("Faces 999 | Done 999")
+        selected_summary = fm.horizontalAdvance("Selected: 99/99")
+        follow_w = self.face_preview_auto_follow_checkbox.sizeHint().width()
+        all_w = self.face_select_all_button.sizeHint().width()
+        none_w = self.face_select_none_button.sizeHint().width()
+        follow_state_w = summary_follow + spacing + follow_w
+        selection_state_w = selected_summary + spacing + all_w + spacing + none_w
+        content_w = max(follow_state_w, selection_state_w)
+        return int(content_w + margin_lr + 6)
+
     def _get_face_strip_card_width(self, wide_mode):
         if not wide_mode:
             return 116
         side = max(240, int(getattr(self, "current_wide_preview_side", 360)))
-        # Keep vertical rail compact while scaling mildly with preview size.
-        return max(98, min(132, int(round(side * 0.30))))
+        # Wide mode panel must be wide enough for the header row ("Faces N | Done" + checkbox).
+        # panel_w = card_w + 2*SPROCKET_BAND(12) = card_w + 24, so card_w >= 136 → panel >= 160px.
+        return max(136, min(156, int(round(side * 0.35))))
 
     def apply_responsive_layout(self, force=False):
         if not hasattr(self, "content_layout"):
@@ -3283,6 +3311,10 @@ class MainWindow(QMainWindow):
             self.face_select_none_button.setEnabled((not is_running) and self.awaiting_face_selection)
         if hasattr(self, "face_preview_auto_follow_checkbox"):
             self.face_preview_auto_follow_checkbox.setEnabled(not is_running)
+        if hasattr(self, "redetect_faces_button"):
+            self.redetect_faces_button.setEnabled(not is_running)
+        if hasattr(self, "det_threshold_slider"):
+            self.det_threshold_slider.setEnabled(not is_running)
 
         if is_running:
             self.advanced_dialog.use_gfpgan_checkbox.setEnabled(False)
@@ -3443,10 +3475,15 @@ class MainWindow(QMainWindow):
         if self.current_run_phase == "preprocess":
             suppress_all_preprocess_ui = bool(self.suppress_preprocess_ui_until_rephoto)
             if s.startswith("=== Face crop step"):
-                if not suppress_all_preprocess_ui:
-                    self.set_preprocess_progress(20, "Cropping faces")
-                    self.preprocess_stage = "cropping"
-                    self.set_result_stage_overlay("Cropping")
+                if "skipped" in s.lower():
+                    if not suppress_all_preprocess_ui:
+                        self.set_preprocess_progress(40, "Crops reused")
+                        self.preprocess_stage = "crops_ready"
+                else:
+                    if not suppress_all_preprocess_ui:
+                        self.set_preprocess_progress(20, "Cropping faces")
+                        self.preprocess_stage = "cropping"
+                        self.set_result_stage_overlay("Cropping")
                 return
 
             if s.startswith("=== GFPGAN step"):
@@ -3653,6 +3690,12 @@ class MainWindow(QMainWindow):
             self.update_iteration_slider_mode(use_advanced_iters)
             self.update_mode_controls()
             self.update_runtime_label()
+            # Sync detection threshold slider with dialog value
+            new_det = dlg.det_threshold_edit.value()
+            self.det_threshold_slider.blockSignals(True)
+            self.det_threshold_slider.setValue(int(new_det * 100))
+            self.det_threshold_slider.blockSignals(False)
+            self.det_threshold_value_label.setText(f"{new_det:.2f}")
             self.log_box.append("Advanced settings updated.")
         else:
             dlg.strategy_combo.setCurrentText(old_strategy)
@@ -3678,6 +3721,11 @@ class MainWindow(QMainWindow):
             dlg.camera_lr_edit.setValue(old_camera_lr)
             dlg.mix_layer_start_edit.setValue(old_mix_layer_start)
             dlg.mix_layer_end_edit.setValue(old_mix_layer_end)
+            # Restore detection threshold slider to match restored dialog value
+            self.det_threshold_slider.blockSignals(True)
+            self.det_threshold_slider.setValue(int(old_det_threshold * 100))
+            self.det_threshold_slider.blockSignals(False)
+            self.det_threshold_value_label.setText(f"{old_det_threshold:.2f}")
             self.update_spectral_sensitivity_ui()
             self.update_mode_controls()
             self.update_runtime_label()
@@ -5952,6 +6000,18 @@ Write-Output "OK"
             if muted:
                 # Deliberately darken skipped faces to improve selected/skipped contrast.
                 painter.fillRect(thumb.rect(), QColor(18, 21, 26, 150))
+            # Draw face number overlay in bottom-right corner
+            if fallback_text:
+                num_font = QFont("Segoe UI", 8, QFont.Bold)
+                painter.setFont(num_font)
+                fm = painter.fontMetrics()
+                tw = fm.horizontalAdvance(fallback_text) + 6
+                th = fm.height() + 2
+                nr_x = thumb_size - tw - 2
+                nr_y = thumb_size - th - 2
+                painter.fillRect(nr_x, nr_y, tw, th, QColor(0, 0, 0, 160))
+                painter.setPen(QColor("#d0d4dc"))
+                painter.drawText(nr_x, nr_y, tw, th, Qt.AlignCenter, fallback_text)
         else:
             painter.setPen(QColor("#7f8794"))
             painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
@@ -6104,8 +6164,7 @@ Write-Output "OK"
         self.face_preview_summary_label.setStyleSheet("color: #aeb4be;")
         self._update_batch_queue_status()
 
-        # Faces loaded — hide the painted empty frames, show real buttons
-        self.face_preview_strip_filmstrip.show_empty_frames = False
+        # Repaint filmstrip (frames paint behind face buttons for visual continuity)
         self.face_preview_strip_filmstrip.update()
 
         # Always show the filmstrip, even with single face
@@ -6134,15 +6193,29 @@ Write-Output "OK"
             # Keep selected faces first once continuation starts.
             display_entries = sorted(entries, key=lambda e: (not bool(e.get("selected", False)), e["index"]))
 
-        # Restore margins for populated filmstrip
-        self.face_preview_strip_layout.setContentsMargins(4, 2, 4, 2)
-        self.face_preview_strip_layout.setSpacing(5)
-
-        # Compute frame size to fill area between sprocket bands
         sprocket = FilmstripContainerWidget.SPROCKET_BAND
         if wide_mode:
-            # In wide mode (vertical filmstrip): make cards square so all faces fit and scroll
-            card_w = self._get_face_strip_card_width(wide_mode)
+            # Vertical filmstrip: inset cards from sprocket bands and add
+            # breathing room between adjacent tiles.
+            gutter = 3  # px each side so card borders don't touch sprockets
+            self.face_preview_strip_layout.setContentsMargins(gutter, 2, gutter, 2)
+            self.face_preview_strip_layout.setSpacing(7)  # visible gap between 1px borders
+        else:
+            self.face_preview_strip_layout.setContentsMargins(4, 2, 4, 2)
+            self.face_preview_strip_layout.setSpacing(4)
+
+        # Compute frame size to fill area between sprocket bands
+        if wide_mode:
+            # Available content lane = filmstrip inner width minus gutters and
+            # scrollbar so cards never bleed into sprocket bands even when
+            # the vertical scrollbar is visible.
+            scrollbar_w = max(5, self.face_preview_strip_scroll.verticalScrollBar().sizeHint().width())
+            content_lane = self.face_preview_strip_filmstrip.width() - 2 * sprocket
+            if content_lane <= 0:
+                content_lane = self._get_face_strip_card_width(wide_mode)
+            # Keep a small safety margin to avoid 1px border clipping under
+            # high-DPI scaling and scrollbar visibility toggles.
+            card_w = max(88, content_lane - 2 * gutter - scrollbar_w - 2)
             card_h = card_w  # Square cards in vertical layout
             thumb_size = max(48, card_w - 8)
         else:
@@ -6152,10 +6225,7 @@ Write-Output "OK"
             avail_h = self.face_preview_strip_filmstrip.maximumHeight() - sprocket * 2 - 4 - 5 - 4
             card_w = max(88, avail_h)
             card_h = avail_h
-            thumb_size = max(48, card_w - 8)
-
-        if wide_mode:
-            self.face_preview_strip_layout.addStretch(1)
+            thumb_size = max(48, card_h - 8)
 
         for entry in display_entries:
             idx = entry["index"]
@@ -6170,20 +6240,25 @@ Write-Output "OK"
             button = FaceStripToolButton()
             button.setCheckable(True)
             button.setChecked(is_selected if selection_mode else (idx == self.selected_face_preview_index))
-            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-            is_muted = not is_selected
+            button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            # In selection mode, show all faces at full brightness so they look
+            # interactable — use borders/check state for selection feedback.
+            is_muted = (not is_selected) and (not selection_mode)
             button.setIconSize(QSize(thumb_size, thumb_size))
             button.setFixedSize(card_w, card_h)
             button.setCursor(Qt.PointingHandCursor)
-            button.setFont(QFont("Segoe UI", 7))
-            button.setText(f"{idx + 1}")
             button.setIcon(self._make_face_thumb_icon(icon_path, str(idx + 1), muted=is_muted, thumb_size=thumb_size))
 
             # Frame styling matching app color scheme
             if button.isChecked():
                 border = "#4a9eff"
             elif selection_mode:
-                border = "#1f6fd9" if is_selected else "#2a3038"
+                if is_selected:
+                    border = "#1f6fd9"
+                elif status == "done":
+                    border = "#2e8b57"  # Green tint for completed faces
+                else:
+                    border = "#2a3038"
             else:
                 border = status_style_map.get(status, "#2a3038")
             if is_muted:
@@ -6204,10 +6279,7 @@ Write-Output "OK"
             button.clicked.connect(
                 lambda checked=False, i=idx: self.select_face_preview(i, user_initiated=True, selection_checked=checked)
             )
-            if wide_mode:
-                self.face_preview_strip_layout.addWidget(button, 0, Qt.AlignHCenter)
-            else:
-                self.face_preview_strip_layout.addWidget(button)
+            self.face_preview_strip_layout.addWidget(button)
 
         self.face_preview_strip_layout.addStretch(1)
         self._face_strip_render_signature = render_signature
@@ -6217,15 +6289,15 @@ Write-Output "OK"
         # occurs when the primary-axis scrollbar eats a few pixels.
         def _clamp_cross_axis():
             if wide_mode:
-                # In horizontal mode, clamp the cross-axis (height) to viewport height
-                vp_h = self.face_preview_strip_scroll.viewport().height()
-                if vp_h > 0:
-                    self.face_preview_strip_container.setMaximumHeight(vp_h)
-            else:
-                # In vertical mode, clamp the cross-axis (width) to viewport width
+                # Wide mode = vertical filmstrip (TopToBottom); clamp cross-axis (width)
                 vp_w = self.face_preview_strip_scroll.viewport().width()
                 if vp_w > 0:
                     self.face_preview_strip_container.setMaximumWidth(vp_w)
+            else:
+                # Stacked mode = horizontal filmstrip (LeftToRight); clamp cross-axis (height)
+                vp_h = self.face_preview_strip_scroll.viewport().height()
+                if vp_h > 0:
+                    self.face_preview_strip_container.setMaximumHeight(vp_h)
         QTimer.singleShot(0, _clamp_cross_axis)
 
     def set_hover_face_preview_index(self, face_index, source="strip"):
@@ -6552,10 +6624,10 @@ Write-Output "OK"
                 if et == QEvent.Wheel:
                     wide = getattr(self, "_wide_layout_active", False)
                     delta = event.angleDelta()
-                    if wide and delta.y() != 0:
-                        return True  # block vertical wheel in horizontal filmstrip (cross-axis)
-                    if not wide and delta.x() != 0:
-                        return True  # block horizontal wheel in vertical filmstrip (cross-axis)
+                    if wide and delta.x() != 0:
+                        return True  # wide = vertical filmstrip; block horizontal wheel (cross-axis)
+                    if not wide and delta.y() != 0:
+                        return True  # stacked = horizontal filmstrip; block vertical wheel (cross-axis)
                 if et in (QEvent.MouseMove, QEvent.HoverMove):
                     vp_pos = event.pos()
                     container_pos = self.face_preview_strip_container.mapFrom(watched, vp_pos)
@@ -6606,13 +6678,25 @@ Write-Output "OK"
         if chosen_path is not None and Path(chosen_path).exists():
             self.set_result_preview_image(Path(chosen_path))
 
-        if user_initiated and self.face_preview_auto_follow_checkbox.isChecked() and (not self.awaiting_face_selection):
-            # Keep auto-follow enabled but still allow manual inspection.
-            pass
+        if user_initiated and (not self.awaiting_face_selection) and self._is_processing_active():
+            # User manually clicked a face during processing — suppress auto-follow
+            # so the before/after slider doesn't jump to a different face.
+            self._user_inspecting_completed_face = True
 
         if self.awaiting_face_selection:
-            self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
+            selected_count = len(self.get_selected_face_indices())
+            self.run_button.setEnabled(selected_count > 0)
             self.update_runtime_label()
+            if user_initiated:
+                is_now_selected = bool(entry.get("selected", False))
+                face_num = face_index + 1
+                if selected_count > 0:
+                    action = "selected" if is_now_selected else "deselected"
+                    self.status_label.setText(
+                        f"Status: Face {face_num} {action} — {selected_count} face(s) ready, click Run"
+                    )
+                else:
+                    self.status_label.setText("Status: Select at least one face, then click Run")
 
         self.render_face_preview_strip()
         self.refresh_input_preview_scale()
@@ -6703,11 +6787,20 @@ Write-Output "OK"
     def _get_focused_face_preview_index(self):
         if not self.face_preview_entries:
             return None
-        candidates = [
-            self.active_face_preview_index,
-            self.hover_face_preview_index,
-            self.selected_face_preview_index,
-        ]
+        # When the user has manually clicked a completed face during processing,
+        # prefer their selection over the actively-processing face index.
+        if self._user_inspecting_completed_face:
+            candidates = [
+                self.selected_face_preview_index,
+                self.hover_face_preview_index,
+                self.active_face_preview_index,
+            ]
+        else:
+            candidates = [
+                self.active_face_preview_index,
+                self.hover_face_preview_index,
+                self.selected_face_preview_index,
+            ]
         for candidate in candidates:
             if isinstance(candidate, int) and 0 <= candidate < len(self.face_preview_entries):
                 return candidate
@@ -6746,13 +6839,20 @@ Write-Output "OK"
         return self.input_pixmap
 
     def _resolve_enhanced_preview_for_crop(self, crop_path: Path):
-        if crop_path is None or (not self.current_blended_faces_dir):
+        if crop_path is None:
+            return None
+
+        # If the input IS already a blended face, return it directly
+        stem = crop_path.stem
+        if stem.endswith("_blend") and crop_path.exists():
+            return crop_path
+
+        if not self.current_blended_faces_dir:
             return None
         blended_dir = Path(self.current_blended_faces_dir)
         if not blended_dir.exists():
             return None
 
-        stem = crop_path.stem
         preferred = []
         crop_suffix = crop_path.suffix.lower()
         if crop_suffix:
@@ -6774,12 +6874,21 @@ Write-Output "OK"
     def _find_face_index_for_crop_path(self, crop_path: Path):
         crop_name = crop_path.name.lower()
         crop_stem = crop_path.stem.lower()
+        # When GFPGAN is used, projector input is the blended face (e.g. face_0_blend.png).
+        # Strip the _blend suffix to match against original crop entries (face_0.png).
+        stripped_stem = crop_stem
+        if stripped_stem.endswith("_blend"):
+            stripped_stem = stripped_stem[:-6]
         for entry in self.face_preview_entries:
             entry_crop = entry.get("crop_path")
             if entry_crop is None:
                 continue
             ec = Path(entry_crop)
-            if ec.name.lower() == crop_name or ec.stem.lower() == crop_stem:
+            ec_name = ec.name.lower()
+            ec_stem = ec.stem.lower()
+            if ec_name == crop_name or ec_stem == crop_stem:
+                return entry["index"]
+            if stripped_stem != crop_stem and ec_stem == stripped_stem:
                 return entry["index"]
         return None
 
@@ -6821,16 +6930,24 @@ Write-Output "OK"
         if not bool(entry.get("selected", False)):
             return
         if entry.get("crop_path") is None:
-            entry["crop_path"] = crop_path
+            # Don't store blended face paths as crop_path — keep original crop
+            if not crop_path.stem.endswith("_blend"):
+                entry["crop_path"] = crop_path
         if entry.get("status") != "done":
             entry["status"] = "running"
 
         self.active_face_preview_index = idx
-        if self.face_preview_auto_follow_checkbox.isChecked():
+        if self.face_preview_auto_follow_checkbox.isChecked() and not self._user_inspecting_completed_face:
             self.selected_face_preview_index = idx
             preview_path = entry.get("result_path")
             if preview_path is None:
-                preview_path = self._resolve_enhanced_preview_for_crop(crop_path) or entry.get("crop_path")
+                # Try to resolve the enhanced/blended version for display
+                enhanced = self._resolve_enhanced_preview_for_crop(crop_path)
+                if enhanced is None:
+                    original_crop = entry.get("crop_path")
+                    if original_crop is not None:
+                        enhanced = self._resolve_enhanced_preview_for_crop(Path(original_crop))
+                preview_path = enhanced or entry.get("crop_path")
             if preview_path is not None and Path(preview_path).exists():
                 self.set_result_preview_image(Path(preview_path))
         self.render_face_preview_strip()
@@ -6868,7 +6985,7 @@ Write-Output "OK"
         entry["status"] = "done"
         self.active_face_preview_index = None
 
-        if self.face_preview_auto_follow_checkbox.isChecked():
+        if self.face_preview_auto_follow_checkbox.isChecked() and not self._user_inspecting_completed_face:
             self.selected_face_preview_index = idx
             if result_path.exists():
                 self.set_result_preview_image(result_path)
@@ -7898,13 +8015,14 @@ Write-Output "OK"
         crop_files = self._list_image_files_in_dir(crop_dir)
         return len(crop_files) > 0
 
-    def _reset_wrapper_runtime_tracking(self, preserve_crop_dir=False):
+    def _reset_wrapper_runtime_tracking(self, preserve_crop_dir=False, preserve_enhance_dirs=False):
         if not preserve_crop_dir:
             self.current_crop_output_dir = None
             self._crop_source_input_key = None
             self._crop_source_face_factor = None
-        self.current_gfpgan_output_dir = None
-        self.current_blended_faces_dir = None
+        if not preserve_enhance_dirs:
+            self.current_gfpgan_output_dir = None
+            self.current_blended_faces_dir = None
         self.current_results_dir = None
         self.current_manifest_path = None
         self.current_run_result_dirs = set()
@@ -8018,6 +8136,7 @@ Write-Output "OK"
 
         self._sync_face_preview_crop_paths()
         self.awaiting_face_selection = False
+        self._user_inspecting_completed_face = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.set_input_detect_overlay(False)
         self.update_image_import_controls()
@@ -8044,7 +8163,7 @@ Write-Output "OK"
         self.current_run_phase = "preprocess"
         self.set_preprocess_progress(5, "Preparing selected faces...")
         self.set_rephoto_progress(0, "Waiting...")
-        self._reset_wrapper_runtime_tracking()
+        self._reset_wrapper_runtime_tracking(preserve_crop_dir=True, preserve_enhance_dirs=True)
         self._prepare_stop_flag_for_new_run()
 
         # Continuation must reuse the exact crop set shown in selection UI.
@@ -8082,6 +8201,7 @@ Write-Output "OK"
 
     def process_finished(self, exit_code, exit_status):
         self.run_paused = False
+        self._user_inspecting_completed_face = False
         self._clear_current_stop_flag()
         self._clear_current_pause_flag()
         if hasattr(self, "_elapsed_timer"):
@@ -8236,18 +8356,32 @@ Write-Output "OK"
         self.set_input_detect_overlay(False)
         self.current_run_summary_context = None
 
+        # Clear process reference BEFORE re-enabling face interaction so that
+        # _is_processing_active() returns False during the strip re-render.
+        self.process = None
+
         # Re-enable face selection if crops still exist so the user can
         # pick additional or different faces for another run.
         has_face_entries = len(self.face_preview_entries) > 1
         if has_face_entries and self.current_crop_output_dir:
+            # Deselect completed faces so the user starts fresh for the next run.
+            # "Done" faces keep their status for visual distinction but are no longer
+            # pre-selected, making it clear which faces will run next.
+            for entry in self.face_preview_entries:
+                if entry.get("status") == "done":
+                    entry["selected"] = False
             self.awaiting_face_selection = True
             self.set_run_button_continue_mode(True)
-            self.render_face_preview_strip()
+            done_count = sum(1 for e in self.face_preview_entries if e.get("status") == "done")
+            remaining = len(self.face_preview_entries) - done_count
+            self.status_label.setText(
+                f"Status: Run complete — select additional faces to process ({remaining} remaining)"
+            )
         else:
             self.awaiting_face_selection = False
             self.set_run_button_continue_mode(False)
 
-        self.process = None
+        self.render_face_preview_strip()
         self.set_controls_for_running(False)
         self.run_started_at = None
         self.rephoto_started_at = None
@@ -8255,6 +8389,7 @@ Write-Output "OK"
 
     def process_error(self, process_error):
         self.run_paused = False
+        self._user_inspecting_completed_face = False
         self._clear_current_stop_flag()
         self._clear_current_pause_flag()
         if hasattr(self, "_elapsed_timer"):
@@ -8284,17 +8419,18 @@ Write-Output "OK"
         self.selection_preprocess_mode = False
         self.current_run_summary_context = None
 
+        self.process = None
+
         # Re-enable face selection if crops still exist.
         has_face_entries = len(self.face_preview_entries) > 1
         if has_face_entries and self.current_crop_output_dir:
             self.awaiting_face_selection = True
             self.set_run_button_continue_mode(True)
-            self.render_face_preview_strip()
         else:
             self.awaiting_face_selection = False
             self.set_run_button_continue_mode(False)
 
-        self.process = None
+        self.render_face_preview_strip()
         self.set_controls_for_running(False)
         self.run_started_at = None
         self.rephoto_started_at = None
