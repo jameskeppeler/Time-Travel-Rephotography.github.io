@@ -6217,13 +6217,15 @@ Write-Output "OK"
         # occurs when the primary-axis scrollbar eats a few pixels.
         def _clamp_cross_axis():
             if wide_mode:
-                vp_w = self.face_preview_strip_scroll.viewport().width()
-                if vp_w > 0:
-                    self.face_preview_strip_container.setMaximumWidth(vp_w)
-            else:
+                # In horizontal mode, clamp the cross-axis (height) to viewport height
                 vp_h = self.face_preview_strip_scroll.viewport().height()
                 if vp_h > 0:
                     self.face_preview_strip_container.setMaximumHeight(vp_h)
+            else:
+                # In vertical mode, clamp the cross-axis (width) to viewport width
+                vp_w = self.face_preview_strip_scroll.viewport().width()
+                if vp_w > 0:
+                    self.face_preview_strip_container.setMaximumWidth(vp_w)
         QTimer.singleShot(0, _clamp_cross_axis)
 
     def set_hover_face_preview_index(self, face_index, source="strip"):
@@ -6550,10 +6552,10 @@ Write-Output "OK"
                 if et == QEvent.Wheel:
                     wide = getattr(self, "_wide_layout_active", False)
                     delta = event.angleDelta()
-                    if wide and delta.x() != 0:
-                        return True  # block horizontal wheel in vertical filmstrip
-                    if not wide and delta.y() != 0:
-                        return True  # block vertical wheel in horizontal filmstrip
+                    if wide and delta.y() != 0:
+                        return True  # block vertical wheel in horizontal filmstrip (cross-axis)
+                    if not wide and delta.x() != 0:
+                        return True  # block horizontal wheel in vertical filmstrip (cross-axis)
                 if et in (QEvent.MouseMove, QEvent.HoverMove):
                     vp_pos = event.pos()
                     container_pos = self.face_preview_strip_container.mapFrom(watched, vp_pos)
