@@ -2111,8 +2111,15 @@ class MainWindow(QMainWindow):
         det_threshold_widget.setLayout(det_threshold_row)
         form_layout.addRow(self.det_threshold_label, det_threshold_widget)
 
-        # Add Auto-recompose checkbox
-        form_layout.addRow(self.auto_recompose_checkbox)
+        # Add Auto-recompose checkbox (full width)
+        auto_recompose_widget = QWidget()
+        auto_recompose_layout = QHBoxLayout()
+        auto_recompose_layout.setContentsMargins(0, 0, 0, 0)
+        auto_recompose_layout.setSpacing(0)
+        auto_recompose_layout.addWidget(self.auto_recompose_checkbox)
+        auto_recompose_layout.addStretch(1)
+        auto_recompose_widget.setLayout(auto_recompose_layout)
+        form_layout.addRow(auto_recompose_widget)
 
         # Initialize spectral sensitivity widgets with defaults
         self.photo_type_combo.setCurrentText("Unknown")
