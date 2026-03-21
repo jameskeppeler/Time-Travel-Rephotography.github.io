@@ -754,6 +754,21 @@ class AdvancedSettingsDialog(QDialog):
         self.preset_high_quality_button.clicked.connect(self._apply_preset_high_quality)
         presets_layout.addWidget(self.preset_high_quality_button)
 
+        presets_info_button = InstantToolButton()
+        presets_info_button.setText("ⓘ")
+        presets_info_button.setAutoRaise(True)
+        presets_info_button.setFixedSize(16, 16)
+        presets_info_button.setCursor(Qt.PointingHandCursor)
+        presets_info_button.setToolTip(
+            "<b>Quality Presets</b><br/>"
+            "<b>Quick:</b> Fast processing, lower loss weights (identity/tonal/eye/structure all set to Lower), higher learning rate (0.15), lower noise regularization (10000). "
+            "Good for quick previews and iterative testing.<br/><br/>"
+            "<b>Balanced:</b> Recommended defaults. Moderate loss weights (all set to Default), standard learning rate (0.1), standard noise regularization (50000). "
+            "Best for most historical photos where quality and speed matter equally.<br/><br/>"
+            "<b>High Quality:</b> Maximum fidelity. All loss weights set to Higher for maximum preservation of identity, tonality, eyes, and structure. "
+            "Slower learning rate (0.08), higher noise regularization (100000) for more careful optimization. Best for final results where quality is critical."
+        )
+        presets_layout.addWidget(presets_info_button)
         presets_layout.addStretch(1)
         layout.addLayout(presets_layout)
 
@@ -782,6 +797,12 @@ class AdvancedSettingsDialog(QDialog):
 
         self.use_gfpgan_checkbox = QCheckBox("Disable enhancement (GFPGAN)")
         self.use_gfpgan_checkbox.toggled.connect(self.update_enhancement_controls)
+
+        self.auto_recompose_checkbox_adv = QCheckBox("Auto-recompose after rephoto")
+        self.auto_recompose_checkbox_adv.setChecked(False)
+        self.auto_recompose_checkbox_adv.setToolTip(
+            "Automatically apply Color blend recomposition once each face finishes rephotography"
+        )
 
         self.det_threshold_edit = NoScrollDoubleSpinBox()
         self.det_threshold_edit.setRange(0.0, 1.0)
@@ -870,6 +891,13 @@ class AdvancedSettingsDialog(QDialog):
                 "Turns face enhancement on or off before rephotography. Enhancement can improve damaged or blurry faces, but may also introduce modern-looking details."
             ),
             self.use_gfpgan_checkbox,
+        )
+        core_form.addRow(
+            self.make_label_with_info(
+                "Auto-recompose",
+                "Automatically apply Color blend recomposition once each face finishes rephotography, blending the rephoto result back into the original image with preserved luminance."
+            ),
+            self.auto_recompose_checkbox_adv,
         )
         core_form.addRow(
             self.make_label_with_info(
@@ -1905,6 +1933,9 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
+        # Sync auto-recompose checkbox between main form and advanced dialog
+        self.advanced_dialog.auto_recompose_checkbox_adv.toggled.connect(self._sync_auto_recompose_from_adv)
+        self.auto_recompose_checkbox.toggled.connect(self._sync_auto_recompose_from_main)
 
         # --- Auto-recomposition checkbox ---
         self.auto_recompose_checkbox = QCheckBox("Auto-recompose after rephoto")
@@ -3040,6 +3071,18 @@ class MainWindow(QMainWindow):
         self.det_threshold_value_label.setText(f"{val:.2f}")
         if hasattr(self, "advanced_dialog"):
             self.advanced_dialog.det_threshold_edit.setValue(val)
+
+    def _sync_auto_recompose_from_adv(self):
+        """Sync auto-recompose checkbox from advanced dialog to main form."""
+        self.auto_recompose_checkbox.blockSignals(True)
+        self.auto_recompose_checkbox.setChecked(self.advanced_dialog.auto_recompose_checkbox_adv.isChecked())
+        self.auto_recompose_checkbox.blockSignals(False)
+
+    def _sync_auto_recompose_from_main(self):
+        """Sync auto-recompose checkbox from main form to advanced dialog."""
+        self.advanced_dialog.auto_recompose_checkbox_adv.blockSignals(True)
+        self.advanced_dialog.auto_recompose_checkbox_adv.setChecked(self.auto_recompose_checkbox.isChecked())
+        self.advanced_dialog.auto_recompose_checkbox_adv.blockSignals(False)
 
     def run_face_detection(self):
         """Re-run face detection using the current threshold setting."""
