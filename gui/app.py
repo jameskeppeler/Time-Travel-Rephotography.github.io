@@ -2554,6 +2554,10 @@ class MainWindow(QMainWindow):
 
         filmstrip_h = 142
         band = FilmstripContainerWidget.SPROCKET_BAND
+        # Reset cross-axis container constraints from the previous mode
+        self.face_preview_strip_container.setMaximumWidth(16777215)
+        self.face_preview_strip_container.setMaximumHeight(16777215)
+
         if use_wide_layout:
             card_w = self._get_face_strip_card_width(True)
             panel_w = card_w + 34
@@ -5983,6 +5987,20 @@ Write-Output "OK"
         self.face_preview_strip_layout.addStretch(1)
         self._face_strip_render_signature = render_signature
 
+        # Clamp the container's cross-axis maximum so its content can never
+        # exceed the viewport — eliminates slight cross-axis scroll bleed that
+        # occurs when the primary-axis scrollbar eats a few pixels.
+        def _clamp_cross_axis():
+            if wide_mode:
+                vp_w = self.face_preview_strip_scroll.viewport().width()
+                if vp_w > 0:
+                    self.face_preview_strip_container.setMaximumWidth(vp_w)
+            else:
+                vp_h = self.face_preview_strip_scroll.viewport().height()
+                if vp_h > 0:
+                    self.face_preview_strip_container.setMaximumHeight(vp_h)
+        QTimer.singleShot(0, _clamp_cross_axis)
+
     def set_hover_face_preview_index(self, face_index, source="strip"):
         idx = face_index
         if idx is not None:
@@ -6301,6 +6319,16 @@ Write-Output "OK"
 
             if hasattr(self, "face_preview_strip_scroll") and watched is self.face_preview_strip_scroll.viewport():
                 et = event.type()
+                # Block wheel scrolling on the cross-axis (prevents slight
+                # vertical jitter in horizontal mode, horizontal jitter in
+                # vertical mode).
+                if et == QEvent.Wheel:
+                    wide = getattr(self, "_wide_layout_active", False)
+                    delta = event.angleDelta()
+                    if wide and delta.x() != 0:
+                        return True  # block horizontal wheel in vertical filmstrip
+                    if not wide and delta.y() != 0:
+                        return True  # block vertical wheel in horizontal filmstrip
                 if et in (QEvent.MouseMove, QEvent.HoverMove):
                     vp_pos = event.pos()
                     container_pos = self.face_preview_strip_container.mapFrom(watched, vp_pos)
