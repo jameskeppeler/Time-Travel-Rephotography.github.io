@@ -1930,19 +1930,19 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.mix_layer_start_edit.setValue(10)
         self.advanced_dialog.mix_layer_end_edit.setValue(18)
 
-        self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
-        self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
-        self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
-        # Sync auto-recompose checkbox between main form and advanced dialog
-        self.advanced_dialog.auto_recompose_checkbox_adv.toggled.connect(self._sync_auto_recompose_from_adv)
-        self.auto_recompose_checkbox.toggled.connect(self._sync_auto_recompose_from_main)
-
         # --- Auto-recomposition checkbox ---
         self.auto_recompose_checkbox = QCheckBox("Auto-recompose after rephoto")
         self.auto_recompose_checkbox.setChecked(False)
         self.auto_recompose_checkbox.setToolTip(
             "Automatically apply Color blend recomposition once each face finishes rephotography"
         )
+
+        self.advanced_dialog.crop_only_checkbox.toggled.connect(self.update_mode_controls)
+        self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
+        self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
+        # Sync auto-recompose checkbox between main form and advanced dialog
+        self.advanced_dialog.auto_recompose_checkbox_adv.toggled.connect(self._sync_auto_recompose_from_adv)
+        self.auto_recompose_checkbox.toggled.connect(self._sync_auto_recompose_from_main)
 
         # --- Detection threshold (linked to advanced dialog) ---
         self.det_threshold_label = QLabel("Detection threshold:")
