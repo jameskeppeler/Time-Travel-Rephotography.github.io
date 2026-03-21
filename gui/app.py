@@ -2311,6 +2311,18 @@ class MainWindow(QMainWindow):
         self.input_preview_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         input_layout.addWidget(self.input_preview_label)
         self.input_detect_overlay = InputDetectOverlay(self.input_preview_label)
+        # Re-detect faces button (with adjusted threshold)
+        self.redetect_faces_button = QPushButton("Re-detect Faces (with current threshold)")
+        self.redetect_faces_button.setFixedHeight(32)
+        self.redetect_faces_button.setToolTip(
+            "Run face detection again using the current threshold setting. "
+            "Use a lower threshold to detect more faces, higher to detect only clear faces."
+        )
+        self.redetect_faces_button.clicked.connect(self.run_face_detection)
+        self.redetect_faces_button.setEnabled(False)
+        self.redetect_faces_button.setVisible(False)
+        input_layout.addWidget(self.redetect_faces_button)
+
         self.input_preview_footer_spacer = QWidget()
         self.input_preview_footer_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.input_preview_footer_spacer.setFixedHeight(32)
@@ -3021,6 +3033,28 @@ class MainWindow(QMainWindow):
         self.det_threshold_value_label.setText(f"{val:.2f}")
         if hasattr(self, "advanced_dialog"):
             self.advanced_dialog.det_threshold_edit.setValue(val)
+
+    def run_face_detection(self):
+        """Re-run face detection using the current threshold setting."""
+        if not self.input_image_edit.text().strip():
+            self.log_box.append("No input image selected. Please load an image first.")
+            return
+
+        # Clear existing face entries and run detection in crop-only mode
+        self.face_preview_entries = []
+        self.selected_face_preview_index = None
+        self.render_face_preview_strip()
+
+        # Build and run the detection command (crop-only mode)
+        try:
+            command = self.build_wrapper_command(force_crop_only=True)
+            if command:
+                self.log_box.append(f"Re-detecting faces with threshold {self.advanced_dialog.det_threshold_edit.value():.2f}...")
+                self._execute_wrapper_command(command, phase="preprocess")
+        except Exception as e:
+            self.log_box.append(f"Error re-detecting faces: {e}")
+            import traceback
+            traceback.print_exc()
 
     def _update_batch_queue_status(self):
         """Update batch processing queue status label."""
@@ -5807,6 +5841,11 @@ Write-Output "OK"
         self.update_input_face_boxes_for_preview(expected_count=expected_count)
         self.update_runtime_label()
         self.render_face_preview_strip()
+
+        # Show re-detect button if faces were found
+        if hasattr(self, "redetect_faces_button"):
+            self.redetect_faces_button.setVisible(bool(self.face_preview_entries))
+            self.redetect_faces_button.setEnabled(bool(self.face_preview_entries))
 
     def _face_thumb_icon_cache_key(self, image_path, fallback_text, muted, thumb_size):
         normalized = ""
