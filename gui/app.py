@@ -733,6 +733,30 @@ class AdvancedSettingsDialog(QDialog):
         layout = QVBoxLayout()
         self.setLayout(layout)
 
+        # Quality presets row
+        presets_layout = QHBoxLayout()
+        presets_layout.setContentsMargins(0, 0, 0, 8)
+        presets_layout.setSpacing(6)
+        presets_layout.addWidget(QLabel("Presets:"))
+
+        self.preset_quick_button = QPushButton("Quick")
+        self.preset_quick_button.setMaximumWidth(80)
+        self.preset_quick_button.clicked.connect(self._apply_preset_quick)
+        presets_layout.addWidget(self.preset_quick_button)
+
+        self.preset_balanced_button = QPushButton("Balanced")
+        self.preset_balanced_button.setMaximumWidth(80)
+        self.preset_balanced_button.clicked.connect(self._apply_preset_balanced)
+        presets_layout.addWidget(self.preset_balanced_button)
+
+        self.preset_high_quality_button = QPushButton("High Quality")
+        self.preset_high_quality_button.setMaximumWidth(100)
+        self.preset_high_quality_button.clicked.connect(self._apply_preset_high_quality)
+        presets_layout.addWidget(self.preset_high_quality_button)
+
+        presets_layout.addStretch(1)
+        layout.addLayout(presets_layout)
+
         tab_widget = QTabWidget()
 
         core_tab = QWidget()
@@ -995,6 +1019,36 @@ class AdvancedSettingsDialog(QDialog):
     def update_enhancement_controls(self):
         enhancement_enabled = (not self.use_gfpgan_checkbox.isChecked())
         self.gfpgan_blend_edit.setEnabled(enhancement_enabled)
+
+    def _apply_preset_quick(self):
+        """Quick preset: fast processing, lower quality loss weights."""
+        self.identity_preservation_combo.setCurrentText("Lower")
+        self.tonal_transfer_combo.setCurrentText("Lower")
+        self.eye_preservation_combo.setCurrentText("Lower")
+        self.structure_matching_combo.setCurrentText("Lower")
+        self.vgg_appearance_combo.setCurrentText("Off")
+        self.lr_edit.setValue(0.15)
+        self.noise_regularize_edit.setValue(10000.0)
+
+    def _apply_preset_balanced(self):
+        """Balanced preset: recommended settings for most photos."""
+        self.identity_preservation_combo.setCurrentText("Default")
+        self.tonal_transfer_combo.setCurrentText("Default")
+        self.eye_preservation_combo.setCurrentText("Default")
+        self.structure_matching_combo.setCurrentText("Default")
+        self.vgg_appearance_combo.setCurrentText("Default")
+        self.lr_edit.setValue(0.1)
+        self.noise_regularize_edit.setValue(50000.0)
+
+    def _apply_preset_high_quality(self):
+        """High Quality preset: maximum fidelity, longer processing."""
+        self.identity_preservation_combo.setCurrentText("Higher")
+        self.tonal_transfer_combo.setCurrentText("Higher")
+        self.eye_preservation_combo.setCurrentText("Higher")
+        self.structure_matching_combo.setCurrentText("Higher")
+        self.vgg_appearance_combo.setCurrentText("Higher")
+        self.lr_edit.setValue(0.08)
+        self.noise_regularize_edit.setValue(100000.0)
 
 class MainWindow(QMainWindow):
     def make_form_label(self, label_text):
@@ -1852,6 +1906,33 @@ class MainWindow(QMainWindow):
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_mode_controls)
         self.advanced_dialog.use_gfpgan_checkbox.toggled.connect(self.update_runtime_label)
 
+        # --- Auto-recomposition checkbox ---
+        self.auto_recompose_checkbox = QCheckBox("Auto-recompose after rephoto")
+        self.auto_recompose_checkbox.setChecked(False)
+        self.auto_recompose_checkbox.setToolTip(
+            "Automatically apply Color blend recomposition once each face finishes rephotography"
+        )
+
+        # --- Detection threshold (linked to advanced dialog) ---
+        self.det_threshold_label = QLabel("Detection threshold:")
+        self.det_threshold_slider = NoScrollSlider(Qt.Horizontal)
+        self.det_threshold_slider.setMinimum(0)
+        self.det_threshold_slider.setMaximum(100)
+        self.det_threshold_slider.setValue(90)
+        self.det_threshold_slider.setTickPosition(QSlider.TicksBelow)
+        self.det_threshold_slider.setTickInterval(10)
+        self.det_threshold_value_label = QLabel("0.90")
+        self.det_threshold_slider.valueChanged.connect(self._update_detection_threshold)
+        self.det_threshold_info = InstantToolButton()
+        self.det_threshold_info.setText("ⓘ")
+        self.det_threshold_info.setAutoRaise(True)
+        self.det_threshold_info.setFixedSize(16, 16)
+        self.det_threshold_info.setCursor(Qt.PointingHandCursor)
+        self.det_threshold_info.setToolTip(
+            "Face detection confidence threshold (0.0–1.0). Lower values detect more faces "
+            "(including blurry/partial), higher values detect only clear faces. 0.90 is recommended."
+        )
+
         # --- Iteration slider ---
         self.basic_iter_values = DEFAULT_BASIC_ITER_VALUES
         self.advanced_iter_values = DEFAULT_ADVANCED_ITER_VALUES
@@ -2019,6 +2100,20 @@ class MainWindow(QMainWindow):
         # Add Quality row as proper form row
         form_layout.addRow(self.quality_widget)
 
+        # Detection threshold row
+        det_threshold_row = QHBoxLayout()
+        det_threshold_row.setContentsMargins(0, 0, 0, 0)
+        det_threshold_row.setSpacing(6)
+        det_threshold_row.addWidget(self.det_threshold_slider, 1)
+        det_threshold_row.addWidget(self.det_threshold_value_label, 0)
+        det_threshold_row.addWidget(self.det_threshold_info, 0)
+        det_threshold_widget = QWidget()
+        det_threshold_widget.setLayout(det_threshold_row)
+        form_layout.addRow(self.det_threshold_label, det_threshold_widget)
+
+        # Add Auto-recompose checkbox
+        form_layout.addRow(self.auto_recompose_checkbox)
+
         # Initialize spectral sensitivity widgets with defaults
         self.photo_type_combo.setCurrentText("Unknown")
         self.approx_date_edit.setText("")
@@ -2066,8 +2161,18 @@ class MainWindow(QMainWindow):
         progress_row.addWidget(self.rephoto_progress_label, 0, Qt.AlignVCenter)
         progress_row.addLayout(progress_bars_layout, 1)
 
+        # Batch queue status label
+        self._batch_queue_label = QLabel("")
+        self._batch_queue_label.setStyleSheet("color: #8a919c; font-size: 10px;")
+        self._batch_queue_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
         progress_widget = QWidget()
-        progress_widget.setLayout(progress_row)
+        progress_layout = QVBoxLayout()
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        progress_layout.setSpacing(2)
+        progress_layout.addLayout(progress_row)
+        progress_layout.addWidget(self._batch_queue_label)
+        progress_widget.setLayout(progress_layout)
         progress_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
 
         self._elapsed_timer = QTimer(self)
@@ -2909,6 +3014,36 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "runtime_label") and hasattr(self, "update_runtime_label"):
             self.update_runtime_label()
+
+    def _update_detection_threshold(self):
+        """Update detection threshold display and sync with advanced dialog."""
+        val = self.det_threshold_slider.value() / 100.0
+        self.det_threshold_value_label.setText(f"{val:.2f}")
+        if hasattr(self, "advanced_dialog"):
+            self.advanced_dialog.det_threshold_edit.setValue(val)
+
+    def _update_batch_queue_status(self):
+        """Update batch processing queue status label."""
+        if not hasattr(self, "_batch_queue_label"):
+            return
+        entries = self.face_preview_entries
+        if not entries:
+            self._batch_queue_label.setText("")
+            return
+        queued = sum(1 for e in entries if e.get("status") == "queued")
+        running = sum(1 for e in entries if e.get("status") == "running")
+        done = sum(1 for e in entries if e.get("status") == "done")
+        failed = sum(1 for e in entries if e.get("status") == "failed")
+        total = len(entries)
+
+        if queued > 0:
+            status_text = f"Queue: {done}/{total} done • {queued} pending • {failed} failed" if failed else f"Queue: {done}/{total} done • {queued} pending"
+        elif running > 0:
+            status_text = f"Queue: {done}/{total} done • 1 processing • {failed} failed" if failed else f"Queue: {done}/{total} done • 1 processing"
+        else:
+            status_text = f"Queue: {done}/{total} done" + (f" • {failed} failed" if failed else "")
+
+        self._batch_queue_label.setText(status_text)
 
     def parse_approximate_year(self, text):
         """Convert flexible user date text into an approximate integer year, or None."""
@@ -5816,7 +5951,7 @@ Write-Output "OK"
                 self.face_preview_summary_label.setStyleSheet("color: #d4a054;")
             else:
                 self.face_preview_summary_label.setText("Faces: none")
-                self.face_preview_summary_label.setStyleSheet("color: #aeb4be;")
+            self._update_batch_queue_status()
             if hasattr(self, "face_selection_notice_label"):
                 self.face_selection_notice_label.setVisible(False)
             if hasattr(self, "face_select_all_button"):
@@ -5878,6 +6013,7 @@ Write-Output "OK"
                 self.face_selection_notice_label.setVisible(False)
         self.face_preview_summary_label.setText(summary)
         self.face_preview_summary_label.setStyleSheet("color: #aeb4be;")
+        self._update_batch_queue_status()
 
         # Faces loaded — hide the painted empty frames, show real buttons
         self.face_preview_strip_filmstrip.show_empty_frames = False
@@ -6647,6 +6783,10 @@ Write-Output "OK"
                 self.set_result_preview_image(result_path)
 
         self.render_face_preview_strip()
+
+        # Auto-recompose if enabled
+        if getattr(self, "auto_recompose_checkbox", None) and self.auto_recompose_checkbox.isChecked():
+            QTimer.singleShot(500, self.run_recomposite)
 
     def mark_face_failed_from_crop_name(self, crop_name_text):
         text = (crop_name_text or "").strip()
