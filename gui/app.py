@@ -12,9 +12,10 @@ import random
 import statistics
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
-from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QRadialGradient, QTextCursor
+from PySide6.QtCore import QEvent, QObject, QProcess, QRect, QRunnable, QSize, Qt, QThreadPool, QTimer, Signal
+from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QImage, QImageReader, QPainter, QPen, QPixmap, QRadialGradient, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -105,6 +106,81 @@ QUICK_FACE_DECISION_RE = re.compile(r"QUICK_FACE_DECISION_COUNT\s*=\s*(\d+)")
 RETINA_FACE_BOX_RE = re.compile(r"RETINA_FACE_BOX_(\d+)\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
 CROP_ALIGN_BOX_RE = re.compile(r"CROP_ALIGN_BOX_(\d+)\s*=\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)")
 FACE_SUFFIX_INDEX_RE = re.compile(r"_(\d+)$")
+NO_CROPS_CREATED_RE = re.compile(r"^No cropped face image files were created in:\s*(.+?)\s*$", re.IGNORECASE)
+
+# ============================================================================
+# ASYNC IMAGE LOADER (avoids UI freeze on multi-hundred-MB historical scans)
+# ============================================================================
+
+class _PixmapLoaderSignals(QObject):
+    loaded = Signal(str, QImage)
+    failed = Signal(str)
+
+
+class _PixmapLoader(QRunnable):
+    """QImageReader (thread-safe) load of a file, off the UI thread."""
+
+    def __init__(self, path: str, signals: _PixmapLoaderSignals):
+        super().__init__()
+        self._path = path
+        self._signals = signals
+        self.setAutoDelete(True)
+
+    def run(self):
+        try:
+            reader = QImageReader(self._path)
+            reader.setAutoTransform(True)
+            img = reader.read()
+            if img.isNull():
+                self._signals.failed.emit(self._path)
+            else:
+                self._signals.loaded.emit(self._path, img)
+        except Exception:
+            self._signals.failed.emit(self._path)
+
+
+# ============================================================================
+# ASYNC PREFLIGHT (nvidia-smi + filesystem checks moved off the UI thread)
+# ============================================================================
+
+class _PreflightSignals(QObject):
+    finished = Signal(dict)
+
+
+class _PreflightRunner(QRunnable):
+    """Runs MainWindow._collect_preflight_report() off the UI thread.
+
+    The collection function is read-only against the rest of the window
+    (paths, hardware probes, write test). The one widget read it performs
+    (results_root_edit.text) happens before this runnable is scheduled.
+    """
+
+    def __init__(self, owner, signals: _PreflightSignals, results_root_text: str):
+        super().__init__()
+        self._owner = owner
+        self._signals = signals
+        self._results_root_text = results_root_text
+        self.setAutoDelete(True)
+
+    def run(self):
+        try:
+            report = self._owner._collect_preflight_report(
+                results_root_override=self._results_root_text
+            )
+        except Exception as e:
+            report = {
+                "checks": [{
+                    "name": "Preflight runner",
+                    "status": "fail",
+                    "detail": f"Preflight execution failed: {e}",
+                    "fix": "Report this error; the GUI will still function."
+                }],
+                "fail": 1,
+                "warn": 0,
+                "pass": 0,
+            }
+        self._signals.finished.emit(report)
+
 
 # ============================================================================
 # INSTANT TOOLTIP BUTTON (for minimal responsiveness)
@@ -1492,11 +1568,58 @@ class MainWindow(QMainWindow):
         self.iter_slider.setValue(closest_index)
 
 
+    def _kill_process_if_running(self, proc):
+        if proc is None:
+            return
+        try:
+            if proc.state() != QProcess.NotRunning:
+                proc.kill()
+        except RuntimeError:
+            pass
+
+    def _terminate_process_nonblocking(self, proc, grace_ms=2000):
+        if proc is None:
+            return
+        try:
+            if proc.state() == QProcess.NotRunning:
+                return
+            proc.terminate()
+            QTimer.singleShot(grace_ms, lambda p=proc: self._kill_process_if_running(p))
+        except RuntimeError:
+            pass
+
     def closeEvent(self, event):
-        self.stop_quick_face_probe()
+        try:
+            self.stop_quick_face_probe()
+        except Exception:
+            pass
+
+        # Stop long-lived timers so they don't fire during teardown.
+        for attr in ("_elapsed_timer", "_result_stage_timer"):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except RuntimeError:
+                    pass
+
+        # Terminate the main rephoto subprocess if one is running; otherwise it
+        # keeps the GPU/disk pinned after the window closes.
+        proc = getattr(self, "process", None)
+        if proc is not None:
+            try:
+                if proc.state() != QProcess.NotRunning:
+                    proc.terminate()
+                    # Give it a short grace period, then force-kill if needed.
+                    # We cannot block the close, so wait briefly and force.
+                    if not proc.waitForFinished(500):
+                        self._kill_process_if_running(proc)
+            except RuntimeError:
+                pass
+
         super().closeEvent(event)
 
-    def _collect_preflight_report(self):
+    def _collect_preflight_report(self, results_root_override: Optional[str] = None):
         checks = []
 
         def add_check(name, status, detail, fix=""):
@@ -1546,7 +1669,11 @@ class MainWindow(QMainWindow):
         else:
             add_check("PowerShell runtime", "fail", "powershell.exe not found in PATH.", "Install/enable PowerShell and ensure it is discoverable.")
 
-        results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
+        if results_root_override is not None:
+            results_root_text = results_root_override
+        else:
+            results_root_text = self.results_root_edit.text().strip()
+        results_root = Path(results_root_text or (self.repo_root / "results"))
         try:
             results_root.mkdir(parents=True, exist_ok=True)
             probe = results_root / ".preflight_write_test.tmp"
@@ -1622,7 +1749,30 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def run_startup_preflight(self, show_dialog=False, user_initiated=False):
-        report = self._collect_preflight_report()
+        # Heavy preflight (nvidia-smi, file probes, write test) runs off the
+        # UI thread so the window paints immediately. Result arrives via slot.
+        if getattr(self, "_preflight_running", False):
+            return
+        self._preflight_running = True
+        self._preflight_show_dialog = bool(show_dialog)
+        self._preflight_user_initiated = bool(user_initiated)
+
+        # Snapshot widget reads on the UI thread; Qt widgets are not
+        # thread-safe to read from a worker.
+        try:
+            results_root_snapshot = self.results_root_edit.text().strip()
+        except Exception:
+            results_root_snapshot = ""
+
+        signals = _PreflightSignals()
+        signals.finished.connect(self._on_preflight_finished)
+        self._preflight_signals = signals
+        self._pixmap_thread_pool.start(
+            _PreflightRunner(self, signals, results_root_snapshot)
+        )
+
+    def _on_preflight_finished(self, report):
+        self._preflight_running = False
         self.last_preflight_report = report
 
         self.log_box.append("")
@@ -1633,7 +1783,7 @@ class MainWindow(QMainWindow):
                 self.log_box.append(f"  Fix: {check['fix']}")
         self.log_box.append(f"Preflight summary: {report['pass']} pass, {report['warn']} warn, {report['fail']} fail")
 
-        should_show = show_dialog and (user_initiated or report["fail"] > 0)
+        should_show = self._preflight_show_dialog and (self._preflight_user_initiated or report["fail"] > 0)
         if should_show:
             self.show_preflight_dialog(report)
 
@@ -1663,7 +1813,7 @@ class MainWindow(QMainWindow):
     def _build_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
         ctx = self.current_run_summary_context or {}
         status = "Success" if success else "Failed"
-        if launch_error:
+        if launch_error and int(exit_code) < 0:
             status = "Launch Error"
         preset_sent = ctx.get("effective_preset")
         if preset_sent is None:
@@ -1694,7 +1844,8 @@ class MainWindow(QMainWindow):
         ]
 
         if launch_error:
-            lines.extend(["", f"Launch error: {launch_error}"])
+            detail_label = "Launch error" if int(exit_code) < 0 else "Error detail"
+            lines.extend(["", f"{detail_label}: {launch_error}"])
 
         return "\n".join(lines)
 
@@ -1783,6 +1934,20 @@ class MainWindow(QMainWindow):
         self._conda_executable_cache = None
         self._facecrop_env_cache_key = None
         self._facecrop_env_name_cache = None
+        self._quick_probe_det_threshold = None
+        self._last_backend_error_detail = ""
+
+        # Async pixmap loaders (input + result previews). Off-UI-thread image
+        # decode avoids freezes on 50-200 MB historical scans.
+        self._pixmap_thread_pool = QThreadPool.globalInstance()
+        self._input_pixmap_loader_signals = _PixmapLoaderSignals()
+        self._input_pixmap_loader_signals.loaded.connect(self._on_input_pixmap_loaded)
+        self._input_pixmap_loader_signals.failed.connect(self._on_input_pixmap_failed)
+        self._input_pixmap_loader_path = None
+        self._result_pixmap_loader_signals = _PixmapLoaderSignals()
+        self._result_pixmap_loader_signals.loaded.connect(self._on_result_pixmap_loaded)
+        self._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
+        self._result_pixmap_loader_path = None
 
         self.preprocess_stage = "idle"
         self.rephoto_stage = None
@@ -3118,17 +3283,42 @@ class MainWindow(QMainWindow):
             self.log_box.append("No input image selected. Please load an image first.")
             return
 
+        if self.process is not None:
+            self.log_box.append("A backend process is already running.")
+            return
+
         # Clear existing face entries and run detection in crop-only mode
         self.face_preview_entries = []
         self.selected_face_preview_index = None
         self.render_face_preview_strip()
 
-        # Build and run the detection command (crop-only mode)
         try:
             command = self.build_wrapper_command(force_crop_only=True)
-            if command:
-                self.log_box.append(f"Re-detecting faces with threshold {self.advanced_dialog.det_threshold_edit.value():.2f}...")
-                self._execute_wrapper_command(command, phase="preprocess")
+            if not command:
+                return
+
+            self.log_box.append(
+                f"Re-detecting faces with threshold "
+                f"{self.advanced_dialog.det_threshold_edit.value():.2f}..."
+            )
+
+            self.stop_quick_face_probe()
+            self.set_input_detect_overlay(False)
+            self.clear_result_stage_overlay()
+            self.reset_progress_bars()
+            self.current_run_summary_context = self._capture_run_context()
+            self.current_run_phase = "preprocess"
+            self.awaiting_face_selection = False
+            self.selection_preprocess_mode = True
+            self.suppress_preprocess_ui_until_rephoto = False
+            self.set_run_button_continue_mode(False)
+
+            self._reset_wrapper_runtime_tracking()
+            self._prepare_stop_flag_for_new_run()
+            self.set_preprocess_progress(5, "Re-detecting faces...")
+            self.set_rephoto_progress(0, "Waiting...")
+
+            self._start_wrapper_process(command, "Status: Re-detecting faces...")
         except Exception as e:
             self.log_box.append(f"Error re-detecting faces: {e}")
             import traceback
@@ -3353,6 +3543,19 @@ class MainWindow(QMainWindow):
         if not s:
             return
 
+        # Capture actionable backend failure details so summaries are useful.
+        no_crops_match = NO_CROPS_CREATED_RE.match(s)
+        if no_crops_match:
+            crop_dir = no_crops_match.group(1).strip()
+            self._last_backend_error_detail = (
+                f"No faces were detected for this image (crop output was empty: {crop_dir}). "
+                "Try lowering Detection Sensitivity (for example 0.6) or using a tighter face crop."
+            )
+        elif "Face crop failed (command:" in s:
+            self._last_backend_error_detail = s
+        elif s.startswith("Input image not found:"):
+            self._last_backend_error_detail = s
+
         # Hot path: during rephoto, most lines are tqdm iteration progress.
         # Check this first to avoid all the string-contains checks below.
         if self._try_fast_rephoto_iteration_progress(s):
@@ -3560,6 +3763,8 @@ class MainWindow(QMainWindow):
         self._clear_current_stop_flag()
         self._clear_current_pause_flag()
         self.quick_face_count_estimate = None
+        self._quick_probe_det_threshold = None
+        self._last_backend_error_detail = ""
         self._template_match_cache = {}
         self.auto_detect_faces_armed_input = None
         self.auto_detect_faces_triggered_input = None
@@ -3896,12 +4101,13 @@ class MainWindow(QMainWindow):
         except Exception:
             ram_gb = None
 
-        # GPU (best effort)
+        # GPU (best effort). Bound the subprocess so a stuck nvidia-smi
+        # cannot freeze the UI; this call previously had no timeout.
         gpu_name = "Unknown GPU"
         try:
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True, text=True, check=True
+                capture_output=True, text=True, check=True, timeout=2.0
             )
             line = (r.stdout or "").strip().splitlines()
             if line:
@@ -4832,12 +5038,19 @@ class MainWindow(QMainWindow):
 
         # UX rule:
         # - If we are confidently single-face (==1), keep simple "Run".
-        # - Otherwise (multi-face, zero-face, or unknown estimate), signal the detect/select step.
+        # - If quick scan found no faces (==0), keep "Run" enabled but explain likely failure.
+        # - Otherwise (multi-face or unknown estimate), signal the detect/select step.
         quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
         if quick_count == 1:
             self.run_button.setText("Run")
             self.run_button.setEnabled(True)
             self.run_button.setToolTip("Single face detected. Run the full rephotography workflow.")
+        elif quick_count == 0:
+            self.run_button.setText("Run")
+            self.run_button.setEnabled(True)
+            self.run_button.setToolTip(
+                "Quick scan found no faces. Run will auto-lower detection threshold; if needed, use a tighter face crop."
+            )
         else:
             self.run_button.setText("Run")
             self.run_button.setEnabled(True)
@@ -5293,6 +5506,7 @@ Write-Output "OK"
         )
 
         det_threshold = self.advanced_dialog.det_threshold_edit.value()
+        self._quick_probe_det_threshold = float(det_threshold)
         args = [
             "run",
             "-n",
@@ -5316,6 +5530,7 @@ Write-Output "OK"
             self.quick_face_probe_process = None
             self.quick_face_probe_target_input = None
             self.quick_face_probe_fallback_count = None
+            self._quick_probe_det_threshold = None
             process.deleteLater()
             if not self.quick_face_probe_warned:
                 self.log_box.append(
@@ -5369,6 +5584,12 @@ Write-Output "OK"
                     f"Accurate quick face detection fell back to basic estimate (exit {exit_code}){suffix}"
                 )
                 self.quick_face_probe_warned = True
+
+        if self.quick_face_count_estimate == 0:
+            self.status_label.setText("Status: No faces detected in quick scan")
+            self.log_box.append(
+                "Quick scan found 0 faces at the current threshold. Backend run will auto-lower detection threshold; if it still fails, crop tighter around the face."
+            )
 
         # Parse piggy-backed RETINA_FACE_BOX lines from the count probe so we
         # can skip a separate retina box probe later (saves ~5-10s conda+model load).
@@ -7195,6 +7416,7 @@ Write-Output "OK"
         self.input_preview_render_cache_pixmap = None
         self.input_preview_last_display_key = None
         if image_path is None or (not image_path.exists()):
+            self._input_pixmap_loader_path = None
             self.input_face_boxes = []
             self.input_face_box_source = None
             self.set_input_detect_overlay(False)
@@ -7202,21 +7424,37 @@ Write-Output "OK"
             self.input_preview_label.setPixmap(QPixmap())
             return
 
-        pix = QPixmap(str(image_path))
-        if pix.isNull():
-            self.input_face_boxes = []
-            self.input_face_box_source = None
-            self.set_input_detect_overlay(False)
-            self.input_preview_label.setText("Could not load input image.")
-            self.input_preview_label.setPixmap(QPixmap())
-            return
+        # Decode off the UI thread. Track the in-flight path so a late
+        # callback for a previous load can be discarded.
+        path_str = str(image_path)
+        self._input_pixmap_loader_path = path_str
+        self.input_preview_label.setText("Loading preview…")
+        self.input_preview_label.setPixmap(QPixmap())
+        self._pixmap_thread_pool.start(_PixmapLoader(path_str, self._input_pixmap_loader_signals))
 
+    def _on_input_pixmap_loaded(self, path: str, image: QImage):
+        if path != self._input_pixmap_loader_path:
+            return  # stale — superseded by a newer load
+        pix = QPixmap.fromImage(image)
+        if pix.isNull():
+            self._on_input_pixmap_failed(path)
+            return
         self.input_pixmap = pix
+        self.input_preview_label.setText("")
         self.update_input_face_boxes_for_preview(
             expected_count=len(self.face_preview_entries) if self.face_preview_entries else None
         )
         if hasattr(self, "input_detect_overlay") and self.input_detect_overlay.isVisible():
             self.input_detect_overlay.notify_parent_pixmap_changed()
+
+    def _on_input_pixmap_failed(self, path: str):
+        if path != self._input_pixmap_loader_path:
+            return
+        self.input_face_boxes = []
+        self.input_face_box_source = None
+        self.set_input_detect_overlay(False)
+        self.input_preview_label.setText("Could not load input image.")
+        self.input_preview_label.setPixmap(QPixmap())
 
     def _result_preview_cache_key(self, image_path: Path):
         p = Path(image_path)
@@ -7237,7 +7475,12 @@ Write-Output "OK"
             self.result_preview_pixmap_cache[key] = cached
             return cached
 
-        pix = QPixmap(str(image_path))
+        reader = QImageReader(str(image_path))
+        reader.setAutoTransform(True)
+        img = reader.read()
+        if img.isNull():
+            return None
+        pix = QPixmap.fromImage(img)
         if pix.isNull():
             return None
 
@@ -8046,6 +8289,7 @@ Write-Output "OK"
                 pass
 
         self.run_started_at = time.time()
+        self._last_backend_error_detail = ""
         self._process_stdout_buffer = ""
         self._process_stderr_buffer = ""
         self._process_log_pending_text = []  # Use list for O(1) append
@@ -8257,6 +8501,7 @@ Write-Output "OK"
                 exit_code=exit_code,
                 elapsed_seconds=elapsed_seconds,
                 output_path=None,
+                launch_error=self._last_backend_error_detail or None,
             )
             self.current_run_summary_context = None
             return
@@ -8348,6 +8593,7 @@ Write-Output "OK"
             exit_code=exit_code,
             elapsed_seconds=elapsed_seconds,
             output_path=final_output_path,
+            launch_error=(self._last_backend_error_detail or None) if exit_code != 0 else None,
         )
         if exit_code != 0 and summary_text:
             self._show_run_summary_text_dialog(summary_text)
@@ -8465,9 +8711,9 @@ Write-Output "OK"
         if self.run_paused:
             self.run_paused = False
 
-        self.process.terminate()
-        if not self.process.waitForFinished(2000):
-            self.process.kill()
+        # Non-blocking terminate-then-kill: schedule a kill on the event loop
+        # 2s later instead of freezing the UI on waitForFinished().
+        self._terminate_process_nonblocking(self.process, grace_ms=2000)
 
     def _show_run_context_menu(self, pos):
         """Right-click menu on Run button with a 'Preview Crops Only' shortcut."""
@@ -8640,11 +8886,15 @@ Write-Output "OK"
         self.awaiting_face_selection = False
         quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
         self.selection_preprocess_mode = bool(
-            (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (quick_count != 1)
+            (not self.advanced_dialog.crop_only_checkbox.isChecked()) and (quick_count is None or quick_count > 1)
         )
         self.suppress_preprocess_ui_until_rephoto = bool(self.selection_preprocess_mode)
         if self.selection_preprocess_mode and current_key is not None:
             self.auto_detect_faces_triggered_input = current_key
+        if quick_count == 0:
+            self.log_box.append(
+                "Quick scan found 0 faces at current threshold. Running full backend with auto-lower threshold fallback (may take longer)."
+            )
         self.set_run_button_continue_mode(False)
 
         self._reset_wrapper_runtime_tracking()
