@@ -82,79 +82,83 @@ def process_single_face(
     tlog = TimingLog(timing_path)
     tlog.mark("projector_start", input=os.path.basename(input_path), gpu_mem_mb=_gpu_mem_mb())
 
-    # Read input
-    imgs_orig = read_images([input_path], max_size=args.generator_size).to(device)
-    imgs = normalize(imgs_orig)
-    tlog.mark("image_loaded", gpu_mem_mb=_gpu_mem_mb())
-
-    # Encode latent (models already loaded)
-    with torch.no_grad():
-        latent_init = initializer(imgs_orig)
-    tlog.mark("latent_initialized", gpu_mem_mb=_gpu_mem_mb())
-
-    # Init noises
-    with torch.no_grad():
-        noises_init = generator.make_noise()
-
-    # Histogram matching
-    with torch.no_grad():
-        sibling, _, sibling_rgbs = generator([latent_init], input_is_latent=True, noise=noises_init)
-    mh_dir = pjoin(results_dir, f"mh_{short_hash(input_stem)}")
-    imgs = match_skin_histogram(
-        imgs, sibling,
-        args.spectral_sensitivity,
-        pjoin(mh_dir, "input_sibling"),
-        pjoin(mh_dir, "skin_mask"),
-        matched_hist_fn=pjoin(mh_dir, f"matched_{args.spectral_sensitivity}.png"),
-        normalize=normalize,
-    ).to(device)
-    tlog.mark("histogram_matched", gpu_mem_mb=_gpu_mem_mb())
-
-    degrade = Degrade(args).to(device)
-
-    rgb_levels = generator.get_latent_size(args.coarse_min) // 2 + len(args.wplus_step) - 1
-    criterion = JointLoss(
-        args, imgs,
-        sibling=sibling.detach(), sibling_rgbs=sibling_rgbs[:rgb_levels],
-    ).to(device)
-    tlog.mark("loss_initialized", gpu_mem_mb=_gpu_mem_mb())
-
-    # Save initialization
-    save(
-        [pjoin(results_dir, f"{run_tag}-init")],
-        sibling, latent_init, noises_init,
-    )
-
-    writer = SummaryWriter(pjoin(args.log_dir, run_tag))
+    # Per-face try/finally guarantees the VRAM cleanup runs even on failure;
+    # otherwise mid-face exceptions (loss init OOM, etc.) leave tensors
+    # pinned and fragment the allocator across subsequent batch faces.
     try:
-        tlog.mark("optimization_start", total_steps=int(np.sum(args.wplus_step)), gpu_mem_mb=_gpu_mem_mb())
-        latent, noises = Optimizer.optimize(
-            generator, criterion, degrade, imgs, latent_init, noises_init, args,
-            writer=writer, timing_log=tlog,
+        # Read input
+        imgs_orig = read_images([input_path], max_size=args.generator_size).to(device)
+        imgs = normalize(imgs_orig)
+        tlog.mark("image_loaded", gpu_mem_mb=_gpu_mem_mb())
+
+        # Encode latent (models already loaded)
+        with torch.no_grad():
+            latent_init = initializer(imgs_orig)
+        tlog.mark("latent_initialized", gpu_mem_mb=_gpu_mem_mb())
+
+        # Init noises
+        with torch.no_grad():
+            noises_init = generator.make_noise()
+
+        # Histogram matching
+        with torch.no_grad():
+            sibling, _, sibling_rgbs = generator([latent_init], input_is_latent=True, noise=noises_init)
+        mh_dir = pjoin(results_dir, f"mh_{short_hash(input_stem)}")
+        imgs = match_skin_histogram(
+            imgs, sibling,
+            args.spectral_sensitivity,
+            pjoin(mh_dir, "input_sibling"),
+            pjoin(mh_dir, "skin_mask"),
+            matched_hist_fn=pjoin(mh_dir, f"matched_{args.spectral_sensitivity}.png"),
+            normalize=normalize,
+        ).to(device)
+        tlog.mark("histogram_matched", gpu_mem_mb=_gpu_mem_mb())
+
+        degrade = Degrade(args).to(device)
+
+        rgb_levels = generator.get_latent_size(args.coarse_min) // 2 + len(args.wplus_step) - 1
+        criterion = JointLoss(
+            args, imgs,
+            sibling=sibling.detach(), sibling_rgbs=sibling_rgbs[:rgb_levels],
+        ).to(device)
+        tlog.mark("loss_initialized", gpu_mem_mb=_gpu_mem_mb())
+
+        # Save initialization
+        save(
+            [pjoin(results_dir, f"{run_tag}-init")],
+            sibling, latent_init, noises_init,
         )
-        tlog.mark("optimization_end", gpu_mem_mb=_gpu_mem_mb())
+
+        writer = SummaryWriter(pjoin(args.log_dir, run_tag))
+        try:
+            tlog.mark("optimization_start", total_steps=int(np.sum(args.wplus_step)), gpu_mem_mb=_gpu_mem_mb())
+            latent, noises = Optimizer.optimize(
+                generator, criterion, degrade, imgs, latent_init, noises_init, args,
+                writer=writer, timing_log=tlog,
+            )
+            tlog.mark("optimization_end", gpu_mem_mb=_gpu_mem_mb())
+        finally:
+            writer.close()
+
+        # Generate and save output
+        with torch.no_grad():
+            img_out, _, _ = generator([latent], input_is_latent=True, noise=noises)
+            img_out_rand_noise, _, _ = generator([latent], input_is_latent=True)
+        save(
+            [pjoin(results_dir, run_tag)],
+            img_out, latent, noises,
+            imgs_rand=img_out_rand_noise,
+        )
+        tlog.mark("projector_end", gpu_mem_mb=_gpu_mem_mb())
+        total_s = tlog.since("projector_start")
+        print(f"=== Total projector time: {total_s:.1f}s ===")
     finally:
-        writer.close()
-
-    # Generate and save output
-    with torch.no_grad():
-        img_out, _, _ = generator([latent], input_is_latent=True, noise=noises)
-        img_out_rand_noise, _, _ = generator([latent], input_is_latent=True)
-    save(
-        [pjoin(results_dir, run_tag)],
-        img_out, latent, noises,
-        imgs_rand=img_out_rand_noise,
-    )
-    tlog.mark("projector_end", gpu_mem_mb=_gpu_mem_mb())
-    total_s = tlog.since("projector_start")
-    print(f"=== Total projector time: {total_s:.1f}s ===")
-    tlog.close()
-
-    # Free per-face tensors
-    del criterion, degrade, imgs, imgs_orig, sibling, sibling_rgbs
-    del latent, noises, latent_init, noises_init, img_out, img_out_rand_noise
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        tlog.close()
+        # Local references will be released when this function returns; the
+        # empty_cache call then frees the allocator pool so the next face
+        # starts with a defragmented pool.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def _build_parser() -> ArgumentParser:
@@ -248,7 +252,10 @@ def main():
             process_single_face(input_path, results_dir, args, generator, initializer, device)
         except Exception as e:
             print(f"ERROR processing {crop_name}: {e}", flush=True)
-            raise
+            import traceback
+            traceback.print_exc()
+            print(f"=== FACE_FAILED {crop_name} ===", flush=True)
+            continue
 
         elapsed = time.perf_counter() - face_start
         print(f"=== Rephoto crop elapsed: {elapsed:.1f}s ===", flush=True)
@@ -287,14 +294,15 @@ def main():
                         y = max(0, (img_h - crop_h) // 2)
                         bbox = (x, y, crop_w, crop_h)
 
-                        recomposed = color_blend(original_img, final_img)
-                        # Blend only within bbox to avoid recompositing the full crop outside its bounds
+                        # Color-blend only within the face ROI (original and crop may differ in size)
                         recomposed_full = original_img.copy()
                         actual_w = min(crop_w, img_w - x)
                         actual_h = min(crop_h, img_h - y)
                         if actual_w > 0 and actual_h > 0:
-                            recomposed_roi = recomposed[y:y+actual_h, x:x+actual_w]
-                            recomposed_full[y:y+actual_h, x:x+actual_w] = recomposed_roi
+                            orig_roi = original_img[y:y+actual_h, x:x+actual_w]
+                            face_roi = final_img[:actual_h, :actual_w]
+                            blended_roi = color_blend(orig_roi, face_roi)
+                            recomposed_full[y:y+actual_h, x:x+actual_w] = blended_roi
 
                         recompose_path = pjoin(results_dir, "recomposited.png")
                         cv2.imwrite(recompose_path, recomposed_full)

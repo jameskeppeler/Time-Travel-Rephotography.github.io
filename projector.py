@@ -102,7 +102,11 @@ def _load_checkpoint(path, map_location=None):
 
 def create_generator(args: Namespace, device: torch.device):
     generator = Generator(args.generator_size, 512, 8)
-    ckpt = _load_checkpoint(args.ckpt)
+    # Load to CPU first so load_state_dict is a CPU->CPU copy, then move the
+    # constructed model to the device exactly once. Loading with
+    # map_location="cuda" then calling .to(device) issues a redundant
+    # device-to-device copy and roughly doubles peak VRAM during init.
+    ckpt = _load_checkpoint(args.ckpt, map_location="cpu")
     generator.load_state_dict(ckpt['g_ema'], strict=False)
     generator.eval()
     generator = generator.to(device)
