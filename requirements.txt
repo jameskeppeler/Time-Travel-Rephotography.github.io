@@ -1,26 +1,44 @@
-# Torch
-#--find-links https://download.pytorch.org/whl/torch_stable.html
-#torch==1.4.0+cu100
-#torchvision==0.11.2+cu100
-#torchaudio==0.10.1+cu100
-#setuptools==59.5.0
+# ---------------------------------------------------------------------------
+# Pip dependencies for Time-Travel-Rephotography.
+#
+# The canonical reproducible environment is the conda spec in
+# rephoto_cuda11_portable.yml (Python 3.8 + PyTorch 2.4.1 + CUDA 11.8).
+# Pins here match that spec so a pip-only install behaves the same.
+#
+# PyTorch / torchvision / torchaudio are intentionally NOT pinned via pip:
+# the matching CUDA wheel must come from https://download.pytorch.org/whl
+# and conda installs are preferred. WINDOWS_SETUP.md documents the install
+# steps. If you must install via pip, run:
+#   pip install --index-url https://download.pytorch.org/whl/cu118 \
+#       torch==2.4.1 torchvision==0.20.0 torchaudio==2.4.1
+# ---------------------------------------------------------------------------
 
-Pillow
-ninja
-tqdm
-opencv-python
-scikit-image
-numpy
+# Core scientific stack
+numpy==1.24.4
+scipy==1.9.1
+matplotlib==3.7.3
+Pillow==10.4.0
 
-tensorboard
+# Image / vision
+opencv-python==4.10.0.84
+scikit-image==0.20.0
 
-# for face alignment
-tensorflow
-#keras
-#bz2
-dlib
-scipy
+# Optimization / build
+ninja==1.11.1.1
+tqdm==4.67.1
 
-matplotlib
-pprintpp
-huggingface_hub
+# Logging / tensorboard
+tensorboard==2.17.1
+
+# GUI
+PySide6==6.7.3
+
+# Face alignment / detection
+tensorflow==2.13.1
+dlib==19.24.6
+
+# Asset bootstrapping
+huggingface_hub==0.25.2
+
+# Misc
+pprintpp==0.4.0
