@@ -10,7 +10,7 @@ import time
 import math
 import random
 import statistics
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -137,6 +137,30 @@ class _PixmapLoader(QRunnable):
                 self._signals.loaded.emit(self._path, img)
         except Exception:
             self._signals.failed.emit(self._path)
+
+
+# ============================================================================
+# TIMESTAMPED LOG WIDGET
+# ============================================================================
+
+class TimestampedLogBox(QTextEdit):
+    """QTextEdit that auto-prefixes append() output with HH:MM:SS.
+
+    Empty/whitespace-only lines pass through unchanged so they keep working as
+    visual separators. Pre-formatted lines that already start with a bracketed
+    timestamp (e.g. "[12:34:56] …") are also passed through to avoid double
+    stamping when a caller assembles its own header.
+    """
+
+    _TS_PREFIX_RE = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]")
+
+    def append(self, text):
+        s = text if isinstance(text, str) else str(text)
+        if s.strip() == "" or self._TS_PREFIX_RE.match(s):
+            super().append(s)
+            return
+        ts = time.strftime("%H:%M:%S")
+        super().append(f"[{ts}] {s}")
 
 
 # ============================================================================
@@ -1994,7 +2018,9 @@ class MainWindow(QMainWindow):
         self.result_pixmap = None
         self.last_result_image_path = None
         self.last_result_image_cache_key = None
-        self.result_preview_pixmap_cache = {}
+        # Proper LRU: OrderedDict + move_to_end on access avoids the
+        # pop+reinsert dance and is robust against dict-ordering surprises.
+        self.result_preview_pixmap_cache = OrderedDict()
         self.result_preview_pixmap_cache_max_entries = 96
         self.result_preview_path_before_hover = None
         self.input_face_boxes = []
@@ -2776,7 +2802,7 @@ class MainWindow(QMainWindow):
 
         log_layout.addLayout(log_header_row)
 
-        self.log_box = QTextEdit()
+        self.log_box = TimestampedLogBox()
         self.log_box.setReadOnly(True)
         self.log_box.setMinimumHeight(150)
         self.log_box.setMaximumHeight(150)
@@ -5058,11 +5084,44 @@ class MainWindow(QMainWindow):
                 "Running starts with face detection, then prompts face selection when multiple faces are found."
             )
 
+    # Confirm-dialog threshold for high iteration counts. Above this, a run can
+    # take hours and is almost always a misclick on the advanced slider.
+    _HIGH_ITERATION_CONFIRM_THRESHOLD = 5000
+
     def handle_run_button_clicked(self):
         if self.process is not None:
             self.toggle_pause_resume()
             return
+        if not self._confirm_high_iteration_count():
+            return
         self.run_wrapper()
+
+    def _confirm_high_iteration_count(self) -> bool:
+        try:
+            preset = int(self.get_selected_preset_value())
+        except Exception:
+            return True
+        if preset <= self._HIGH_ITERATION_CONFIRM_THRESHOLD:
+            return True
+        # Suppress repeated prompts within the same window session once the
+        # user has acknowledged for the chosen value.
+        last_ack = getattr(self, "_high_iter_last_acked_value", None)
+        if last_ack == preset:
+            return True
+        approx_minutes = max(1, preset // 250)  # rough heuristic: ~250 iters/min on a modern GPU
+        reply = QMessageBox.question(
+            self,
+            "Confirm long run",
+            f"Selected iteration count: {preset}.\n\n"
+            f"This is well above the standard presets (≤ 3000) and can take "
+            f"roughly {approx_minutes} minutes per face. Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self._high_iter_last_acked_value = preset
+            return True
+        return False
 
     def _set_status_for_running_state(self):
         if self.current_run_phase == "preprocess":
@@ -6091,6 +6150,7 @@ Write-Output "OK"
             return
 
         files_by_index = {}
+        collisions = []
         for pos, p in enumerate(crop_files):
             idx = None
             match = FACE_SUFFIX_INDEX_RE.search(p.stem)
@@ -6103,6 +6163,21 @@ Write-Output "OK"
                 idx = int(pos)
             if idx not in files_by_index:
                 files_by_index[idx] = p
+            else:
+                collisions.append((idx, p, files_by_index[idx]))
+
+        if collisions:
+            # Two crops resolved to the same index — likely a filename clash
+            # (e.g. mixed runs in the same dir). Surface it; the second file
+            # would otherwise be silently dropped and the wrong thumbnail
+            # would render for that slot.
+            sample = collisions[0]
+            self.log_box.append(
+                f"Warning: {len(collisions)} face crop(s) collided on index "
+                f"during preview refresh — keeping first match. "
+                f"Example: index {sample[0]} kept '{sample[2].name}', "
+                f"dropped '{sample[1].name}'."
+            )
 
         updated = False
         for entry in self.face_preview_entries:
@@ -7470,10 +7545,14 @@ Write-Output "OK"
 
     def _get_result_pixmap_cached(self, image_path: Path):
         key = self._result_preview_cache_key(image_path)
-        cached = self.result_preview_pixmap_cache.pop(key, None)
+        cache = self.result_preview_pixmap_cache
+        cached = cache.get(key)
         if cached is not None and (not cached.isNull()):
-            self.result_preview_pixmap_cache[key] = cached
+            cache.move_to_end(key)
             return cached
+        if cached is not None:
+            # Cached entry is null/invalid; drop it before reloading.
+            cache.pop(key, None)
 
         reader = QImageReader(str(image_path))
         reader.setAutoTransform(True)
@@ -7484,10 +7563,9 @@ Write-Output "OK"
         if pix.isNull():
             return None
 
-        self.result_preview_pixmap_cache[key] = pix
-        while len(self.result_preview_pixmap_cache) > int(self.result_preview_pixmap_cache_max_entries):
-            oldest_key = next(iter(self.result_preview_pixmap_cache))
-            self.result_preview_pixmap_cache.pop(oldest_key, None)
+        cache[key] = pix
+        while len(cache) > int(self.result_preview_pixmap_cache_max_entries):
+            cache.popitem(last=False)
         return pix
 
     def set_result_preview_image(self, image_path: Path | None):
