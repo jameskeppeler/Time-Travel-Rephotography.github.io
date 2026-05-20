@@ -1,9 +1,12 @@
 from argparse import Namespace
+import hashlib
 import os
+import shutil
 from os.path import join as pjoin
 from typing import Optional
 
 import cv2
+import numpy as np
 import torch
 
 from tools import (
@@ -19,6 +22,14 @@ def _has_valid_mask(mask_path: str) -> bool:
         return False
     mask = cv2.imread(mask_path, 0)
     return mask is not None and mask.size > 0
+
+
+def _content_hash(arr: np.ndarray) -> str:
+    h = hashlib.sha1()
+    h.update(arr.tobytes())
+    h.update(str(arr.shape).encode("ascii"))
+    h.update(str(arr.dtype).encode("ascii"))
+    return h.hexdigest()
 
 
 def match_skin_histogram(
@@ -44,24 +55,64 @@ def match_skin_histogram(
 
     # save img, sibling
     os.makedirs(im_sibling_dir, exist_ok=True)
+    os.makedirs(mask_dir, exist_ok=True)
     im_name, sibling_name = 'input.png', 'sibling.png'
     cv2.imwrite(pjoin(im_sibling_dir, im_name), img_np)
     cv2.imwrite(pjoin(im_sibling_dir, sibling_name), sibling_np)
 
-    # face parsing
-    try:
-        parse_face.main(
-            Namespace(in_dir=im_sibling_dir, out_dir=mask_dir, include_hair=False)
-        )
-    except Exception as e:
-        print(f"WARNING: face parsing failed; skipping histogram match. ({e})")
-        return imgs
-
     src_mask_path = pjoin(mask_dir, im_name)
     ref_mask_path = pjoin(mask_dir, sibling_name)
-    if not (_has_valid_mask(src_mask_path) and _has_valid_mask(ref_mask_path)):
-        print("WARNING: skin masks were not generated; skipping histogram match.")
-        return imgs
+
+    # Content-addressed mask cache. Face parsing is the slow step (CNN +
+    # disk I/O); the input.png/sibling.png filenames here are deterministic but
+    # the pixel content changes per run. Keyed by SHA1 of the pixel buffer,
+    # we can skip face parsing entirely on repeat content. Set the env var
+    # REPHOTO_PARSE_CACHE_DISABLE=1 to bypass.
+    cache_disabled = bool(os.environ.get("REPHOTO_PARSE_CACHE_DISABLE"))
+    cache_dir = pjoin(mask_dir, "_content_cache")
+    img_hash = _content_hash(img_np)
+    sibling_hash = _content_hash(sibling_np)
+    img_cache_path = pjoin(cache_dir, f"{img_hash}.png")
+    sibling_cache_path = pjoin(cache_dir, f"{sibling_hash}.png")
+
+    used_cache = False
+    if (
+        not cache_disabled
+        and _has_valid_mask(img_cache_path)
+        and _has_valid_mask(sibling_cache_path)
+    ):
+        try:
+            shutil.copyfile(img_cache_path, src_mask_path)
+            shutil.copyfile(sibling_cache_path, ref_mask_path)
+            used_cache = True
+        except OSError:
+            used_cache = False
+
+    if not used_cache:
+        # face parsing
+        try:
+            parse_face.main(
+                Namespace(in_dir=im_sibling_dir, out_dir=mask_dir, include_hair=False)
+            )
+        except Exception as e:
+            print(f"WARNING: face parsing failed; skipping histogram match. ({e})")
+            return imgs
+
+        if not (_has_valid_mask(src_mask_path) and _has_valid_mask(ref_mask_path)):
+            print("WARNING: skin masks were not generated; skipping histogram match.")
+            return imgs
+
+        if not cache_disabled:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                shutil.copyfile(src_mask_path, img_cache_path)
+                shutil.copyfile(ref_mask_path, sibling_cache_path)
+            except OSError:
+                pass
+    else:
+        if not (_has_valid_mask(src_mask_path) and _has_valid_mask(ref_mask_path)):
+            print("WARNING: cached skin masks invalid; skipping histogram match.")
+            return imgs
 
     # match_histogram
     mh_args = match_histogram.parse_args(
