@@ -53,18 +53,43 @@ class PreviewController:
     """
 
     def __init__(self, window):
-        object.__setattr__(self, "_window", window)
+        from collections import OrderedDict
+        self._window = window
+        self.input_pixmap = None
+        self.result_pixmap = None
+        self.last_result_image_path = None
+        self.last_result_image_cache_key = None
+        # Proper LRU: OrderedDict + move_to_end on access avoids the
+        # pop+reinsert dance and is robust against dict-ordering surprises.
+        self.result_preview_pixmap_cache = OrderedDict()
+        self.result_preview_pixmap_cache_max_entries = 96
+        self.result_preview_path_before_hover = None
+        self.input_face_boxes = []
+        self.input_face_box_source = None
+        self.face_box_debug_overlay_enabled = False
+        self.face_box_probe_cache = {}
+        self.face_box_probe_cache_max_entries = 24
+        self._face_overlay_detector_warned = False
+        self.input_preview_scaled_cache_key = None
+        self.input_preview_scaled_cache_pixmap = None
+        self.input_preview_render_cache_key = None
+        self.input_preview_render_cache_pixmap = None
+        self.input_preview_last_display_key = None
+        self.result_preview_scaled_cache_key = None
+        self.result_preview_scaled_cache_pixmap = None
+        self.result_preview_last_display_key = None
+        self._compare_wipe_active = False
+        self._compare_wipe_last_pos = None
+        self._compare_wipe_result_scaled = None
+        self._compare_wipe_result_scaled_key = None
+        self._compare_wipe_input_scaled = None
+        self._compare_wipe_input_scaled_key = None
+        self.current_wide_preview_side = 360
 
     def __getattr__(self, name):
         if name.startswith("_PreviewController__") or name == "_window":
             raise AttributeError(name)
         return getattr(self._window, name)
-
-    def __setattr__(self, name, value):
-        if name == "_window":
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._window, name, value)
     """[Legacy docstring from the mixin era — see class header above]"""
 
     def _update_wide_preview_dimensions(self):

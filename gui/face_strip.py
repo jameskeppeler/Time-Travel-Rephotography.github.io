@@ -56,24 +56,27 @@ class FaceStripController:
     """
 
     def __init__(self, window):
-        # Use object.__setattr__ to bypass our own __setattr__ override.
-        object.__setattr__(self, "_window", window)
+        self._window = window
+        # State owned by this controller.
+        self.face_preview_entries = []
+        self.active_face_preview_index = None
+        self.selected_face_preview_index = None
+        self._user_inspecting_completed_face = False
+        self.hover_face_preview_index = None
+        self.hover_face_preview_source = None
+        self.hover_face_box_override = None
+        self.hover_face_box_cache = {}
+        self.face_preview_thumb_icon_cache = {}
+        self.face_preview_thumb_icon_cache_max_entries = 256
+        self._face_strip_render_signature = None
+        self._no_faces_detected = False
+        self._pending_face_reselection = None
 
     def __getattr__(self, name):
-        # Only called when normal attribute lookup fails. Mixin-style
-        # methods are resolved via the class dict and never reach here;
-        # window-owned state and widgets do.
+        # Window-owned widgets and any not-yet-migrated state.
         if name.startswith("_FaceStripController__") or name == "_window":
             raise AttributeError(name)
         return getattr(self._window, name)
-
-    def __setattr__(self, name, value):
-        # Route writes to the window so MainWindow remains the single
-        # source of truth for face-strip state during this transition.
-        if name == "_window":
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._window, name, value)
     """[Legacy docstring from the mixin era — see class header above]
 
     Relies on the following instance attributes existing on the host class

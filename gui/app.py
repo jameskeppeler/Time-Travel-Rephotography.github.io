@@ -576,20 +576,19 @@ class MainWindow(
         self.app_root = self.detect_app_root()
         self.repo_root = self.app_root
         self.wrapper_script = self.resolve_resource_path("run_rephoto_with_facecrop.ps1")
-        self.pipeline.process = None
-        self.pipeline.run_paused = False
-        self.pipeline.current_stop_flag_path = None
-        self.pipeline.current_pause_flag_path = None
-        self.pipeline.run_started_at = None
-        self.pipeline.rephoto_started_at = None
-        self.pipeline.current_run_summary_context = None
-        # PreflightController owns last_run_summary_text / last_preflight_report /
-        # hardware-info cache / running flag, etc. Instantiated here so it's
-        # available everywhere downstream that reads self.preflight.* .
+
+        # Subsystem controllers. Each owns its own state in its __init__;
+        # MainWindow no longer seeds those attributes here. Order matters
+        # only for cross-controller references: pipeline reads .preflight,
+        # so preflight must come first; face_strip / preview are
+        # independent.
         self.preflight = PreflightController(self)
         self.face_strip = FaceStripController(self)
         self.preview = PreviewController(self)
         self.pipeline = PipelineController(self)
+
+        # Still owned by MainWindow (caches that span controllers, or
+        # widget-side helpers).
         self._timing_records_cache_path = None
         self._timing_records_cache_mtime = None
         self._timing_records_cache = []
@@ -598,51 +597,20 @@ class MainWindow(
         self._facecrop_env_cache_key = None
         self._facecrop_env_name_cache = None
         self._quick_probe_det_threshold = None
-        self.pipeline._last_backend_error_detail = ""
 
-        # Async pixmap loaders (input + result previews). Off-UI-thread image
-        # decode avoids freezes on 50-200 MB historical scans.
-        self.preview._pixmap_thread_pool = QThreadPool.globalInstance()
-        self.preview._input_pixmap_loader_signals = _PixmapLoaderSignals()
-        self.preview._input_pixmap_loader_signals.loaded.connect(self.preview._on_input_pixmap_loaded)
-        self.preview._input_pixmap_loader_signals.failed.connect(self.preview._on_input_pixmap_failed)
-        self.preview._input_pixmap_loader_path = None
-        self.preview._result_pixmap_loader_signals = _PixmapLoaderSignals()
-        self.preview._result_pixmap_loader_signals.loaded.connect(self._on_result_pixmap_loaded)
-        self.preview._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
-        self.preview._result_pixmap_loader_path = None
+        # Async pixmap loaders live on MainWindow because their .connect()
+        # targets bound methods of the PreviewController (which exists by
+        # the time these lines run).
+        self._pixmap_thread_pool = QThreadPool.globalInstance()
+        self._input_pixmap_loader_signals = _PixmapLoaderSignals()
+        self._input_pixmap_loader_signals.loaded.connect(self.preview._on_input_pixmap_loaded)
+        self._input_pixmap_loader_signals.failed.connect(self.preview._on_input_pixmap_failed)
+        self._input_pixmap_loader_path = None
+        self._result_pixmap_loader_signals = _PixmapLoaderSignals()
+        self._result_pixmap_loader_signals.loaded.connect(self._on_result_pixmap_loaded)
+        self._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
+        self._result_pixmap_loader_path = None
 
-        self.pipeline.preprocess_stage = "idle"
-        self.pipeline.rephoto_stage = None
-        self.pipeline.rephoto_stage_name = None
-        self.pipeline.rephoto_stage_current = 0
-        self.pipeline.rephoto_stage_total = 0
-        self.pipeline.rephoto_total_done_before_stage = 0
-        self.pipeline.rephoto_total_work = 0
-        self.pipeline.rephoto_step_pair = (250, 750)
-        self.pipeline.rephoto_face_current_index = 0
-        self.pipeline.rephoto_face_total = 1
-
-        # run phase state for gating progress bars
-        self.pipeline.current_run_phase = "idle"  # idle, preprocess, rephoto, done, cancelled, crop_only_done
-        self.pipeline.selection_preprocess_mode = False
-        self.pipeline.awaiting_face_selection = False
-
-        # Path tracking from stdout to avoid recursive folder scans
-        self.pipeline.current_crop_output_dir = None
-        self.pipeline.current_gfpgan_output_dir = None
-        self.pipeline._inprocess_preview_crops = False
-        self.pipeline._crop_source_input_key = None  # normalized path key of the input that produced current crops
-        self.pipeline._crop_source_face_factor = None  # face_factor value used when crops were produced
-        self.face_strip._pending_face_reselection = None  # set of face indices to pre-select after a re-crop
-        self.pipeline.current_blended_faces_dir = None
-        self.pipeline.current_results_dir = None
-        self.pipeline.current_manifest_path = None
-        self.pipeline.current_run_result_dirs = set()
-
-        # Stage timing instrumentation
-        self.pipeline.stage_started_at = {}  # {"crop": timestamp, "enhance": timestamp, ...}
-        self.pipeline.stage_elapsed = {}    # {"crop": seconds, "enhance": seconds, ...}
         self._newest_image_query_cache = {}
         self._newest_image_query_cache_max_entries = 64
         self._runtime_label_cache_key = None
@@ -652,46 +620,8 @@ class MainWindow(
         self.log_expanded = False
         self.log_visible = False
 
-        # Preview state
-        self.preview.input_pixmap = None
-        self.preview.result_pixmap = None
-        self.preview.last_result_image_path = None
-        self.preview.last_result_image_cache_key = None
-        # Proper LRU: OrderedDict + move_to_end on access avoids the
-        # pop+reinsert dance and is robust against dict-ordering surprises.
-        self.preview.result_preview_pixmap_cache = OrderedDict()
-        self.preview.result_preview_pixmap_cache_max_entries = 96
-        self.preview.result_preview_path_before_hover = None
-        self.preview.input_face_boxes = []
-        self.preview.input_face_box_source = None
-        self.preview.face_box_debug_overlay_enabled = False
-        self.preview.face_box_probe_cache = {}
-        self.preview.face_box_probe_cache_max_entries = 24
-        self.preview._face_overlay_detector_warned = False
-        self.preview.input_preview_scaled_cache_key = None
-        self.preview.input_preview_scaled_cache_pixmap = None
-        self.preview.input_preview_render_cache_key = None
-        self.preview.input_preview_render_cache_pixmap = None
-        self.preview.input_preview_last_display_key = None
-        self.preview.result_preview_scaled_cache_key = None
-        self.preview.result_preview_scaled_cache_pixmap = None
-        self.preview.result_preview_last_display_key = None
-        self.face_strip.face_preview_thumb_icon_cache = {}
-        self.face_strip.face_preview_thumb_icon_cache_max_entries = 256
-        self.face_strip._face_strip_render_signature = None
-
-        # Multi-face preview state (for strategy=all / multi-face detections)
-        self.face_strip.face_preview_entries = []
-        self.face_strip.active_face_preview_index = None
-        self.face_strip.selected_face_preview_index = None
-        self.face_strip._user_inspecting_completed_face = False  # True when user manually clicked a completed face during processing
-        self.face_strip.hover_face_preview_index = None
-        self.face_strip.hover_face_preview_source = None
-        self.face_strip.hover_face_box_override = None
-        self.face_strip.hover_face_box_cache = {}
+        # Quick-face-probe state (TODO: belongs on PipelineController).
         self.quick_face_count_estimate = None
-        self.face_strip._no_faces_detected = False
-        self.preview.current_wide_preview_side = 360
         self.quick_face_probe_process = None
         self.quick_face_probe_token = 0
         self.quick_face_probe_target_input = None
@@ -699,17 +629,6 @@ class MainWindow(
         self.quick_face_probe_warned = False
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
-        self.pipeline._process_stdout_buffer = ""
-        self.pipeline._process_stderr_buffer = ""
-        self.pipeline._process_log_pending_text = []  # Use list for O(1) append instead of string +=
-        self.pipeline._process_log_pending_text_bytes = 0  # Track size instead of len(string)
-        self.pipeline._process_log_flush_queued = False
-        self.pipeline.retina_face_box_probe_warned = False
-        self.pipeline.cropper_face_box_probe_warned = False
-        self.pipeline.auto_detect_faces_on_import = True
-        self.pipeline.auto_detect_faces_armed_input = None
-        self.pipeline.auto_detect_faces_triggered_input = None
-        self.pipeline.suppress_preprocess_ui_until_rephoto = False
         self.pipeline._last_iter_progress_signature = None
         self.pipeline._last_preprocess_progress_state = None
         self.pipeline._last_rephoto_progress_state = None

@@ -70,18 +70,64 @@ class PipelineController:
     """
 
     def __init__(self, window):
-        object.__setattr__(self, "_window", window)
+        self._window = window
+        # Process lifecycle.
+        self.process = None
+        self.run_paused = False
+        self.current_stop_flag_path = None
+        self.current_pause_flag_path = None
+        self.run_started_at = None
+        self.rephoto_started_at = None
+        self.current_run_summary_context = None
+        self._last_backend_error_detail = ""
+        # Stage / phase tracking.
+        self.preprocess_stage = "idle"
+        self.rephoto_stage = None
+        self.rephoto_stage_name = None
+        self.rephoto_stage_current = 0
+        self.rephoto_stage_total = 0
+        self.rephoto_total_done_before_stage = 0
+        self.rephoto_total_work = 0
+        self.rephoto_step_pair = (250, 750)
+        self.rephoto_face_current_index = 0
+        self.rephoto_face_total = 1
+        self.current_run_phase = "idle"
+        self.selection_preprocess_mode = False
+        self.awaiting_face_selection = False
+        self.suppress_preprocess_ui_until_rephoto = False
+        # Crop / GFPGAN tracking from stdout.
+        self.current_crop_output_dir = None
+        self.current_gfpgan_output_dir = None
+        self._inprocess_preview_crops = False
+        self._crop_source_input_key = None
+        self._crop_source_face_factor = None
+        self.current_blended_faces_dir = None
+        self.current_results_dir = None
+        self.current_manifest_path = None
+        self.current_run_result_dirs = set()
+        # Stage timing instrumentation.
+        self.stage_started_at = {}
+        self.stage_elapsed = {}
+        # Stdout buffer + log throttle.
+        self._process_stdout_buffer = ""
+        self._process_stderr_buffer = ""
+        self._process_log_pending_text = []
+        self._process_log_pending_text_bytes = 0
+        self._process_log_flush_queued = False
+        self._last_iter_progress_signature = None
+        self._last_preprocess_progress_state = None
+        self._last_rephoto_progress_state = None
+        # Auto-detect-on-import + once-only probe warnings.
+        self.auto_detect_faces_on_import = True
+        self.auto_detect_faces_armed_input = None
+        self.auto_detect_faces_triggered_input = None
+        self.retina_face_box_probe_warned = False
+        self.cropper_face_box_probe_warned = False
 
     def __getattr__(self, name):
         if name.startswith("_PipelineController__") or name == "_window":
             raise AttributeError(name)
         return getattr(self._window, name)
-
-    def __setattr__(self, name, value):
-        if name == "_window":
-            object.__setattr__(self, name, value)
-        else:
-            setattr(self._window, name, value)
     """[Legacy docstring from the mixin era — see class header above]"""
 
     def _kill_process_if_running(self, proc):
