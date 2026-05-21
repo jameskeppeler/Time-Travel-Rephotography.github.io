@@ -323,6 +323,68 @@ class TestConstantsModule(unittest.TestCase):
             )
 
 
+class TestPreflightMixin(unittest.TestCase):
+    """Sprint-4 architectural slice: PreflightMixin holds preflight
+    collection + dialog, run-summary text + dialog, and hardware probe."""
+
+    EXPECTED_METHODS = [
+        "_collect_preflight_report",
+        "_preflight_report_plain_text",
+        "_preflight_report_html",
+        "show_preflight_dialog",
+        "run_startup_preflight",
+        "_on_preflight_finished",
+        "_format_elapsed_for_summary",
+        "_build_run_summary_text",
+        "_store_run_summary_text",
+        "_show_run_summary_text_dialog",
+        "show_run_summary_dialog",
+        "show_last_run_summary_dialog",
+        "get_hardware_info",
+    ]
+
+    def test_mixin_module_exists(self):
+        self.assertTrue((REPO_ROOT / "gui" / "preflight.py").exists())
+
+    def test_mixin_class_defined(self):
+        source = (REPO_ROOT / "gui" / "preflight.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        self.assertIn("PreflightMixin", classes)
+
+    def test_methods_live_on_mixin(self):
+        source = (REPO_ROOT / "gui" / "preflight.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        methods = set()
+        for cls in ast.iter_child_nodes(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "PreflightMixin":
+                for item in cls.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(item.name)
+        missing = [m for m in self.EXPECTED_METHODS if m not in methods]
+        self.assertFalse(missing, f"PreflightMixin missing: {missing}")
+
+    def test_methods_NOT_redefined_in_main_window(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
+                method_names = {
+                    item.name
+                    for item in cls.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
+                self.assertFalse(duplicates, f"Duplicates on MainWindow: {duplicates}")
+
+    def test_main_window_inherits_mixin(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"PreflightMixin",
+        )
+
+
 class TestPipelineMixin(unittest.TestCase):
     """Sprint-4 architectural slice: PipelineMixin holds the subprocess
     lifecycle, stdout parsing, and run-control surface."""
