@@ -2247,7 +2247,7 @@ class MainWindow(
             str(self.results_root_edit.text().strip() if hasattr(self, "results_root_edit") else ""),
             str(self._timing_records_cache_path or ""),
             int(self._timing_records_cache_mtime or 0),
-            int(time.time() // max(1, int(self._hardware_info_cache_ttl_sec))),
+            int(time.time() // max(1, int(self.preflight.HARDWARE_INFO_CACHE_TTL_SEC))),
         )
         if (
             self._runtime_label_cache_key == cache_key
