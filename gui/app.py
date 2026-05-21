@@ -144,7 +144,8 @@ class _PixmapLoader(QRunnable):
 # ============================================================================
 
 class TimestampedLogBox(QTextEdit):
-    """QTextEdit that auto-prefixes append() output with HH:MM:SS.
+    """QTextEdit that auto-prefixes append() output with HH:MM:SS and
+    colorizes lines that look like errors or warnings.
 
     Empty/whitespace-only lines pass through unchanged so they keep working as
     visual separators. Pre-formatted lines that already start with a bracketed
@@ -153,14 +154,48 @@ class TimestampedLogBox(QTextEdit):
     """
 
     _TS_PREFIX_RE = re.compile(r"^\[\d{1,2}:\d{2}:\d{2}\]")
+    # Case-insensitive cues used to decide color level. Order matters:
+    # "error" takes priority over "warning" if both appear in the same line.
+    _ERROR_CUES_RE = re.compile(
+        r"(?i)\b(error|failed|failure|exception|traceback|cannot|crashed)\b|could not"
+    )
+    _WARN_CUES_RE = re.compile(
+        r"(?i)\b(warning|warn|timed out|deprecated|fallback)\b"
+    )
+    _ERROR_COLOR = "#eb5757"
+    _WARN_COLOR = "#f2c94c"
+
+    def _classify(self, s: str) -> str:
+        if self._ERROR_CUES_RE.search(s):
+            return "error"
+        if self._WARN_CUES_RE.search(s):
+            return "warn"
+        return "info"
 
     def append(self, text):
         s = text if isinstance(text, str) else str(text)
-        if s.strip() == "" or self._TS_PREFIX_RE.match(s):
+        if s.strip() == "":
             super().append(s)
             return
-        ts = time.strftime("%H:%M:%S")
-        super().append(f"[{ts}] {s}")
+        if self._TS_PREFIX_RE.match(s):
+            payload = s
+        else:
+            ts = time.strftime("%H:%M:%S")
+            payload = f"[{ts}] {s}"
+
+        level = self._classify(payload)
+        if level == "info":
+            super().append(payload)
+            return
+
+        color = self._ERROR_COLOR if level == "error" else self._WARN_COLOR
+        # Escape minimal HTML special chars so user text doesn't break markup.
+        safe = (
+            payload.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        super().append(f'<span style="color:{color}">{safe}</span>')
 
 
 # ============================================================================

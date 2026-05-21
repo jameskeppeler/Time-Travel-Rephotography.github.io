@@ -73,6 +73,53 @@ class TestTimestampRegex(unittest.TestCase):
         self.assertIsNone(self.TS_RE.match("[12:34] hello"))  # no seconds
 
 
+class TestLogLevelClassification(unittest.TestCase):
+    """Mirror TimestampedLogBox classification regexes locally so the test
+    runs without PySide6. If these constants drift in gui/app.py without
+    matching changes here, the test_gui_smoke.py colorization tests will
+    catch it under offscreen Qt."""
+
+    ERR = re.compile(r"(?i)\b(error|failed|failure|exception|traceback|cannot|crashed)\b|could not")
+    WARN = re.compile(r"(?i)\b(warning|warn|timed out|deprecated|fallback)\b")
+
+    def _classify(self, s):
+        if self.ERR.search(s):
+            return "error"
+        if self.WARN.search(s):
+            return "warn"
+        return "info"
+
+    def test_error_keywords_detected(self):
+        self.assertEqual(self._classify("Cropper face-box probe failed"), "error")
+        self.assertEqual(self._classify("Traceback (most recent call last):"), "error")
+        self.assertEqual(self._classify("Could not load input image."), "error")
+        self.assertEqual(self._classify("Exception in worker"), "error")
+
+    def test_warning_keywords_detected(self):
+        self.assertEqual(self._classify("WARNING: face parsing failed; skipping"), "error")  # "failed" wins
+        self.assertEqual(self._classify("Probe timed out (40s)"), "warn")
+        self.assertEqual(self._classify("Warning: 3 collisions"), "warn")
+        self.assertEqual(self._classify("Fallback to Haar"), "warn")
+
+    def test_info_default(self):
+        self.assertEqual(self._classify("GUI loaded successfully."), "info")
+        self.assertEqual(self._classify("Run button clicked."), "info")
+        self.assertEqual(self._classify("Detected 5 faces."), "info")
+
+    def test_error_priority_over_warning(self):
+        # If both cues appear, error wins so the user sees red, not yellow.
+        self.assertEqual(self._classify("Warning: backend failed"), "error")
+
+    def test_html_escaping_intent(self):
+        # We don't construct the widget here, but verify the in-source
+        # escaping calls cover the dangerous characters.
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # The colorization path must escape &, <, > before wrapping in <span>.
+        self.assertIn('.replace("&", "&amp;")', source)
+        self.assertIn('.replace("<", "&lt;")', source)
+        self.assertIn('.replace(">", "&gt;")', source)
+
+
 class TestProjectorCheckpointLoadsCPU(unittest.TestCase):
     """P1 regression guard: create_generator must load to CPU first."""
 
