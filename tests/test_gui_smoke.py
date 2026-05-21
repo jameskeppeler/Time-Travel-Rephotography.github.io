@@ -176,9 +176,10 @@ class TestGuiSmoke(unittest.TestCase):
         self.assertNotIn("#eb5757", new_html.lower())
         self.assertNotIn("#f2c94c", new_html.lower())
 
-    def test_face_strip_mixin_methods_resolve_via_mro(self):
-        # After the Sprint-4 mixin extraction, face-strip methods live on
-        # FaceStripMixin. Confirm MRO still delivers them to MainWindow.
+    def test_face_strip_controller_attached(self):
+        # FaceStripMixin was promoted to FaceStripController; the
+        # controller hangs off MainWindow as self.face_strip.
+        self.assertTrue(hasattr(self.window, "face_strip"))
         for name in (
             "render_face_preview_strip",
             "reset_face_preview_state",
@@ -187,17 +188,17 @@ class TestGuiSmoke(unittest.TestCase):
             "_compute_face_strip_render_signature",
         ):
             self.assertTrue(
-                callable(getattr(self.window, name, None)),
-                f"MainWindow.{name} is not callable via MRO",
+                callable(getattr(self.window.face_strip, name, None)),
+                f"FaceStripController.{name} is not callable",
             )
 
     def test_face_strip_render_callable_no_entries(self):
-        # Empty entries must render without raising — this exercises the
-        # MRO path end-to-end without needing real face data.
-        self.window.face_preview_entries = []
-        self.window.render_face_preview_strip()  # must not raise
+        # Empty entries must render without raising — exercises the
+        # controller end-to-end.
+        self.window.face_strip.face_preview_entries = []
+        self.window.face_strip.render_face_preview_strip()  # must not raise
         # Re-call to exercise the signature short-circuit.
-        self.window.render_face_preview_strip()
+        self.window.face_strip.render_face_preview_strip()
 
     def test_pause_ack_helpers_callable(self):
         # Round-4 pause-ack helpers must be safely callable even with no

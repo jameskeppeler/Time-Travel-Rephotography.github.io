@@ -34,8 +34,47 @@ from gui import path_utils
 from gui.widgets import FaceStripToolButton
 
 
-class FaceStripMixin:
-    """Mix this into MainWindow to provide face-strip rendering and state.
+class FaceStripController:
+    """Controller that owns the face-strip subsystem.
+
+    Promoted from FaceStripMixin in the second Sprint-4 polish round.
+    Instead of being mixed into MainWindow via MRO, it is now owned by
+    MainWindow as ``self.face_strip = FaceStripController(self)``.
+
+    Methods are unchanged from the mixin era; they still access
+    ``self.face_preview_entries``, ``self.log_box``, etc.  Those reads
+    fall through to ``self._window`` via __getattr__ until a future
+    slice migrates the state to the controller. Assignments
+    (``self.face_preview_entries = []``) likewise go to the window via
+    __setattr__, so MainWindow's existing _init_state continues to be
+    the single source of truth for these attributes.
+
+    The win at this step is structural: MainWindow no longer inherits
+    from FaceStripMixin, and the face-strip surface is reachable through
+    an explicit attribute rather than the leftmost mixin in the bases
+    tuple.
+    """
+
+    def __init__(self, window):
+        # Use object.__setattr__ to bypass our own __setattr__ override.
+        object.__setattr__(self, "_window", window)
+
+    def __getattr__(self, name):
+        # Only called when normal attribute lookup fails. Mixin-style
+        # methods are resolved via the class dict and never reach here;
+        # window-owned state and widgets do.
+        if name.startswith("_FaceStripController__") or name == "_window":
+            raise AttributeError(name)
+        return getattr(self._window, name)
+
+    def __setattr__(self, name, value):
+        # Route writes to the window so MainWindow remains the single
+        # source of truth for face-strip state during this transition.
+        if name == "_window":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._window, name, value)
+    """[Legacy docstring from the mixin era — see class header above]
 
     Relies on the following instance attributes existing on the host class
     (all of them are set up inside MainWindow.__init__ today):

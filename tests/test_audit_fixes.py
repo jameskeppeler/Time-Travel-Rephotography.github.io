@@ -589,10 +589,10 @@ class TestPreviewMixin(unittest.TestCase):
         )
 
 
-class TestFaceStripMixin(unittest.TestCase):
-    """Sprint-4 architectural slice: FaceStripMixin holds 31 face-strip
-    methods that used to live on MainWindow. MRO must keep them callable
-    through the existing self.<method>() call sites."""
+class TestFaceStripController(unittest.TestCase):
+    """Sprint-4 polish: FaceStripMixin promoted to FaceStripController.
+    MainWindow owns ``self.face_strip = FaceStripController(self)`` and
+    external callers go through that attribute."""
 
     EXPECTED_METHODS = [
         "render_face_preview_strip",
@@ -628,51 +628,36 @@ class TestFaceStripMixin(unittest.TestCase):
         "_get_focused_face_preview_index",
     ]
 
-    def test_mixin_module_exists(self):
+    def test_module_exists(self):
         self.assertTrue((REPO_ROOT / "gui" / "face_strip.py").exists())
 
-    def test_mixin_class_defined(self):
+    def test_controller_class_defined(self):
         source = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
-        self.assertIn("FaceStripMixin", classes)
+        self.assertIn("FaceStripController", classes)
+        # Legacy mixin name must not linger.
+        self.assertNotIn("FaceStripMixin", classes)
 
-    def test_methods_live_on_mixin(self):
+    def test_methods_live_on_controller(self):
         source = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         methods = set()
         for cls in ast.iter_child_nodes(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "FaceStripMixin":
+            if isinstance(cls, ast.ClassDef) and cls.name == "FaceStripController":
                 for item in cls.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         methods.add(item.name)
         missing = [m for m in self.EXPECTED_METHODS if m not in methods]
-        self.assertFalse(missing, f"Mixin missing: {missing}")
+        self.assertFalse(missing, f"Controller missing: {missing}")
 
-    def test_methods_NOT_redefined_in_main_window(self):
+    def test_main_window_does_not_inherit_legacy_mixin(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
-                method_names = {
-                    item.name
-                    for item in cls.body
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                }
-                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
-                self.assertFalse(
-                    duplicates,
-                    f"These mixin methods are also defined on MainWindow "
-                    f"(duplicate -- mixin version will be shadowed): {duplicates}",
-                )
+        self.assertNotIn("FaceStripMixin", source)
 
-    def test_main_window_inherits_mixin(self):
+    def test_main_window_owns_controller_instance(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        # The class header must reference FaceStripMixin in its bases.
-        self.assertRegex(
-            source,
-            r"class\s+MainWindow\s*\([^)]*FaceStripMixin[^)]*\)\s*:",
-        )
+        self.assertIn("self.face_strip = FaceStripController(self)", source)
 
 
 class TestDialogsModule(unittest.TestCase):

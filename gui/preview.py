@@ -103,35 +103,35 @@ class PreviewMixin:
         return (src_x, src_y)
 
     def handle_input_preview_mouse_move(self, pos):
-        if not self.face_preview_entries:
+        if not self.face_strip.face_preview_entries:
             return
         idx = self._hit_test_input_face_index(pos)
         if isinstance(idx, int) and self._is_face_interaction_allowed(idx):
-            self.set_hover_face_preview_index(idx, source="input")
+            self.face_strip.set_hover_face_preview_index(idx, source="input")
             return
-        if self.hover_face_preview_source == "input":
-            self.clear_hover_face_preview_index()
+        if self.face_strip.hover_face_preview_source == "input":
+            self.face_strip.clear_hover_face_preview_index()
 
     def handle_input_preview_mouse_leave(self):
-        if self.hover_face_preview_source == "input":
-            self.clear_hover_face_preview_index()
+        if self.face_strip.hover_face_preview_source == "input":
+            self.face_strip.clear_hover_face_preview_index()
 
     def handle_input_preview_click(self, pos):
-        if not self.face_preview_entries:
+        if not self.face_strip.face_preview_entries:
             return False
         idx = self._hit_test_input_face_index(pos)
         if (not isinstance(idx, int)) or (not self._is_face_interaction_allowed(idx)):
             return False
-        self.set_hover_face_preview_index(idx, source="input")
-        self.select_face_preview(idx, user_initiated=True)
+        self.face_strip.set_hover_face_preview_index(idx, source="input")
+        self.face_strip.select_face_preview(idx, user_initiated=True)
         return True
 
     def _get_compare_before_source_pixmap(self):
-        focused_idx = self._get_focused_face_preview_index()
-        crop_path = self._get_face_crop_path(focused_idx) if focused_idx is not None else None
+        focused_idx = self.face_strip._get_focused_face_preview_index()
+        crop_path = self.face_strip._get_face_crop_path(focused_idx) if focused_idx is not None else None
         if crop_path is None and focused_idx is not None:
-            self._sync_face_preview_crop_paths()
-            crop_path = self._get_face_crop_path(focused_idx)
+            self.face_strip._sync_face_preview_crop_paths()
+            crop_path = self.face_strip._get_face_crop_path(focused_idx)
         if crop_path is not None:
             pix = self._get_result_pixmap_cached(crop_path)
             if pix is not None and (not pix.isNull()):
@@ -174,8 +174,8 @@ class PreviewMixin:
     def update_input_face_boxes_for_preview(self, expected_count=None):
         self.input_face_boxes = []
         self.input_face_box_source = None
-        self.hover_face_box_cache = {}
-        self.hover_face_box_override = None
+        self.face_strip.hover_face_box_cache = {}
+        self.face_strip.hover_face_box_override = None
         if expected_count is None or expected_count <= 0:
             self.refresh_input_preview_scale()
             return
@@ -258,9 +258,9 @@ class PreviewMixin:
 
     def set_input_preview_image(self, image_path: Path | None):
         self.input_pixmap = None
-        self.hover_face_box_override = None
-        self.hover_face_preview_source = None
-        self.hover_face_box_cache = {}
+        self.face_strip.hover_face_box_override = None
+        self.face_strip.hover_face_preview_source = None
+        self.face_strip.hover_face_box_cache = {}
         self.input_preview_scaled_cache_key = None
         self.input_preview_scaled_cache_pixmap = None
         self.input_preview_render_cache_key = None
@@ -293,7 +293,7 @@ class PreviewMixin:
         self.input_pixmap = pix
         self.input_preview_label.setText("")
         self.update_input_face_boxes_for_preview(
-            expected_count=len(self.face_preview_entries) if self.face_preview_entries else None
+            expected_count=len(self.face_strip.face_preview_entries) if self.face_strip.face_preview_entries else None
         )
         if hasattr(self, "input_detect_overlay") and self.input_detect_overlay.isVisible():
             self.input_detect_overlay.notify_parent_pixmap_changed()
@@ -408,41 +408,41 @@ class PreviewMixin:
             self.input_preview_scaled_cache_key = cache_key
             self.input_preview_scaled_cache_pixmap = base_scaled
 
-        active_idx = self.hover_face_preview_index
-        if isinstance(active_idx, int) and self.hover_face_preview_source == "strip":
-            cursor_idx = self._cursor_face_preview_index()
+        active_idx = self.face_strip.hover_face_preview_index
+        if isinstance(active_idx, int) and self.face_strip.hover_face_preview_source == "strip":
+            cursor_idx = self.face_strip._cursor_face_preview_index()
             if isinstance(cursor_idx, int):
                 if cursor_idx != active_idx:
-                    self.hover_face_preview_index = cursor_idx
-                    self.hover_face_preview_source = "strip"
+                    self.face_strip.hover_face_preview_index = cursor_idx
+                    self.face_strip.hover_face_preview_source = "strip"
                 active_idx = cursor_idx
             else:
-                self.hover_face_preview_index = None
-                self.hover_face_preview_source = None
-                self.hover_face_box_override = None
+                self.face_strip.hover_face_preview_index = None
+                self.face_strip.hover_face_preview_source = None
+                self.face_strip.hover_face_box_override = None
                 active_idx = None
 
-        active_box = self.hover_face_box_override
+        active_box = self.face_strip.hover_face_box_override
         if active_box is None and isinstance(active_idx, int):
-            cached_box = self.hover_face_box_cache.get(active_idx)
+            cached_box = self.face_strip.hover_face_box_cache.get(active_idx)
             if cached_box is None:
                 cached_box = self.resolve_hover_face_box(active_idx)
-                self.hover_face_box_cache[active_idx] = cached_box
+                self.face_strip.hover_face_box_cache[active_idx] = cached_box
             active_box = cached_box
 
         if self.awaiting_face_selection:
-            selected_indices = [e["index"] for e in self.face_preview_entries if e.get("selected", False)]
+            selected_indices = [e["index"] for e in self.face_strip.face_preview_entries if e.get("selected", False)]
         else:
             selected_indices = []
-            if isinstance(self.selected_face_preview_index, int) and self.selected_face_preview_index >= 0:
-                selected_indices = [self.selected_face_preview_index]
+            if isinstance(self.face_strip.selected_face_preview_index, int) and self.face_strip.selected_face_preview_index >= 0:
+                selected_indices = [self.face_strip.selected_face_preview_index]
 
         selected_boxes = []
         for idx in selected_indices:
-            cached_box = self.hover_face_box_cache.get(idx)
+            cached_box = self.face_strip.hover_face_box_cache.get(idx)
             if cached_box is None:
                 cached_box = self.resolve_hover_face_box(idx)
-                self.hover_face_box_cache[idx] = cached_box
+                self.face_strip.hover_face_box_cache[idx] = cached_box
             if cached_box is not None:
                 selected_boxes.append((idx, cached_box))
 
