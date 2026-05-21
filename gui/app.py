@@ -1378,6 +1378,14 @@ class MainWindow(
 
         self.setup_menu_bar()
 
+        # Hoist these locals to instance attributes BEFORE returning so
+        # _finalize_init can use them. (The __init__ split between
+        # _build_ui and _finalize_init turned these from function-scope
+        # locals into a contract between the two methods.)
+        self.previews_group = previews_group
+        self.previews_layout = previews_layout
+        self.previews_splitter = preview_top_row
+        self.main_layout = main_layout
 
     def _finalize_init(self):
         """Run after _build_ui: install the responsive layout, run
@@ -1385,14 +1393,10 @@ class MainWindow(
         startup tasks (preflight, Haar cascade warmup).
         """
         # --- Responsive page layout ---
-        self.previews_group = previews_group
-        self.previews_layout = previews_layout
-        self.previews_splitter = preview_top_row
-        self.main_layout = main_layout
         self.content_layout = QBoxLayout(QBoxLayout.TopToBottom)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.content_layout.setSpacing(8)
-        main_layout.addLayout(self.content_layout)
+        self.main_layout.addLayout(self.content_layout)
         self._wide_layout_active = None
         self.apply_responsive_layout(force=True)
 
