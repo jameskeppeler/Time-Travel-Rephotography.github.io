@@ -14,7 +14,7 @@ from collections import OrderedDict, defaultdict
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QEvent, QProcess, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QBrush, QColor, QCursor, QFont, QIcon, QImage, QImageReader, QPainter, QPen, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QApplication,
@@ -101,10 +101,6 @@ from gui.widgets import (
     NoScrollSpinBox,
     ResultPreviewLabel,
     TimestampedLogBox,
-    _PixmapLoader,
-    _PixmapLoaderSignals,
-    _PreflightRunner,
-    _PreflightSignals,
 )
 
 # AdvancedSettingsDialog was extracted to gui/dialogs.py as the second
@@ -529,7 +525,7 @@ class MainWindow(
 
     def closeEvent(self, event):
         try:
-            self.stop_quick_face_probe()
+            self.pipeline.stop_quick_face_probe()
         except Exception:
             pass
 
@@ -598,18 +594,10 @@ class MainWindow(
         self._facecrop_env_name_cache = None
         self._quick_probe_det_threshold = None
 
-        # Async pixmap loaders live on MainWindow because their .connect()
-        # targets bound methods of the PreviewController (which exists by
-        # the time these lines run).
-        self._pixmap_thread_pool = QThreadPool.globalInstance()
-        self._input_pixmap_loader_signals = _PixmapLoaderSignals()
-        self._input_pixmap_loader_signals.loaded.connect(self.preview._on_input_pixmap_loaded)
-        self._input_pixmap_loader_signals.failed.connect(self.preview._on_input_pixmap_failed)
-        self._input_pixmap_loader_path = None
-        self._result_pixmap_loader_signals = _PixmapLoaderSignals()
-        self._result_pixmap_loader_signals.loaded.connect(self._on_result_pixmap_loaded)
-        self._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
-        self._result_pixmap_loader_path = None
+        # (Async pixmap loader wiring lives on PreviewController.__init__
+        # since the state-ownership migration. Result-pixmap-loader signals
+        # were dead code -- the wired callbacks never existed -- and have
+        # been removed.)
 
         self._newest_image_query_cache = {}
         self._newest_image_query_cache_max_entries = 64
@@ -620,15 +608,6 @@ class MainWindow(
         self.log_expanded = False
         self.log_visible = False
 
-        # Quick-face-probe state (TODO: belongs on PipelineController).
-        self.quick_face_count_estimate = None
-        self.quick_face_probe_process = None
-        self.quick_face_probe_token = 0
-        self.quick_face_probe_target_input = None
-        self.quick_face_probe_fallback_count = None
-        self.quick_face_probe_warned = False
-        self.quick_face_probe_stdout = ""
-        self.quick_face_probe_last_error = ""
         self.pipeline._last_iter_progress_signature = None
         self.pipeline._last_preprocess_progress_state = None
         self.pipeline._last_rephoto_progress_state = None
@@ -1904,10 +1883,10 @@ class MainWindow(
     # ------------------------------
     def _reset_main_window_for_new_input(self):
         """Clear selection/runtime preview state when user imports a new input image."""
-        self.stop_quick_face_probe()
+        self.pipeline.stop_quick_face_probe()
         self.pipeline._clear_current_stop_flag()
         self.pipeline._clear_current_pause_flag()
-        self.quick_face_count_estimate = None
+        self.pipeline.quick_face_count_estimate = None
         self._quick_probe_det_threshold = None
         self.pipeline._last_backend_error_detail = ""
         self._template_match_cache = {}
@@ -1948,7 +1927,7 @@ class MainWindow(
             self.status_label.setText("Status: Reset canceled")
             return
 
-        self.stop_quick_face_probe()
+        self.pipeline.stop_quick_face_probe()
         self.preview.set_input_detect_overlay(False)
         self.pipeline.suppress_preprocess_ui_until_rephoto = False
         # Reset all advanced-settings values to their defaults.
@@ -1986,7 +1965,7 @@ class MainWindow(
         self.log_box.append(f"Selected image: {file_path}")
         self.status_label.setText("Status: Image selected")
         self.preview.set_input_preview_image(Path(file_path))
-        self.refresh_quick_face_hint_from_input()
+        self.pipeline.refresh_quick_face_hint_from_input()
 
     def browse_for_image(self):
         if not self.can_select_new_image(show_message=True):
@@ -2626,7 +2605,7 @@ class MainWindow(
             return
         if self.advanced_dialog.crop_only_checkbox.isChecked():
             return
-        if (not allow_during_probe) and self.quick_face_probe_process is not None:
+        if (not allow_during_probe) and self.pipeline.quick_face_probe_process is not None:
             return
 
         current_input = self.input_image_edit.text().strip()
@@ -2640,7 +2619,7 @@ class MainWindow(
         if self.pipeline.auto_detect_faces_triggered_input == current_key:
             return
 
-        quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
+        quick_count = self.pipeline.quick_face_count_estimate if isinstance(self.pipeline.quick_face_count_estimate, int) else None
         # Keep import auto-detect scoped to confident multi-face inputs.
         if quick_count is None or quick_count <= 1:
             return
@@ -2723,211 +2702,6 @@ class MainWindow(
         self._facecrop_env_cache_key = cache_key
         self._facecrop_env_name_cache = env_name
         return env_name
-
-    def stop_quick_face_probe(self):
-        process = self.quick_face_probe_process
-        if process is not None:
-            try:
-                process.blockSignals(True)
-            except Exception:
-                pass
-            if process.state() != QProcess.NotRunning:
-                process.kill()
-                process.waitForFinished(300)
-            process.deleteLater()
-
-        self.quick_face_probe_process = None
-        self.quick_face_probe_token += 1
-        self.quick_face_probe_target_input = None
-        self.quick_face_probe_fallback_count = None
-        self.quick_face_probe_stdout = ""
-        self.quick_face_probe_last_error = ""
-
-    def _drain_quick_face_probe_output(self, token, is_error=False):
-        if token != self.quick_face_probe_token:
-            return
-        process = self.quick_face_probe_process
-        if process is None:
-            return
-        chunk = process.readAllStandardError() if is_error else process.readAllStandardOutput()
-        text = bytes(chunk).decode("utf-8", errors="ignore")
-        if not text:
-            return
-        if is_error:
-            self.quick_face_probe_last_error += text
-            if len(self.quick_face_probe_last_error) > 6000:
-                self.quick_face_probe_last_error = self.quick_face_probe_last_error[-6000:]
-            return
-        self.quick_face_probe_stdout += text
-        if len(self.quick_face_probe_stdout) > 12000:
-            self.quick_face_probe_stdout = self.quick_face_probe_stdout[-12000:]
-
-    def _start_quick_face_probe(self, image_path: Path, fallback_count=None):
-        self.stop_quick_face_probe()
-
-        conda_exe = self.resolve_conda_executable()
-        if not conda_exe:
-            if not self.quick_face_probe_warned:
-                self.log_box.append(
-                    "Accurate quick face detection unavailable: conda was not found. Falling back to basic estimate."
-                )
-                self.quick_face_probe_warned = True
-            return False
-
-        token = self.quick_face_probe_token + 1
-        self.quick_face_probe_token = token
-        self.quick_face_probe_target_input = str(image_path)
-        self.quick_face_probe_fallback_count = fallback_count
-        self.quick_face_probe_stdout = ""
-        self.quick_face_probe_last_error = ""
-
-        probe_script = self.resolve_resource_path(Path("tools") / "quick_face_count_retina.py")
-        if not probe_script.exists():
-            if not self.quick_face_probe_warned:
-                self.log_box.append(
-                    f"Accurate quick face detection unavailable: missing probe script ({probe_script})."
-                )
-                self.quick_face_probe_warned = True
-            self.quick_face_probe_target_input = None
-            self.quick_face_probe_fallback_count = None
-            return False
-
-        facecrop_env = self.resolve_facecrop_env_name()
-        process = QProcess(self)
-        process.setWorkingDirectory(str(self.repo_root))
-        process.readyReadStandardOutput.connect(
-            lambda t=token: self._drain_quick_face_probe_output(t, is_error=False)
-        )
-        process.readyReadStandardError.connect(
-            lambda t=token: self._drain_quick_face_probe_output(t, is_error=True)
-        )
-        process.finished.connect(
-            lambda exit_code, exit_status, t=token, image=str(image_path), fb=fallback_count: self._quick_face_probe_finished(
-                exit_code, exit_status, t, image, fb
-            )
-        )
-
-        det_threshold = self.advanced_dialog.det_threshold_edit.value()
-        self._quick_probe_det_threshold = float(det_threshold)
-        args = [
-            "run",
-            "-n",
-            facecrop_env,
-            "python",
-            str(probe_script),
-            "--image",
-            str(image_path),
-            "--det-threshold",
-            f"{det_threshold:.2f}",
-            "--resize-size",
-            "1536",
-            "--decision-cap",
-            "2",
-        ]
-
-        process.start(conda_exe, args)
-        self.quick_face_probe_process = process
-        if not process.waitForStarted(250):
-            err = process.errorString()
-            self.quick_face_probe_process = None
-            self.quick_face_probe_target_input = None
-            self.quick_face_probe_fallback_count = None
-            self._quick_probe_det_threshold = None
-            process.deleteLater()
-            if not self.quick_face_probe_warned:
-                self.log_box.append(
-                    f"Accurate quick face detection unavailable: failed to start detector process ({err})."
-                )
-                self.quick_face_probe_warned = True
-            return False
-        return True
-
-    def _quick_face_probe_finished(self, exit_code, exit_status, token, image_path, fallback_count):
-        try:
-            self._drain_quick_face_probe_output(token, is_error=False)
-            self._drain_quick_face_probe_output(token, is_error=True)
-        except Exception:
-            pass
-
-        if token != self.quick_face_probe_token:
-            return
-
-        self.quick_face_probe_process = None
-        self.quick_face_probe_target_input = None
-        self.quick_face_probe_fallback_count = None
-
-        current_input = self.input_image_edit.text().strip()
-        current_key = self._normalized_path_key(current_input)
-        probe_key = self._normalized_path_key(image_path)
-        if (not current_input) or (current_key is None) or (probe_key is None) or (current_key != probe_key):
-            self.quick_face_probe_stdout = ""
-            self.quick_face_probe_last_error = ""
-            return
-
-        precise_count = None
-        if exit_status == QProcess.NormalExit and int(exit_code) == 0:
-            match = QUICK_FACE_DECISION_RE.search(self.quick_face_probe_stdout)
-            if match:
-                try:
-                    precise_count = int(match.group(1))
-                except Exception:
-                    precise_count = None
-
-        if isinstance(precise_count, int):
-            self.quick_face_count_estimate = precise_count
-        else:
-            self.quick_face_count_estimate = fallback_count if isinstance(fallback_count, int) else None
-            if (not self.quick_face_probe_warned) and (
-                exit_status != QProcess.NormalExit or int(exit_code) != 0
-            ):
-                detail = self.quick_face_probe_last_error.strip().splitlines()
-                suffix = f" ({detail[-1]})" if detail else ""
-                self.log_box.append(
-                    f"Accurate quick face detection fell back to basic estimate (exit {exit_code}){suffix}"
-                )
-                self.quick_face_probe_warned = True
-
-        if self.quick_face_count_estimate == 0:
-            self.status_label.setText("Status: No faces detected in quick scan")
-            self.log_box.append(
-                "Quick scan found 0 faces at the current threshold. Backend run will auto-lower detection threshold; if it still fails, crop tighter around the face."
-            )
-
-        # Parse piggy-backed RETINA_FACE_BOX lines from the count probe so we
-        # can skip a separate retina box probe later (saves ~5-10s conda+model load).
-        if exit_status == QProcess.NormalExit and int(exit_code) == 0:
-            piggybacked_boxes_by_index = {}
-            for line in (self.quick_face_probe_stdout or "").splitlines():
-                box_match = RETINA_FACE_BOX_RE.search(line.strip())
-                if box_match:
-                    bi = int(box_match.group(1))
-                    bx = int(box_match.group(2))
-                    by = int(box_match.group(3))
-                    bw = int(box_match.group(4))
-                    bh = int(box_match.group(5))
-                    if bw >= 8 and bh >= 8:
-                        if bi not in piggybacked_boxes_by_index:
-                            piggybacked_boxes_by_index[bi] = (bx, by, bw, bh)
-            piggybacked_boxes = [piggybacked_boxes_by_index[i] for i in sorted(piggybacked_boxes_by_index)]
-            if piggybacked_boxes:
-                self._quick_probe_retina_boxes = piggybacked_boxes
-                self._quick_probe_retina_boxes_path = image_path
-
-        self.quick_face_probe_stdout = ""
-        self.quick_face_probe_last_error = ""
-
-        # Probe finished - stop the "Detecting Faces" overlay.
-        self.preview.set_input_detect_overlay(False)
-
-        # Reset the trigger guard so auto-detect can re-fire with the
-        # accurate count from the probe (it may have been set earlier).
-        current_input = self.input_image_edit.text().strip()
-        current_key = self._normalized_path_key(current_input)
-        if current_key is not None and self.pipeline.auto_detect_faces_triggered_input == current_key:
-            self.pipeline.auto_detect_faces_triggered_input = None
-
-        self.face_strip.update_run_button_for_quick_face_hint()
-        self.maybe_auto_start_face_detection_from_import()
 
     def _warm_up_haar_detector(self):
         """Pre-load the Haar cascade so the first face probe is fast."""
@@ -3078,35 +2852,6 @@ class MainWindow(
             minSize=(min_face, min_face),
         )
         return int(len(faces))
-
-    def refresh_quick_face_hint_from_input(self):
-        image_path_text = self.input_image_edit.text().strip()
-        if not image_path_text:
-            self.stop_quick_face_probe()
-            self.quick_face_count_estimate = None
-            self.face_strip.update_run_button_for_quick_face_hint()
-            self.preview.set_input_detect_overlay(False)
-            return
-
-        image_path = Path(image_path_text)
-        if not image_path.exists():
-            self.stop_quick_face_probe()
-            self.quick_face_count_estimate = None
-            self.face_strip.update_run_button_for_quick_face_hint()
-            self.preview.set_input_detect_overlay(False)
-            return
-
-        # Launch RetinaFace probe for face detection.
-        # When the probe finishes, _quick_face_probe_finished will set the
-        # face count, create preview crops, and populate the filmstrip.
-        self.face_strip.update_run_button_for_quick_face_hint()
-        if self._start_quick_face_probe(image_path, fallback_count=None):
-            self.preview.set_input_detect_overlay(True, "Detecting Faces")
-            self.log_box.append("Detecting faces (RetinaFace)...")
-            return
-
-        # Probe couldn't be launched. Stop the overlay.
-        self.preview.set_input_detect_overlay(False)
 
     def resolve_input_face_boxes_via_retina_probe(self, image_path: Path, expected_count=None):
         if image_path is None or (not image_path.exists()):

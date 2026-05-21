@@ -14,9 +14,6 @@ MainWindow.__init__):
   * Result-preview cache: result_preview_pixmap_cache,
     result_preview_pixmap_cache_max_entries, last_result_image_path,
     last_result_image_cache_key
-  * Async loader state: _input_pixmap_loader_path,
-    _input_pixmap_loader_signals, _result_pixmap_loader_signals,
-    _pixmap_thread_pool
   * Scale caches: input_preview_scaled_cache_key/pixmap,
     input_preview_render_cache_key/pixmap, input_preview_last_display_key,
     result_preview_scaled_cache_key/pixmap, result_preview_last_display_key
@@ -84,6 +81,15 @@ class PreviewController:
         self._compare_wipe_result_scaled_key = None
         self._compare_wipe_input_scaled = None
         self._compare_wipe_input_scaled_key = None
+        # Async pixmap loader for input previews. Off-UI-thread
+        # decode keeps the window responsive on 50-200 MB historical scans.
+        from PySide6.QtCore import QThreadPool
+        from gui.widgets import _PixmapLoaderSignals
+        self._pixmap_thread_pool = QThreadPool.globalInstance()
+        self._input_pixmap_loader_signals = _PixmapLoaderSignals()
+        self._input_pixmap_loader_signals.loaded.connect(self._on_input_pixmap_loaded)
+        self._input_pixmap_loader_signals.failed.connect(self._on_input_pixmap_failed)
+        self._input_pixmap_loader_path = None
         self.current_wide_preview_side = 360
 
     def __getattr__(self, name):

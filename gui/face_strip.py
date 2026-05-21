@@ -291,7 +291,7 @@ class FaceStripController:
         # - If we are confidently single-face (==1), keep simple "Run".
         # - If quick scan found no faces (==0), keep "Run" enabled but explain likely failure.
         # - Otherwise (multi-face or unknown estimate), signal the detect/select step.
-        quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
+        quick_count = self.pipeline.quick_face_count_estimate if isinstance(self.pipeline.quick_face_count_estimate, int) else None
         if quick_count == 1:
             self.run_button.setText("Run")
             self.run_button.setEnabled(True)

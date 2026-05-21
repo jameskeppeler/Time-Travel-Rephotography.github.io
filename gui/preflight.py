@@ -48,7 +48,7 @@ class PreflightController:
     Required ``window`` interface (all already present on MainWindow):
       Attributes:
         repo_root, results_root_edit, log_box, status_label,
-        current_run_summary_context, _pixmap_thread_pool
+        current_run_summary_context  (preview controller exposes _pixmap_thread_pool)
       Methods:
         resolve_resource_path(rel), update_view_menu_actions()
     """
@@ -198,7 +198,7 @@ class PreflightController:
         signals = _PreflightSignals()
         signals.finished.connect(self._on_finished)
         self._signals = signals
-        self.window._pixmap_thread_pool.start(
+        self.window.preview._pixmap_thread_pool.start(
             _PreflightRunner(self, signals, results_root_snapshot)
         )
 

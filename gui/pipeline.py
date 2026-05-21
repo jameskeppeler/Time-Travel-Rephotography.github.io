@@ -117,6 +117,15 @@ class PipelineController:
         self._last_iter_progress_signature = None
         self._last_preprocess_progress_state = None
         self._last_rephoto_progress_state = None
+        # Quick-face-probe (moved from MainWindow).
+        self.quick_face_count_estimate = None
+        self.quick_face_probe_process = None
+        self.quick_face_probe_token = 0
+        self.quick_face_probe_target_input = None
+        self.quick_face_probe_fallback_count = None
+        self.quick_face_probe_warned = False
+        self.quick_face_probe_stdout = ""
+        self.quick_face_probe_last_error = ""
         # Auto-detect-on-import + once-only probe warnings.
         self.auto_detect_faces_on_import = True
         self.auto_detect_faces_armed_input = None
@@ -1730,4 +1739,239 @@ Write-Output "OK"
         self.log_box.append("Run button clicked.")
         status_text = "Status: Detecting faces..." if self.selection_preprocess_mode else "Status: Running backend..."
         self._start_wrapper_process(command, status_text)
+
+    def stop_quick_face_probe(self):
+        process = self.quick_face_probe_process
+        if process is not None:
+            try:
+                process.blockSignals(True)
+            except Exception:
+                pass
+            if process.state() != QProcess.NotRunning:
+                process.kill()
+                process.waitForFinished(300)
+            process.deleteLater()
+
+        self.quick_face_probe_process = None
+        self.quick_face_probe_token += 1
+        self.quick_face_probe_target_input = None
+        self.quick_face_probe_fallback_count = None
+        self.quick_face_probe_stdout = ""
+        self.quick_face_probe_last_error = ""
+
+    def _drain_quick_face_probe_output(self, token, is_error=False):
+        if token != self.quick_face_probe_token:
+            return
+        process = self.quick_face_probe_process
+        if process is None:
+            return
+        chunk = process.readAllStandardError() if is_error else process.readAllStandardOutput()
+        text = bytes(chunk).decode("utf-8", errors="ignore")
+        if not text:
+            return
+        if is_error:
+            self.quick_face_probe_last_error += text
+            if len(self.quick_face_probe_last_error) > 6000:
+                self.quick_face_probe_last_error = self.quick_face_probe_last_error[-6000:]
+            return
+        self.quick_face_probe_stdout += text
+        if len(self.quick_face_probe_stdout) > 12000:
+            self.quick_face_probe_stdout = self.quick_face_probe_stdout[-12000:]
+
+    def _start_quick_face_probe(self, image_path: Path, fallback_count=None):
+        self.stop_quick_face_probe()
+
+        conda_exe = self.resolve_conda_executable()
+        if not conda_exe:
+            if not self.quick_face_probe_warned:
+                self.log_box.append(
+                    "Accurate quick face detection unavailable: conda was not found. Falling back to basic estimate."
+                )
+                self.quick_face_probe_warned = True
+            return False
+
+        token = self.quick_face_probe_token + 1
+        self.quick_face_probe_token = token
+        self.quick_face_probe_target_input = str(image_path)
+        self.quick_face_probe_fallback_count = fallback_count
+        self.quick_face_probe_stdout = ""
+        self.quick_face_probe_last_error = ""
+
+        probe_script = self.resolve_resource_path(Path("tools") / "quick_face_count_retina.py")
+        if not probe_script.exists():
+            if not self.quick_face_probe_warned:
+                self.log_box.append(
+                    f"Accurate quick face detection unavailable: missing probe script ({probe_script})."
+                )
+                self.quick_face_probe_warned = True
+            self.quick_face_probe_target_input = None
+            self.quick_face_probe_fallback_count = None
+            return False
+
+        facecrop_env = self.resolve_facecrop_env_name()
+        process = QProcess(self)
+        process.setWorkingDirectory(str(self.repo_root))
+        process.readyReadStandardOutput.connect(
+            lambda t=token: self._drain_quick_face_probe_output(t, is_error=False)
+        )
+        process.readyReadStandardError.connect(
+            lambda t=token: self._drain_quick_face_probe_output(t, is_error=True)
+        )
+        process.finished.connect(
+            lambda exit_code, exit_status, t=token, image=str(image_path), fb=fallback_count: self._quick_face_probe_finished(
+                exit_code, exit_status, t, image, fb
+            )
+        )
+
+        det_threshold = self.advanced_dialog.det_threshold_edit.value()
+        self._quick_probe_det_threshold = float(det_threshold)
+        args = [
+            "run",
+            "-n",
+            facecrop_env,
+            "python",
+            str(probe_script),
+            "--image",
+            str(image_path),
+            "--det-threshold",
+            f"{det_threshold:.2f}",
+            "--resize-size",
+            "1536",
+            "--decision-cap",
+            "2",
+        ]
+
+        process.start(conda_exe, args)
+        self.quick_face_probe_process = process
+        if not process.waitForStarted(250):
+            err = process.errorString()
+            self.quick_face_probe_process = None
+            self.quick_face_probe_target_input = None
+            self.quick_face_probe_fallback_count = None
+            self._quick_probe_det_threshold = None
+            process.deleteLater()
+            if not self.quick_face_probe_warned:
+                self.log_box.append(
+                    f"Accurate quick face detection unavailable: failed to start detector process ({err})."
+                )
+                self.quick_face_probe_warned = True
+            return False
+        return True
+
+    def _quick_face_probe_finished(self, exit_code, exit_status, token, image_path, fallback_count):
+        try:
+            self._drain_quick_face_probe_output(token, is_error=False)
+            self._drain_quick_face_probe_output(token, is_error=True)
+        except Exception:
+            pass
+
+        if token != self.quick_face_probe_token:
+            return
+
+        self.quick_face_probe_process = None
+        self.quick_face_probe_target_input = None
+        self.quick_face_probe_fallback_count = None
+
+        current_input = self.input_image_edit.text().strip()
+        current_key = self._normalized_path_key(current_input)
+        probe_key = self._normalized_path_key(image_path)
+        if (not current_input) or (current_key is None) or (probe_key is None) or (current_key != probe_key):
+            self.quick_face_probe_stdout = ""
+            self.quick_face_probe_last_error = ""
+            return
+
+        precise_count = None
+        if exit_status == QProcess.NormalExit and int(exit_code) == 0:
+            match = QUICK_FACE_DECISION_RE.search(self.quick_face_probe_stdout)
+            if match:
+                try:
+                    precise_count = int(match.group(1))
+                except Exception:
+                    precise_count = None
+
+        if isinstance(precise_count, int):
+            self.quick_face_count_estimate = precise_count
+        else:
+            self.quick_face_count_estimate = fallback_count if isinstance(fallback_count, int) else None
+            if (not self.quick_face_probe_warned) and (
+                exit_status != QProcess.NormalExit or int(exit_code) != 0
+            ):
+                detail = self.quick_face_probe_last_error.strip().splitlines()
+                suffix = f" ({detail[-1]})" if detail else ""
+                self.log_box.append(
+                    f"Accurate quick face detection fell back to basic estimate (exit {exit_code}){suffix}"
+                )
+                self.quick_face_probe_warned = True
+
+        if self.quick_face_count_estimate == 0:
+            self.status_label.setText("Status: No faces detected in quick scan")
+            self.log_box.append(
+                "Quick scan found 0 faces at the current threshold. Backend run will auto-lower detection threshold; if it still fails, crop tighter around the face."
+            )
+
+        # Parse piggy-backed RETINA_FACE_BOX lines from the count probe so we
+        # can skip a separate retina box probe later (saves ~5-10s conda+model load).
+        if exit_status == QProcess.NormalExit and int(exit_code) == 0:
+            piggybacked_boxes_by_index = {}
+            for line in (self.quick_face_probe_stdout or "").splitlines():
+                box_match = RETINA_FACE_BOX_RE.search(line.strip())
+                if box_match:
+                    bi = int(box_match.group(1))
+                    bx = int(box_match.group(2))
+                    by = int(box_match.group(3))
+                    bw = int(box_match.group(4))
+                    bh = int(box_match.group(5))
+                    if bw >= 8 and bh >= 8:
+                        if bi not in piggybacked_boxes_by_index:
+                            piggybacked_boxes_by_index[bi] = (bx, by, bw, bh)
+            piggybacked_boxes = [piggybacked_boxes_by_index[i] for i in sorted(piggybacked_boxes_by_index)]
+            if piggybacked_boxes:
+                self._quick_probe_retina_boxes = piggybacked_boxes
+                self._quick_probe_retina_boxes_path = image_path
+
+        self.quick_face_probe_stdout = ""
+        self.quick_face_probe_last_error = ""
+
+        # Probe finished - stop the "Detecting Faces" overlay.
+        self.preview.set_input_detect_overlay(False)
+
+        # Reset the trigger guard so auto-detect can re-fire with the
+        # accurate count from the probe (it may have been set earlier).
+        current_input = self.input_image_edit.text().strip()
+        current_key = self._normalized_path_key(current_input)
+        if current_key is not None and self.pipeline.auto_detect_faces_triggered_input == current_key:
+            self.pipeline.auto_detect_faces_triggered_input = None
+
+        self.face_strip.update_run_button_for_quick_face_hint()
+        self.maybe_auto_start_face_detection_from_import()
+
+    def refresh_quick_face_hint_from_input(self):
+        image_path_text = self.input_image_edit.text().strip()
+        if not image_path_text:
+            self.stop_quick_face_probe()
+            self.quick_face_count_estimate = None
+            self.face_strip.update_run_button_for_quick_face_hint()
+            self.preview.set_input_detect_overlay(False)
+            return
+
+        image_path = Path(image_path_text)
+        if not image_path.exists():
+            self.stop_quick_face_probe()
+            self.quick_face_count_estimate = None
+            self.face_strip.update_run_button_for_quick_face_hint()
+            self.preview.set_input_detect_overlay(False)
+            return
+
+        # Launch RetinaFace probe for face detection.
+        # When the probe finishes, _quick_face_probe_finished will set the
+        # face count, create preview crops, and populate the filmstrip.
+        self.face_strip.update_run_button_for_quick_face_hint()
+        if self._start_quick_face_probe(image_path, fallback_count=None):
+            self.preview.set_input_detect_overlay(True, "Detecting Faces")
+            self.log_box.append("Detecting faces (RetinaFace)...")
+            return
+
+        # Probe couldn't be launched. Stop the overlay.
+        self.preview.set_input_detect_overlay(False)
+
 
