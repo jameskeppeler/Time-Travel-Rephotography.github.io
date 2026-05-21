@@ -47,10 +47,12 @@ from PySide6.QtWidgets import QMenu, QMessageBox
 
 from gui.constants import (
     CROPPED_FACE_COUNT_RE,
+    DEFAULT_GFPGAN_BLEND,
     ITER_PROGRESS_RE,
     NO_CROPS_CREATED_RE,
     QUICK_FACE_DECISION_RE,
     REPHOTO_CROP_FAIL_RE,
+    RETINA_FACE_BOX_RE,
     SIMPLE_FINAL_COPY_RE,
 )
 

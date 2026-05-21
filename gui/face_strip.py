@@ -20,9 +20,10 @@ ground.
 
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
+    QBoxLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -32,7 +33,8 @@ from PySide6.QtWidgets import (
 )
 
 from gui import path_utils
-from gui.widgets import FaceStripToolButton
+from gui.constants import FACE_SUFFIX_INDEX_RE, IMAGE_EXTENSIONS
+from gui.widgets import FaceStripToolButton, FilmstripContainerWidget
 
 
 class FaceStripController:
