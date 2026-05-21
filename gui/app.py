@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 # Shared defaults, presets, and stdout-parsing regexes live in
 # gui/constants.py since the Sprint-4 split; re-exported here so existing
 # call sites that read them off the gui.app namespace keep working.
+from gui import format_utils, path_utils
 from gui.constants import (
     CROP_ALIGN_BOX_RE,
     CROPPED_FACE_COUNT_RE,
@@ -653,32 +654,10 @@ class MainWindow(QMainWindow):
         }
 
     def _preflight_report_plain_text(self, report):
-        lines = [
-            "Startup Preflight Report",
-            f"Summary: {report['pass']} pass, {report['warn']} warn, {report['fail']} fail",
-            "",
-        ]
-        for check in report["checks"]:
-            lines.append(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
-            if check.get("fix") and check["status"] != "pass":
-                lines.append(f"  Fix: {check['fix']}")
-        return "\n".join(lines)
+        return format_utils.preflight_report_plain_text(report)
 
     def _preflight_report_html(self, report):
-        status_color = {"pass": "#6fcf97", "warn": "#f2c94c", "fail": "#eb5757"}
-        rows = []
-        for c in report["checks"]:
-            color = status_color.get(c["status"], "#b7bcc5")
-            fix_html = f"<br/><span style='color:#b7bcc5'><b>Fix:</b> {c['fix']}</span>" if c.get("fix") and c["status"] != "pass" else ""
-            rows.append(
-                f"<li><span style='color:{color}'><b>{c['status'].upper()}</b></span> "
-                f"<b>{c['name']}</b>: {c['detail']}{fix_html}</li>"
-            )
-        return (
-            f"<h3>Startup Preflight</h3>"
-            f"<p><b>Summary:</b> {report['pass']} pass, {report['warn']} warn, {report['fail']} fail</p>"
-            f"<ul>{''.join(rows)}</ul>"
-        )
+        return format_utils.preflight_report_html(report)
 
     def show_preflight_dialog(self, report):
         dialog = QDialog(self)
@@ -740,14 +719,7 @@ class MainWindow(QMainWindow):
             self.show_preflight_dialog(report)
 
     def _format_elapsed_for_summary(self, elapsed_seconds):
-        if elapsed_seconds is None:
-            return "N/A"
-        elapsed = int(max(0, elapsed_seconds))
-        h, rem = divmod(elapsed, 3600)
-        m, s = divmod(rem, 60)
-        if h > 0:
-            return f"{h}:{m:02d}:{s:02d}"
-        return f"{m}:{s:02d}"
+        return format_utils.format_elapsed_for_summary(elapsed_seconds)
 
     def _capture_run_context(self):
         return {
@@ -4297,29 +4269,10 @@ Write-Output "OK"
         self.status_label.setText("Status: Ending run early...")
 
     def _normalized_path_key(self, path_text):
-        if not path_text:
-            return None
-        try:
-            return os.path.normcase(str(Path(path_text).resolve()))
-        except Exception:
-            return os.path.normcase(str(path_text))
+        return path_utils.normalized_path_key(path_text)
 
     def _make_safe_base_name(self, base_text):
-        raw = str(base_text or "")
-        if not raw:
-            return "input_image"
-        out = []
-        prev_sep = False
-        for ch in raw:
-            if ch.isalnum():
-                out.append(ch)
-                prev_sep = False
-            else:
-                if not prev_sep:
-                    out.append("_")
-                    prev_sep = True
-        safe = "".join(out).strip("_")
-        return safe or "input_image"
+        return path_utils.make_safe_base_name(base_text)
 
     def _seed_wrapper_crop_dir_from_preview(self, input_image_path: Path):
         if input_image_path is None or (not input_image_path.exists()):
@@ -5082,20 +5035,7 @@ Write-Output "OK"
         return max(1, selected_count)
 
     def _list_image_files_in_dir(self, folder: Path):
-        if folder is None or (not folder.exists()) or (not folder.is_dir()):
-            return []
-        def _sort_key(p: Path):
-            match = FACE_SUFFIX_INDEX_RE.search(p.stem)
-            if match:
-                try:
-                    return (0, int(match.group(1)), p.name.lower())
-                except Exception:
-                    pass
-            return (1, p.name.lower())
-        return sorted(
-            [p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS],
-            key=_sort_key,
-        )
+        return path_utils.list_image_files_in_dir(folder)
 
     def collect_current_crop_files(self):
         if self.current_crop_output_dir:
@@ -6530,16 +6470,7 @@ Write-Output "OK"
         self.input_preview_label.setPixmap(QPixmap())
 
     def _result_preview_cache_key(self, image_path: Path):
-        p = Path(image_path)
-        try:
-            normalized = str(p.resolve()).lower()
-        except Exception:
-            normalized = str(p).lower()
-        try:
-            st = p.stat()
-            return f"{normalized}|{int(st.st_mtime_ns)}|{int(st.st_size)}"
-        except OSError:
-            return normalized
+        return path_utils.result_preview_cache_key(image_path)
 
     def _get_result_pixmap_cached(self, image_path: Path):
         key = self._result_preview_cache_key(image_path)
