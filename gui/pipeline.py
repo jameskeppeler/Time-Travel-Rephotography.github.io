@@ -1064,7 +1064,7 @@ Write-Output "OK"
             self.log_box.append("No detected faces were found after preprocessing.")
             self.status_label.setText("Status: No faces detected")
             self.clear_result_stage_overlay()
-            self.show_run_summary_dialog(
+            self.preflight.show_run_summary_dialog(
                 success=False,
                 exit_code=1,
                 elapsed_seconds=None,
@@ -1241,7 +1241,7 @@ Write-Output "OK"
             self.set_preprocess_progress(0, "Preprocess ready")
             self.set_rephoto_progress(0, "Waiting...")
             self.clear_result_stage_overlay()
-            self.show_run_summary_dialog(
+            self.preflight.show_run_summary_dialog(
                 success=False,
                 exit_code=exit_code,
                 elapsed_seconds=elapsed_seconds,
@@ -1333,7 +1333,7 @@ Write-Output "OK"
             self.status_label.setText("Status: Backend returned an error")
             self.clear_result_stage_overlay()
 
-        summary_text = self._store_run_summary_text(
+        summary_text = self.preflight.store_run_summary_text(
             success=(exit_code == 0),
             exit_code=exit_code,
             elapsed_seconds=elapsed_seconds,
@@ -1341,7 +1341,7 @@ Write-Output "OK"
             launch_error=(self._last_backend_error_detail or None) if exit_code != 0 else None,
         )
         if exit_code != 0 and summary_text:
-            self._show_run_summary_text_dialog(summary_text)
+            self.preflight.show_run_summary_text_dialog(summary_text)
         self.selection_preprocess_mode = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.set_input_detect_overlay(False)
@@ -1400,7 +1400,7 @@ Write-Output "OK"
         self.suppress_preprocess_ui_until_rephoto = False
         self.clear_result_stage_overlay()
         elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
-        self.show_run_summary_dialog(
+        self.preflight.show_run_summary_dialog(
             success=False,
             exit_code=-1,
             elapsed_seconds=elapsed_seconds,

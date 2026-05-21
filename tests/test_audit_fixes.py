@@ -361,66 +361,84 @@ class TestInitSplit(unittest.TestCase):
         self.assertGreater(f_idx, u_idx, "_finalize_init must run after _build_ui")
 
 
-class TestPreflightMixin(unittest.TestCase):
-    """Sprint-4 architectural slice: PreflightMixin holds preflight
-    collection + dialog, run-summary text + dialog, and hardware probe."""
+class TestPreflightController(unittest.TestCase):
+    """Sprint-4 polish: PreflightMixin was promoted to PreflightController.
+    MainWindow no longer inherits from it; instead it owns
+    `self.preflight = PreflightController(self)` and call sites use
+    `self.preflight.<method>` (or `self.window.<attr>` inside the
+    controller)."""
 
     EXPECTED_METHODS = [
-        "_collect_preflight_report",
-        "_preflight_report_plain_text",
-        "_preflight_report_html",
+        "collect_report",
+        "report_plain_text",
+        "report_html",
         "show_preflight_dialog",
         "run_startup_preflight",
-        "_on_preflight_finished",
-        "_format_elapsed_for_summary",
-        "_build_run_summary_text",
-        "_store_run_summary_text",
-        "_show_run_summary_text_dialog",
+        "_on_finished",
+        "format_elapsed_for_summary",
+        "build_run_summary_text",
+        "store_run_summary_text",
+        "show_run_summary_text_dialog",
         "show_run_summary_dialog",
         "show_last_run_summary_dialog",
         "get_hardware_info",
     ]
 
-    def test_mixin_module_exists(self):
+    def test_module_exists(self):
         self.assertTrue((REPO_ROOT / "gui" / "preflight.py").exists())
 
-    def test_mixin_class_defined(self):
+    def test_controller_class_defined(self):
         source = (REPO_ROOT / "gui" / "preflight.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
-        self.assertIn("PreflightMixin", classes)
+        self.assertIn("PreflightController", classes)
+        # The legacy mixin name must NOT linger as a separate class.
+        self.assertNotIn("PreflightMixin", classes)
 
-    def test_methods_live_on_mixin(self):
+    def test_methods_live_on_controller(self):
         source = (REPO_ROOT / "gui" / "preflight.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         methods = set()
         for cls in ast.iter_child_nodes(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "PreflightMixin":
+            if isinstance(cls, ast.ClassDef) and cls.name == "PreflightController":
                 for item in cls.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         methods.add(item.name)
         missing = [m for m in self.EXPECTED_METHODS if m not in methods]
-        self.assertFalse(missing, f"PreflightMixin missing: {missing}")
+        self.assertFalse(missing, f"PreflightController missing: {missing}")
 
-    def test_methods_NOT_redefined_in_main_window(self):
+    def test_main_window_does_not_inherit_legacy_mixin(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
-                method_names = {
-                    item.name
-                    for item in cls.body
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                }
-                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
-                self.assertFalse(duplicates, f"Duplicates on MainWindow: {duplicates}")
+        self.assertNotIn("PreflightMixin", source,
+                         "PreflightMixin must be fully removed from gui/app.py")
 
-    def test_main_window_inherits_mixin(self):
+    def test_main_window_owns_controller_instance(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        self.assertRegex(
-            source,
-            r"PreflightMixin",
-        )
+        self.assertIn("self.preflight = PreflightController(self)", source)
+
+    def test_no_legacy_self_method_call_sites(self):
+        # External callers must go through self.preflight.* now.
+        for fname in ("gui/app.py", "gui/pipeline.py"):
+            src = (REPO_ROOT / fname).read_text(encoding="utf-8")
+            for legacy in (
+                "self.run_startup_preflight(",
+                "self.show_run_summary_dialog(",
+                "self.show_last_run_summary_dialog(",
+                "self.get_hardware_info(",
+                "self._store_run_summary_text(",
+                "self._show_run_summary_text_dialog(",
+                "self._build_run_summary_text(",
+                "self._collect_preflight_report(",
+                "self._preflight_report_plain_text(",
+                "self._preflight_report_html(",
+                "self._format_elapsed_for_summary(",
+                "self.last_run_summary_text",
+                "self.last_preflight_report",
+            ):
+                self.assertNotIn(
+                    legacy, src,
+                    f"{fname} still calls {legacy} -- migrate to self.preflight.*",
+                )
 
 
 class TestPipelineMixin(unittest.TestCase):

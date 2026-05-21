@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
 from gui import format_utils, path_utils, runtime_estimator, timing_log as timing_log_io
 from gui.face_strip import FaceStripMixin
 from gui.pipeline import PipelineMixin
-from gui.preflight import PreflightMixin
+from gui.preflight import PreflightController
 from gui.preview import PreviewMixin
 from gui.constants import (
     CROP_ALIGN_BOX_RE,
@@ -115,7 +115,6 @@ class MainWindow(
     PipelineMixin,
     PreviewMixin,
     FaceStripMixin,
-    PreflightMixin,
     QMainWindow,
 ):
     def make_form_label(self, label_text):
@@ -389,7 +388,7 @@ class MainWindow(
         view_menu.addSeparator()
         self.menu_show_last_summary_action = QAction("Show Last Run Summary", self)
         self.menu_show_last_summary_action.setShortcut("Ctrl+R")
-        self.menu_show_last_summary_action.triggered.connect(self.show_last_run_summary_dialog)
+        self.menu_show_last_summary_action.triggered.connect(self.preflight.show_last_run_summary_dialog)
         view_menu.addAction(self.menu_show_last_summary_action)
         view_menu.addSeparator()
         self.menu_face_box_debug_action = QAction("Show Face Box IDs (Debug)", self)
@@ -409,7 +408,7 @@ class MainWindow(
         help_menu.addAction(readme_action)
 
         preflight_action = QAction("Run Startup Preflight", self)
-        preflight_action.triggered.connect(lambda: self.run_startup_preflight(show_dialog=True, user_initiated=True))
+        preflight_action.triggered.connect(lambda: self.preflight.run_startup_preflight(show_dialog=True, user_initiated=True))
         help_menu.addAction(preflight_action)
 
         help_menu.addSeparator()
@@ -426,7 +425,7 @@ class MainWindow(
             self.menu_expand_log_action.setText("Compact Log" if self.log_expanded else "Expand Log")
             self.menu_expand_log_action.setEnabled(self.log_visible)
         if hasattr(self, "menu_show_last_summary_action"):
-            self.menu_show_last_summary_action.setEnabled(bool(self.last_run_summary_text))
+            self.menu_show_last_summary_action.setEnabled(bool(self.preflight.last_run_summary_text))
         if hasattr(self, "menu_face_box_debug_action"):
             self.menu_face_box_debug_action.setChecked(bool(getattr(self, "face_box_debug_overlay_enabled", False)))
 
@@ -587,11 +586,10 @@ class MainWindow(
         self.run_started_at = None
         self.rephoto_started_at = None
         self.current_run_summary_context = None
-        self.last_run_summary_text = ""
-        self.last_preflight_report = None
-        self._hardware_info_cache = None
-        self._hardware_info_cache_ts = 0.0
-        self._hardware_info_cache_ttl_sec = 30.0
+        # PreflightController owns last_run_summary_text / last_preflight_report /
+        # hardware-info cache / running flag, etc. Instantiated here so it's
+        # available everywhere downstream that reads self.preflight.* .
+        self.preflight = PreflightController(self)
         self._timing_records_cache_path = None
         self._timing_records_cache_mtime = None
         self._timing_records_cache = []
@@ -1509,7 +1507,7 @@ class MainWindow(
             self.log_box.append("GFPGAN found. Enhancement is available.")
         # Settings are no longer persisted between sessions; always start with defaults.
         # Defer startup checks until after first paint to improve perceived launch responsiveness.
-        QTimer.singleShot(0, lambda: self.run_startup_preflight(show_dialog=True))
+        QTimer.singleShot(0, lambda: self.preflight.run_startup_preflight(show_dialog=True))
         # Pre-warm the Haar cascade detector in the background so the first face
         # probe doesn't pay the ~1.5s cold-start penalty.
         QTimer.singleShot(200, self._warm_up_haar_detector)
@@ -2330,7 +2328,7 @@ class MainWindow(
         """Thin wrapper around runtime_estimator.estimate_runtime_minutes;
         kept here only to snapshot widget reads on the UI thread."""
         records = self.load_local_timing_records()
-        current_hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
+        current_hw = self.preflight.get_hardware_info()
         current_gpu = (current_hw.get("gpu_name") or "").strip()
         current_enh = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
         return runtime_estimator.estimate_runtime_minutes(
@@ -2365,7 +2363,7 @@ class MainWindow(
         # First try local machine history
         local_mins, local_note = self.estimate_runtime_from_local_history(preset_val)
 
-        hw = self.get_hardware_info()
+        hw = self.preflight.get_hardware_info()
         scale, scale_note = self.compute_runtime_scale(hw)
 
         if local_mins is not None:
@@ -3896,7 +3894,7 @@ class MainWindow(
                 results_root = self.repo_root / "results"
 
             log_path = timing_log_io.log_path_for(results_root)
-            hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
+            hw = self.preflight.get_hardware_info()
             source_preset = str(self.iter_values[self.iter_slider.value()])
             input_image = self.input_image_edit.text().strip()
             enhancement = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
@@ -3930,7 +3928,7 @@ class MainWindow(
                 results_root = self.repo_root / "results"
             log_path = timing_log_io.log_path_for(results_root)
 
-            hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
+            hw = self.preflight.get_hardware_info()
             record = timing_log_io.build_run_record(
                 input_image=self.input_image_edit.text().strip(),
                 preset=str(self.iter_values[self.iter_slider.value()]),

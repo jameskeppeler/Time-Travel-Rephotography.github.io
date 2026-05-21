@@ -1,10 +1,21 @@
-"""Preflight, run-summary, and hardware-info mixin for the rephotography GUI.
+"""Preflight, run-summary, and hardware-info controller.
 
-Sprint-4 architectural slice: pulls the startup-preflight collection, the
-preflight dialog, the run-summary text/dialog, and the GPU/CPU/RAM probe
-out of MainWindow into a mixin. Methods are unchanged — only their
-physical location moves. MainWindow inherits from PreflightMixin (plus
-the previous mixins and QMainWindow).
+Promoted from PreflightMixin to a real controller class in the second
+Sprint-4 polish round. MainWindow now owns a PreflightController via
+``self.preflight = PreflightController(self)``. The controller holds its
+own state (running flag, last report, last summary text, hardware-info
+cache) instead of squatting on MainWindow instance attributes; it reads
+from MainWindow only through ``self.window.<attr>`` for the small,
+documented set of window-side dependencies listed in the class
+docstring.
+
+Why a controller and not a mixin:
+  * Testability — PreflightController can be constructed with a stub
+    window object in unit tests; no Qt instantiation needed.
+  * Clearer dependency contract — the docstring enumerates exactly which
+    MainWindow attributes/methods the controller touches.
+  * Single responsibility — the controller owns its lifecycle and its
+    own cache; nothing leaks out to MainWindow.__init__.
 """
 
 import ctypes
@@ -14,6 +25,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,6 +33,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QPushButton,
     QTextBrowser,
+    QTextEdit,
     QVBoxLayout,
 )
 
@@ -28,18 +41,46 @@ from gui import format_utils
 from gui.widgets import _PreflightRunner, _PreflightSignals
 
 
-class PreflightMixin:
-    """Mix into MainWindow to provide preflight + run-summary + hardware info."""
+class PreflightController:
+    """Owns startup preflight, the run-summary dialog, and the hardware
+    probe.
 
-    def _collect_preflight_report(self, results_root_override: Optional[str] = None):
+    Required ``window`` interface (all already present on MainWindow):
+      Attributes:
+        repo_root, results_root_edit, log_box, status_label,
+        current_run_summary_context, _pixmap_thread_pool
+      Methods:
+        resolve_resource_path(rel), update_view_menu_actions()
+    """
+
+    HARDWARE_INFO_CACHE_TTL_SEC = 30.0
+
+    def __init__(self, window):
+        self.window = window
+        # Own state (used to live on MainWindow as _preflight_* + _hardware_info_*).
+        self._running = False
+        self._show_dialog = False
+        self._user_initiated = False
+        self._signals = None
+        self.last_preflight_report = None
+        self.last_run_summary_text = ""
+        self._hardware_info_cache = None
+        self._hardware_info_cache_ts = 0.0
+
+    # ------------------------------------------------------------------
+    # Preflight collection + dialog
+    # ------------------------------------------------------------------
+
+    def collect_report(self, results_root_override: Optional[str] = None):
+        w = self.window
         checks = []
 
         def add_check(name, status, detail, fix=""):
             checks.append({"name": name, "status": status, "detail": detail, "fix": fix})
 
-        add_check("Application root", "pass", f"Using app root: {self.repo_root}")
+        add_check("Application root", "pass", f"Using app root: {w.repo_root}")
 
-        wrapper = self.resolve_resource_path("run_rephoto_with_facecrop.ps1")
+        wrapper = w.resolve_resource_path("run_rephoto_with_facecrop.ps1")
         if wrapper.exists():
             add_check("Wrapper script", "pass", f"Found: {wrapper}")
         else:
@@ -47,12 +88,12 @@ class PreflightMixin:
                 "Wrapper script",
                 "fail",
                 f"Missing: {wrapper}",
-                "Ensure run_rephoto_with_facecrop.ps1 is bundled next to the app resources."
+                "Ensure run_rephoto_with_facecrop.ps1 is bundled next to the app resources.",
             )
 
-        stylegan_ckpt = self.resolve_resource_path(Path("checkpoint") / "stylegan2-ffhq-config-f.pt")
-        e4e_ckpt = self.resolve_resource_path(Path("checkpoint") / "e4e_ffhq_encode.pt")
-        encoder_dir = self.resolve_resource_path(Path("checkpoint") / "encoder")
+        stylegan_ckpt = w.resolve_resource_path(Path("checkpoint") / "stylegan2-ffhq-config-f.pt")
+        e4e_ckpt = w.resolve_resource_path(Path("checkpoint") / "e4e_ffhq_encode.pt")
+        encoder_dir = w.resolve_resource_path(Path("checkpoint") / "encoder")
         encoder_candidates = list(encoder_dir.glob("checkpoint_*.pt")) if encoder_dir.exists() else []
 
         if stylegan_ckpt.exists():
@@ -70,7 +111,7 @@ class PreflightMixin:
         else:
             add_check("Encoder checkpoint", "fail", "Missing encoder checkpoint in checkpoint/encoder", "Verify checkpoint/encoder/checkpoint_*.pt exists.")
 
-        gfpgan_root = self.resolve_resource_path(Path("deps") / "GFPGAN")
+        gfpgan_root = w.resolve_resource_path(Path("deps") / "GFPGAN")
         if gfpgan_root.exists():
             add_check("GFPGAN dependency", "pass", f"Found: {gfpgan_root}")
         else:
@@ -84,8 +125,8 @@ class PreflightMixin:
         if results_root_override is not None:
             results_root_text = results_root_override
         else:
-            results_root_text = self.results_root_edit.text().strip()
-        results_root = Path(results_root_text or (self.repo_root / "results"))
+            results_root_text = w.results_root_edit.text().strip()
+        results_root = Path(results_root_text or (w.repo_root / "results"))
         try:
             results_root.mkdir(parents=True, exist_ok=True)
             probe = results_root / ".preflight_write_test.tmp"
@@ -112,25 +153,29 @@ class PreflightMixin:
             "pass": pass_count,
         }
 
-    def _preflight_report_plain_text(self, report):
+    # _PreflightRunner imports collect_report by this name on its owner; keep
+    # the old method name as an alias so the runner doesn't need to change.
+    _collect_preflight_report = collect_report
+
+    def report_plain_text(self, report):
         return format_utils.preflight_report_plain_text(report)
 
-    def _preflight_report_html(self, report):
+    def report_html(self, report):
         return format_utils.preflight_report_html(report)
 
     def show_preflight_dialog(self, report):
-        dialog = QDialog(self)
+        dialog = QDialog(self.window)
         dialog.setWindowTitle("Startup Preflight Report")
         dialog.setMinimumSize(820, 520)
         layout = QVBoxLayout(dialog)
 
         browser = QTextBrowser()
-        browser.setHtml(self._preflight_report_html(report))
+        browser.setHtml(self.report_html(report))
         layout.addWidget(browser)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         copy_button = QPushButton("Copy Report")
-        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self._preflight_report_plain_text(report)))
+        copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.report_plain_text(report)))
         buttons.addButton(copy_button, QDialogButtonBox.ActionRole)
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
@@ -139,49 +184,50 @@ class PreflightMixin:
         dialog.exec()
 
     def run_startup_preflight(self, show_dialog=False, user_initiated=False):
-        # Heavy preflight (nvidia-smi, file probes, write test) runs off the
-        # UI thread so the window paints immediately. Result arrives via slot.
-        if getattr(self, "_preflight_running", False):
+        if self._running:
             return
-        self._preflight_running = True
-        self._preflight_show_dialog = bool(show_dialog)
-        self._preflight_user_initiated = bool(user_initiated)
+        self._running = True
+        self._show_dialog = bool(show_dialog)
+        self._user_initiated = bool(user_initiated)
 
-        # Snapshot widget reads on the UI thread; Qt widgets are not
-        # thread-safe to read from a worker.
         try:
-            results_root_snapshot = self.results_root_edit.text().strip()
+            results_root_snapshot = self.window.results_root_edit.text().strip()
         except Exception:
             results_root_snapshot = ""
 
         signals = _PreflightSignals()
-        signals.finished.connect(self._on_preflight_finished)
-        self._preflight_signals = signals
-        self._pixmap_thread_pool.start(
+        signals.finished.connect(self._on_finished)
+        self._signals = signals
+        self.window._pixmap_thread_pool.start(
             _PreflightRunner(self, signals, results_root_snapshot)
         )
 
-    def _on_preflight_finished(self, report):
-        self._preflight_running = False
+    def _on_finished(self, report):
+        self._running = False
         self.last_preflight_report = report
 
-        self.log_box.append("")
-        self.log_box.append("=== Startup preflight ===")
+        log_box = self.window.log_box
+        log_box.append("")
+        log_box.append("=== Startup preflight ===")
         for check in report["checks"]:
-            self.log_box.append(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
+            log_box.append(f"[{check['status'].upper()}] {check['name']}: {check['detail']}")
             if check.get("fix") and check["status"] != "pass":
-                self.log_box.append(f"  Fix: {check['fix']}")
-        self.log_box.append(f"Preflight summary: {report['pass']} pass, {report['warn']} warn, {report['fail']} fail")
+                log_box.append(f"  Fix: {check['fix']}")
+        log_box.append(f"Preflight summary: {report['pass']} pass, {report['warn']} warn, {report['fail']} fail")
 
-        should_show = self._preflight_show_dialog and (self._preflight_user_initiated or report["fail"] > 0)
+        should_show = self._show_dialog and (self._user_initiated or report["fail"] > 0)
         if should_show:
             self.show_preflight_dialog(report)
 
-    def _format_elapsed_for_summary(self, elapsed_seconds):
+    # ------------------------------------------------------------------
+    # Run summary
+    # ------------------------------------------------------------------
+
+    def format_elapsed_for_summary(self, elapsed_seconds):
         return format_utils.format_elapsed_for_summary(elapsed_seconds)
 
-    def _build_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
-        ctx = self.current_run_summary_context or {}
+    def build_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
+        ctx = self.window.current_run_summary_context or {}
         status = "Success" if success else "Failed"
         if launch_error and int(exit_code) < 0:
             status = "Launch Error"
@@ -197,7 +243,7 @@ class PreflightMixin:
             "-----------",
             f"Status: {status}",
             f"Exit code: {exit_code}",
-            f"Elapsed: {self._format_elapsed_for_summary(elapsed_seconds)}",
+            f"Elapsed: {self.format_elapsed_for_summary(elapsed_seconds)}",
             "",
             "Key settings:",
             quality_line,
@@ -219,11 +265,11 @@ class PreflightMixin:
 
         return "\n".join(lines)
 
-    def _store_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
-        if self.current_run_summary_context is None:
+    def store_run_summary_text(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
+        if self.window.current_run_summary_context is None:
             return None
 
-        summary_text = self._build_run_summary_text(
+        summary_text = self.build_run_summary_text(
             success=success,
             exit_code=exit_code,
             elapsed_seconds=elapsed_seconds,
@@ -231,14 +277,14 @@ class PreflightMixin:
             launch_error=launch_error,
         )
         self.last_run_summary_text = summary_text
-        self.update_view_menu_actions()
+        self.window.update_view_menu_actions()
         return summary_text
 
-    def _show_run_summary_text_dialog(self, summary_text):
+    def show_run_summary_text_dialog(self, summary_text):
         if not summary_text:
             return
 
-        dialog = QDialog(self)
+        dialog = QDialog(self.window)
         dialog.setWindowTitle("Run Summary")
         dialog.setMinimumSize(760, 500)
         layout = QVBoxLayout(dialog)
@@ -259,7 +305,7 @@ class PreflightMixin:
         dialog.exec()
 
     def show_run_summary_dialog(self, success, exit_code, elapsed_seconds, output_path=None, launch_error=None):
-        summary_text = self._store_run_summary_text(
+        summary_text = self.store_run_summary_text(
             success=success,
             exit_code=exit_code,
             elapsed_seconds=elapsed_seconds,
@@ -268,25 +314,28 @@ class PreflightMixin:
         )
         if not summary_text:
             return
-        self._show_run_summary_text_dialog(summary_text)
+        self.show_run_summary_text_dialog(summary_text)
 
     def show_last_run_summary_dialog(self):
         summary_text = (self.last_run_summary_text or "").strip()
         if not summary_text:
-            self.status_label.setText("Status: No run summary available yet")
-            self.log_box.append("No run summary is available yet.")
+            self.window.status_label.setText("Status: No run summary available yet")
+            self.window.log_box.append("No run summary is available yet.")
             return
-        self._show_run_summary_text_dialog(summary_text)
+        self.show_run_summary_text_dialog(summary_text)
+
+    # ------------------------------------------------------------------
+    # Hardware probe (cached)
+    # ------------------------------------------------------------------
 
     def get_hardware_info(self):
         now = time.time()
         if (
             isinstance(self._hardware_info_cache, dict)
-            and (now - float(self._hardware_info_cache_ts)) < float(self._hardware_info_cache_ttl_sec)
+            and (now - float(self._hardware_info_cache_ts)) < self.HARDWARE_INFO_CACHE_TTL_SEC
         ):
             return dict(self._hardware_info_cache)
 
-        # CPU
         cpu_cores = os.cpu_count() or 0
         cpu_name = platform.processor() or "Unknown CPU"
 
@@ -308,7 +357,7 @@ class PreflightMixin:
             stat = MEMORYSTATUSEX()
             stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
             ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-            ram_gb = round(stat.ullTotalPhys / (1024**3), 1)
+            ram_gb = round(stat.ullTotalPhys / (1024 ** 3), 1)
         except Exception:
             ram_gb = None
 
@@ -318,7 +367,7 @@ class PreflightMixin:
         try:
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True, text=True, check=True, timeout=2.0
+                capture_output=True, text=True, check=True, timeout=2.0,
             )
             line = (r.stdout or "").strip().splitlines()
             if line:
@@ -336,3 +385,5 @@ class PreflightMixin:
         self._hardware_info_cache_ts = now
         return info
 
+
+__all__ = ["PreflightController"]
