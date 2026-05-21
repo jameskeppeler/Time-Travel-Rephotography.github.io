@@ -188,5 +188,132 @@ class TestPreflightFormatters(unittest.TestCase):
         self.assertIn("Startup Preflight", html)
 
 
+from gui import timing_log as tl
+
+
+class TestTimingLogReader(unittest.TestCase):
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(tl.read_timing_records(Path("/no/such/log.jsonl")), [])
+
+    def test_filters_unsuccessful(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.jsonl"
+            p.write_text(
+                '{"success": true,  "elapsed_seconds": 5.0}\n'
+                '{"success": false, "elapsed_seconds": 7.0}\n',
+                encoding="utf-8",
+            )
+            out = tl.read_timing_records(p)
+            self.assertEqual(len(out), 1)
+            self.assertAlmostEqual(out[0]["elapsed_seconds"], 5.0)
+
+    def test_filters_crop_only(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.jsonl"
+            p.write_text(
+                '{"success": true, "crop_only": true,  "elapsed_seconds": 3.0}\n'
+                '{"success": true, "crop_only": false, "elapsed_seconds": 4.0}\n',
+                encoding="utf-8",
+            )
+            out = tl.read_timing_records(p)
+            self.assertEqual(len(out), 1)
+            self.assertAlmostEqual(out[0]["elapsed_seconds"], 4.0)
+
+    def test_filters_missing_elapsed(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.jsonl"
+            p.write_text(
+                '{"success": true}\n'
+                '{"success": true, "elapsed_seconds": 9.5}\n',
+                encoding="utf-8",
+            )
+            self.assertEqual(len(tl.read_timing_records(p)), 1)
+
+    def test_skips_malformed_lines(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "x.jsonl"
+            p.write_text(
+                "not json\n"
+                "\n"  # blank line
+                '{"success": true, "elapsed_seconds": 1.5}\n'
+                '{"success": tru\n',  # truncated
+                encoding="utf-8",
+            )
+            out = tl.read_timing_records(p)
+            self.assertEqual(len(out), 1)
+            self.assertAlmostEqual(out[0]["elapsed_seconds"], 1.5)
+
+
+class TestTimingLogBuilders(unittest.TestCase):
+    def test_build_run_record_shape(self):
+        rec = tl.build_run_record(
+            input_image="img.png",
+            preset="750",
+            enhancement=True,
+            crop_only=False,
+            success=True,
+            elapsed_seconds=12.5,
+            gpu_name="RTX 4090",
+            timestamp="2026-05-20 10:00:00",
+        )
+        self.assertEqual(rec["input_image"], "img.png")
+        self.assertEqual(rec["preset"], "750")
+        self.assertTrue(rec["enhancement"])
+        self.assertFalse(rec["crop_only"])
+        self.assertTrue(rec["success"])
+        self.assertEqual(rec["elapsed_seconds"], 12.5)
+        self.assertEqual(rec["gpu_name"], "RTX 4090")
+        self.assertEqual(rec["timestamp_local"], "2026-05-20 10:00:00")
+        # advanced_mode defaults to False
+        self.assertFalse(rec["advanced_mode"])
+
+    def test_build_milestone_record_marks_type(self):
+        rec = tl.build_milestone_record(
+            input_image="img.png",
+            preset="1500",
+            source_run_preset="3000",
+            enhancement=False,
+            elapsed_seconds=22.0,
+            timestamp="2026-05-20 11:00:00",
+        )
+        self.assertEqual(rec["record_type"], "milestone")
+        self.assertEqual(rec["preset"], "1500")
+        self.assertEqual(rec["source_run_preset"], "3000")
+        # Milestones are always success=True crop_only=False so reader picks them up.
+        self.assertTrue(rec["success"])
+        self.assertFalse(rec["crop_only"])
+
+
+class TestTimingLogAppend(unittest.TestCase):
+    def test_appends_one_record_per_line(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "log.jsonl"
+            n = tl.append_records(p, [{"a": 1}, {"a": 2}])
+            self.assertEqual(n, 2)
+            self.assertEqual(
+                p.read_text(encoding="utf-8").strip().split("\n"),
+                ['{"a": 1}', '{"a": 2}'],
+            )
+
+    def test_creates_parent_dirs(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "nested" / "deeper" / "log.jsonl"
+            tl.append_records(p, [{"a": 1}])
+            self.assertTrue(p.exists())
+
+    def test_roundtrip_via_read(self):
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "log.jsonl"
+            rec = tl.build_run_record(
+                input_image="img.png", preset="750",
+                enhancement=True, crop_only=False, success=True,
+                elapsed_seconds=5.0,
+            )
+            tl.append_records(p, [rec])
+            out = tl.read_timing_records(p)
+            self.assertEqual(len(out), 1)
+            self.assertAlmostEqual(out[0]["elapsed_seconds"], 5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

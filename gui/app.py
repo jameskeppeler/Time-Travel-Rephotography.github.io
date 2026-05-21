@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
 # Shared defaults, presets, and stdout-parsing regexes live in
 # gui/constants.py since the Sprint-4 split; re-exported here so existing
 # call sites that read them off the gui.app namespace keep working.
-from gui import format_utils, path_utils
+from gui import format_utils, path_utils, timing_log as timing_log_io
 from gui.constants import (
     CROP_ALIGN_BOX_RE,
     CROPPED_FACE_COUNT_RE,
@@ -3077,7 +3077,7 @@ class MainWindow(QMainWindow):
             results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
         else:
             results_root = self.repo_root / "results"
-        log_path = results_root / "run_timing_log.jsonl"
+        log_path = timing_log_io.log_path_for(results_root)
         try:
             cache_path = str(log_path.resolve()).lower()
         except Exception:
@@ -3093,36 +3093,7 @@ class MainWindow(QMainWindow):
         ):
             return list(self._timing_records_cache)
 
-        if not log_path.exists():
-            self._timing_records_cache_path = cache_path
-            self._timing_records_cache_mtime = None
-            self._timing_records_cache = []
-            return []
-
-        records = []
-        try:
-            with open(log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except Exception:
-                        continue
-                    if not rec.get("success", False):
-                        continue
-                    if rec.get("crop_only", False):
-                        continue
-                    if "elapsed_seconds" not in rec:
-                        continue
-                    records.append(rec)
-        except Exception:
-            self._timing_records_cache_path = cache_path
-            self._timing_records_cache_mtime = log_mtime
-            self._timing_records_cache = []
-            return []
-
+        records = timing_log_io.read_timing_records(log_path)
         self._timing_records_cache_path = cache_path
         self._timing_records_cache_mtime = log_mtime
         self._timing_records_cache = list(records)
@@ -7212,30 +7183,27 @@ Write-Output "OK"
             else:
                 results_root = self.repo_root / "results"
 
-            results_root.mkdir(parents=True, exist_ok=True)
-            log_path = results_root / "run_timing_log.jsonl"
-
+            log_path = timing_log_io.log_path_for(results_root)
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
             source_preset = str(self.iter_values[self.iter_slider.value()])
+            input_image = self.input_image_edit.text().strip()
+            enhancement = (not self.advanced_dialog.use_gfpgan_checkbox.isChecked())
+            gpu_name = hw.get("gpu_name", "Unknown GPU")
 
-            with open(log_path, "a", encoding="utf-8") as f:
-                for pm in self._pending_milestones:
-                    record = {
-                        "record_type": "milestone",
-                        "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "input_image": self.input_image_edit.text().strip(),
-                        "preset": str(pm["preset"]),
-                        "source_run_preset": source_preset,
-                        "advanced_mode": False,
-                        "enhancement": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
-                        "crop_only": False,
-                        "success": True,
-                        "elapsed_seconds": float(pm["elapsed_seconds"]),
-                        "gpu_name": hw.get("gpu_name", "Unknown GPU"),
-                    }
-                    f.write(json.dumps(record) + "\n")
+            records = [
+                timing_log_io.build_milestone_record(
+                    input_image=input_image,
+                    preset=pm["preset"],
+                    source_run_preset=source_preset,
+                    enhancement=enhancement,
+                    elapsed_seconds=pm["elapsed_seconds"],
+                    gpu_name=gpu_name,
+                )
+                for pm in self._pending_milestones
+            ]
+            written = timing_log_io.append_records(log_path, records)
 
-            self.log_box.append(f"Saved {len(self._pending_milestones)} milestone timing record(s).")
+            self.log_box.append(f"Saved {written} milestone timing record(s).")
             self._pending_milestones = []
             self._timing_records_cache_mtime = None
 
@@ -7248,26 +7216,19 @@ Write-Output "OK"
                 results_root = Path(self.results_root_edit.text().strip() or (self.repo_root / "results"))
             else:
                 results_root = self.repo_root / "results"
-            results_root.mkdir(parents=True, exist_ok=True)
-            log_path = results_root / "run_timing_log.jsonl"
+            log_path = timing_log_io.log_path_for(results_root)
 
             hw = self.get_hardware_info() if hasattr(self, "get_hardware_info") else {}
-            preset_val = str(self.iter_values[self.iter_slider.value()])
-
-            record = {
-                "timestamp_local": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "input_image": self.input_image_edit.text().strip(),
-                "preset": preset_val,
-                "advanced_mode": False,
-                "enhancement": (not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
-                "crop_only": bool(crop_only),
-                "success": bool(success),
-                "elapsed_seconds": float(elapsed_seconds),
-                "gpu_name": hw.get("gpu_name", "Unknown GPU"),
-            }
-
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record) + "\n")
+            record = timing_log_io.build_run_record(
+                input_image=self.input_image_edit.text().strip(),
+                preset=str(self.iter_values[self.iter_slider.value()]),
+                enhancement=(not self.advanced_dialog.use_gfpgan_checkbox.isChecked()),
+                crop_only=crop_only,
+                success=success,
+                elapsed_seconds=elapsed_seconds,
+                gpu_name=hw.get("gpu_name", "Unknown GPU"),
+            )
+            timing_log_io.append_records(log_path, [record])
             self._timing_records_cache_mtime = None
 
             self.log_box.append(f"Saved timing log: {log_path}")
