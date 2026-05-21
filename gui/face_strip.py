@@ -448,6 +448,11 @@ class FaceStripController:
             self.redetect_faces_button.setVisible(bool(self.face_preview_entries))
             self.redetect_faces_button.setEnabled(bool(self.face_preview_entries))
 
+    # Auto-deselect kicks in when the largest box is at least this many
+    # times the next-largest. 1.2x catches obvious singletons-with-junk;
+    # finer dominance still triggers if absolute sizes diverge enough.
+    _SIZE_DOMINANCE_RATIO = 1.2
+
     def _annotate_entries_with_box_sizes(self):
         """Compute a relative-size proxy per entry from the input boxes
         and, when multiple faces are detected with clear size dominance,
@@ -458,12 +463,25 @@ class FaceStripController:
         fraction of the image diagonal that the face span occupies. A
         real portrait subject typically scores 0.3+; frame edges,
         smudges, and mat-corner false positives usually score below 0.15.
+
+        Every call ALSO logs the per-face sizes (or the reason no size
+        could be computed) so the heuristic's behaviour is debuggable
+        from the run log without having to re-run with extra
+        instrumentation.
         """
         boxes = list(self.preview.input_face_boxes or [])
         if not boxes:
+            self.log_box.append(
+                "Warning: face-size annotation skipped (no input boxes available; "
+                "auto-deselect cannot run)."
+            )
             return
         pix = self.preview.input_pixmap
         if pix is None or pix.isNull():
+            self.log_box.append(
+                "Warning: face-size annotation skipped (input pixmap not loaded; "
+                "auto-deselect cannot run)."
+            )
             return
         img_w = max(1, int(pix.width()))
         img_h = max(1, int(pix.height()))
@@ -488,10 +506,23 @@ class FaceStripController:
                 continue
             entry["relative_size"] = min(1.0, (area / img_area) ** 0.5)
 
+        # Diagnostic log line so the heuristic is debuggable from the run
+        # output. Surfaces every face's size even when no action is taken.
+        size_parts = []
+        for e in self.face_preview_entries:
+            label = f"#{int(e.get('index', -1)) + 1}"
+            rs = e.get("relative_size")
+            if isinstance(rs, float):
+                size_parts.append(f"{label}={int(round(rs * 100))}%")
+            else:
+                size_parts.append(f"{label}=?")
+        self.log_box.append(f"Face sizes: {', '.join(size_parts)}")
+
         # Auto-deselect smaller faces ONLY when at least 2 faces have
         # sizes recorded and the largest is meaningfully larger than the
-        # rest (>= 1.5x the next largest). The most-likely-real face stays
-        # selected; the user can re-enable any others with a click.
+        # rest. The most-likely-real face stays selected; the user can
+        # re-enable any others with a click (or via the right-click
+        # context menu).
         sized = [
             (e["index"], e["relative_size"])
             for e in self.face_preview_entries
@@ -501,11 +532,15 @@ class FaceStripController:
             return
         sized.sort(key=lambda t: -t[1])
         top_size = sized[0][1]
-        runner_up = sized[1][1] if len(sized) >= 2 else 0.0
+        runner_up = sized[1][1]
         if top_size <= 0:
             return
-        if runner_up > 0 and top_size < 1.5 * runner_up:
-            # Sizes too close to call -- keep them all selected.
+        if runner_up > 0 and top_size < self._SIZE_DOMINANCE_RATIO * runner_up:
+            self.log_box.append(
+                f"Face sizes too close ({int(round(top_size*100))}% vs "
+                f"{int(round(runner_up*100))}%) for auto-deselect; "
+                f"keeping all selected."
+            )
             return
         top_idx = sized[0][0]
         deselected = 0
