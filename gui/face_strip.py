@@ -25,6 +25,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMenu,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -429,7 +430,8 @@ class FaceStripController:
                     "crop_path": crop_path,
                     "result_path": None,
                     "status": "queued",
-                    "selected": True,
+                    "selected": True,  # may flip in _annotate_entries_with_box_sizes
+                    "relative_size": None,  # 0..1 sqrt(box_area / image_area)
                 }
             )
 
@@ -437,6 +439,7 @@ class FaceStripController:
         self.selected_face_preview_index = 0 if self.face_preview_entries else None
         self._sync_face_preview_crop_paths()
         self.preview.update_input_face_boxes_for_preview(expected_count=expected_count)
+        self._annotate_entries_with_box_sizes()
         self.update_runtime_label()
         self.render_face_preview_strip()
 
@@ -445,14 +448,89 @@ class FaceStripController:
             self.redetect_faces_button.setVisible(bool(self.face_preview_entries))
             self.redetect_faces_button.setEnabled(bool(self.face_preview_entries))
 
-    def _make_face_thumb_icon(self, image_path, fallback_text, muted=False, thumb_size=84):
+    def _annotate_entries_with_box_sizes(self):
+        """Compute a relative-size proxy per entry from the input boxes
+        and, when multiple faces are detected with clear size dominance,
+        default-deselect the small ones so the user doesn't burn an
+        optimization run on a false-positive crop.
+
+        The size proxy is sqrt(box_area / image_area) -- roughly the
+        fraction of the image diagonal that the face span occupies. A
+        real portrait subject typically scores 0.3+; frame edges,
+        smudges, and mat-corner false positives usually score below 0.15.
+        """
+        boxes = list(self.preview.input_face_boxes or [])
+        if not boxes:
+            return
+        pix = self.preview.input_pixmap
+        if pix is None or pix.isNull():
+            return
+        img_w = max(1, int(pix.width()))
+        img_h = max(1, int(pix.height()))
+        img_area = float(img_w) * float(img_h)
+        if img_area <= 0:
+            return
+
+        # Map boxes to entries by positional index (the boxes list is
+        # sorted to mirror the cropper's detection order, same as the
+        # entry indices).
+        for entry in self.face_preview_entries:
+            idx = entry.get("index")
+            if not isinstance(idx, int) or idx < 0 or idx >= len(boxes):
+                continue
+            try:
+                _, _, bw, bh = boxes[idx]
+            except (TypeError, ValueError):
+                continue
+            try:
+                area = max(0.0, float(bw) * float(bh))
+            except (TypeError, ValueError):
+                continue
+            entry["relative_size"] = min(1.0, (area / img_area) ** 0.5)
+
+        # Auto-deselect smaller faces ONLY when at least 2 faces have
+        # sizes recorded and the largest is meaningfully larger than the
+        # rest (>= 1.5x the next largest). The most-likely-real face stays
+        # selected; the user can re-enable any others with a click.
+        sized = [
+            (e["index"], e["relative_size"])
+            for e in self.face_preview_entries
+            if isinstance(e.get("relative_size"), float)
+        ]
+        if len(sized) < 2:
+            return
+        sized.sort(key=lambda t: -t[1])
+        top_size = sized[0][1]
+        runner_up = sized[1][1] if len(sized) >= 2 else 0.0
+        if top_size <= 0:
+            return
+        if runner_up > 0 and top_size < 1.5 * runner_up:
+            # Sizes too close to call -- keep them all selected.
+            return
+        top_idx = sized[0][0]
+        deselected = 0
+        for entry in self.face_preview_entries:
+            if entry.get("index") != top_idx and entry.get("relative_size") is not None:
+                if entry.get("selected"):
+                    entry["selected"] = False
+                    deselected += 1
+        if deselected:
+            self.log_box.append(
+                f"Auto-deselected {deselected} small face crop(s) below the "
+                f"largest. Click a card to re-include it."
+            )
+
+    def _make_face_thumb_icon(self, image_path, fallback_text, muted=False, thumb_size=84, relative_size=None):
         thumb_size = max(56, int(thumb_size))
+        # Round to 2 decimals so the cache key doesn't churn on tiny variations.
+        size_key = (round(float(relative_size), 2)
+                    if isinstance(relative_size, float) else None)
         cache_key = self._face_thumb_icon_cache_key(
             image_path=image_path,
             fallback_text=fallback_text,
             muted=muted,
             thumb_size=thumb_size,
-        )
+        ) + (size_key,)
         cached = self.face_preview_thumb_icon_cache.pop(cache_key, None)
         if cached is not None:
             self.face_preview_thumb_icon_cache[cache_key] = cached
@@ -493,6 +571,26 @@ class FaceStripController:
                 painter.fillRect(nr_x, nr_y, tw, th, QColor(0, 0, 0, 160))
                 painter.setPen(QColor("#d0d4dc"))
                 painter.drawText(nr_x, nr_y, tw, th, Qt.AlignCenter, fallback_text)
+            # Draw relative-size badge in top-left corner if available.
+            # Green when likely a real subject, yellow in the middle, red
+            # when the face span is suspiciously small.
+            if isinstance(relative_size, float):
+                pct = max(0, min(100, int(round(relative_size * 100))))
+                size_text = f"{pct}%"
+                size_font = QFont("Segoe UI", 7, QFont.Bold)
+                painter.setFont(size_font)
+                fm = painter.fontMetrics()
+                stw = fm.horizontalAdvance(size_text) + 6
+                sth = fm.height() + 2
+                if pct >= 30:
+                    badge_bg = QColor(70, 130, 90, 200)   # green
+                elif pct >= 15:
+                    badge_bg = QColor(140, 110, 40, 200)  # yellow
+                else:
+                    badge_bg = QColor(160, 60, 60, 200)   # red
+                painter.fillRect(2, 2, stw, sth, badge_bg)
+                painter.setPen(QColor("#f0f3f8"))
+                painter.drawText(2, 2, stw, sth, Qt.AlignCenter, size_text)
         else:
             painter.setPen(QColor("#7f8794"))
             painter.setFont(QFont("Segoe UI", 9, QFont.Bold))
@@ -728,7 +826,30 @@ class FaceStripController:
             button.setIconSize(QSize(thumb_size, thumb_size))
             button.setFixedSize(card_w, card_h)
             button.setCursor(Qt.PointingHandCursor)
-            button.setIcon(self._make_face_thumb_icon(icon_path, str(idx + 1), muted=is_muted, thumb_size=thumb_size))
+            relative_size = entry.get("relative_size")
+            button.setIcon(self._make_face_thumb_icon(
+                icon_path, str(idx + 1),
+                muted=is_muted,
+                thumb_size=thumb_size,
+                relative_size=relative_size,
+            ))
+            # Tooltip surfaces what the badges mean.
+            tip_lines = [f"Face #{idx + 1}", f"Status: {status}"]
+            if isinstance(relative_size, float):
+                pct = int(round(relative_size * 100))
+                if pct < 15:
+                    quality = "small box — likely false positive"
+                elif pct < 30:
+                    quality = "borderline size"
+                else:
+                    quality = "clear subject size"
+                tip_lines.append(f"Size: {pct}% of image ({quality})")
+            tip_lines.append("Click to toggle. Right-click for more options.")
+            button.setToolTip("\n".join(tip_lines))
+            button.setContextMenuPolicy(Qt.CustomContextMenu)
+            button.customContextMenuRequested.connect(
+                lambda pos, i=idx, btn=button: self._show_face_card_context_menu(btn, i, pos)
+            )
 
             # Frame styling matching app color scheme
             if button.isChecked():
@@ -905,6 +1026,89 @@ class FaceStripController:
         self.update_runtime_label()
         self.render_face_preview_strip()
         self.preview.refresh_input_preview_scale()
+
+    def _show_face_card_context_menu(self, anchor_widget, face_index, pos):
+        """Right-click on a face card: offer to skip / re-include / remove."""
+        if face_index is None or face_index < 0 or face_index >= len(self.face_preview_entries):
+            return
+        entry = self.face_preview_entries[face_index]
+        status = entry.get("status", "queued")
+        is_selected = bool(entry.get("selected", False))
+
+        menu = QMenu(anchor_widget)
+        # Toggle selection only makes sense before the run starts.
+        if self.pipeline.awaiting_face_selection or status == "queued":
+            if is_selected:
+                act_toggle = menu.addAction("Skip this face")
+                act_toggle.triggered.connect(
+                    lambda _checked=False, i=face_index: self.select_face_preview(
+                        i, user_initiated=True, selection_checked=False
+                    )
+                )
+            else:
+                act_toggle = menu.addAction("Include this face")
+                act_toggle.triggered.connect(
+                    lambda _checked=False, i=face_index: self.select_face_preview(
+                        i, user_initiated=True, selection_checked=True
+                    )
+                )
+            menu.addSeparator()
+        # Remove is always available unless the face is mid-run.
+        if status != "running":
+            act_remove = menu.addAction("Remove from queue")
+            act_remove.triggered.connect(
+                lambda _checked=False, i=face_index: self.remove_face_entry(i)
+            )
+        else:
+            menu.addAction("Remove from queue (busy)").setEnabled(False)
+        if menu.actions():
+            menu.exec(anchor_widget.mapToGlobal(pos))
+
+    def remove_face_entry(self, face_index):
+        """Drop a face from the queue entirely. Reindexes the survivors so
+        the filmstrip stays compact."""
+        if face_index is None:
+            return
+        try:
+            idx = int(face_index)
+        except Exception:
+            return
+        if idx < 0 or idx >= len(self.face_preview_entries):
+            return
+        removed = self.face_preview_entries.pop(idx)
+        # Reindex survivors so positional invariants (1-based labels, box
+        # alignment) still hold.
+        for new_pos, entry in enumerate(self.face_preview_entries):
+            entry["index"] = new_pos
+
+        # Reset transient selection indices that may now point past the end.
+        n = len(self.face_preview_entries)
+        if self.selected_face_preview_index is not None and self.selected_face_preview_index >= n:
+            self.selected_face_preview_index = (n - 1) if n else None
+        if self.active_face_preview_index is not None and self.active_face_preview_index >= n:
+            self.active_face_preview_index = None
+        if self.hover_face_preview_index is not None and self.hover_face_preview_index >= n:
+            self.hover_face_preview_index = None
+        self.hover_face_box_cache = {}
+        self.hover_face_box_override = None
+
+        label = ""
+        crop_path = removed.get("crop_path")
+        if crop_path:
+            label = f" ({Path(crop_path).name})"
+        self.log_box.append(f"Removed face #{idx + 1}{label} from the queue.")
+
+        if n == 0:
+            self._no_faces_detected = True
+            self.pipeline.awaiting_face_selection = False
+            self.set_run_button_continue_mode(False)
+
+        if hasattr(self, "run_button"):
+            self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
+        self.update_runtime_label()
+        # Recompute the preview overlay to drop the removed face's box.
+        self.preview.update_input_face_boxes_for_preview(expected_count=n if n else None)
+        self.render_face_preview_strip()
 
     def get_selected_face_preview_path(self):
         if not self.face_preview_entries:

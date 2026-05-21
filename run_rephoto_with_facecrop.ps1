@@ -10,6 +10,14 @@
     [double]$FaceFactor = 0.65,
 
     [double]$DetThreshold = 0.9,
+    [bool]$AutoLowerDetThresholdOnNoFaces = $true,
+    # Floor for the auto-lower fallback. Below ~0.55 the detector starts
+    # returning false positives on dim tintypes (frame edges, mat borders,
+    # reflections), each of which gets fed through the StyleGAN pipeline
+    # and burns a full optimization run on a non-face crop. Raise this if
+    # you start missing real faces; lower with caution.
+    [double]$MinDetThreshold = 0.55,
+    [double]$DetThresholdStep = 0.1,
 
     [int]$CropIndex = -1,
     [string]$SelectedCropIndices = "",
@@ -183,6 +191,43 @@ else {
     $W2 = $N
 }
 
+if ($DetThreshold -lt 0 -or $DetThreshold -gt 1) {
+    throw "DetThreshold must be between 0 and 1. Got: $DetThreshold"
+}
+if ($MinDetThreshold -lt 0 -or $MinDetThreshold -gt 1) {
+    throw "MinDetThreshold must be between 0 and 1. Got: $MinDetThreshold"
+}
+if ($DetThresholdStep -le 0 -or $DetThresholdStep -gt 1) {
+    throw "DetThresholdStep must be > 0 and <= 1. Got: $DetThresholdStep"
+}
+if ($MinDetThreshold -gt $DetThreshold) {
+    throw "MinDetThreshold ($MinDetThreshold) must be <= DetThreshold ($DetThreshold)."
+}
+
+$RequestedDetThreshold = [math]::Round([double]$DetThreshold, 2)
+$MinDetThreshold       = [math]::Round([double]$MinDetThreshold, 2)
+$DetThresholdStep      = [math]::Round([double]$DetThresholdStep, 2)
+$EffectiveDetThreshold = $RequestedDetThreshold
+$AttemptedDetThresholds = @()
+
+function Get-FaceCropFiles([string]$DirPath) {
+    if (-not (Test-Path -LiteralPath $DirPath)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -LiteralPath $DirPath -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -match '^\.(png|jpg|jpeg|bmp|tif|tiff|webp)$' } |
+            Sort-Object @{
+                Expression = {
+                    $stem = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+                    if ($stem -match '_(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue }
+                }
+            }, @{
+                Expression = { $_.Name }
+            }
+    )
+}
+
 # Working folders inside the repo.
 $PreRoot          = $PreprocessRoot
 $TempInputDir     = Join-Path $PreRoot "facecrop_input\$SafeBase"
@@ -259,49 +304,101 @@ if (-not $UseExistingCrops) {
     Write-Host "Input image: $ResolvedInput"
     Write-Host "Temp crop input: $TempInputFile"
     Write-Host "Crop output dir: $CropOutDir"
+    Write-Host "Requested detect threshold: $RequestedDetThreshold"
     $PresetLabel = if ($Preset -eq "test") { "750" } else { "$Preset" }
     Write-Host "Preset: $PresetLabel  (wplus_step $W1 $W2)"
     Write-Host ""
 
     # Run face cropping in the facecrop environment.
+    $ThresholdAttempts = @($RequestedDetThreshold)
+    if ($AutoLowerDetThresholdOnNoFaces -and $RequestedDetThreshold -gt ($MinDetThreshold + 1e-9)) {
+        $ThresholdAttempts = @()
+        $thr = $RequestedDetThreshold
+        while ($thr -ge ($MinDetThreshold - 1e-9)) {
+            $ThresholdAttempts += [math]::Round([double]$thr, 2)
+            $thr -= $DetThresholdStep
+        }
+        if ($ThresholdAttempts.Count -eq 0 -or [math]::Abs(($ThresholdAttempts[-1] - $MinDetThreshold)) -gt 1e-9) {
+            $ThresholdAttempts += $MinDetThreshold
+        }
+        $SeenThresholds = @{}
+        $UniqueThresholdAttempts = @()
+        foreach ($cand in $ThresholdAttempts) {
+            $key = "{0:0.00}" -f $cand
+            if (-not $SeenThresholds.ContainsKey($key)) {
+                $SeenThresholds[$key] = $true
+                $UniqueThresholdAttempts += [math]::Round([double]$cand, 2)
+            }
+        }
+        $ThresholdAttempts = $UniqueThresholdAttempts
+    }
+    if ($ThresholdAttempts.Count -gt 1) {
+        Write-Host ("Auto-threshold fallback enabled: {0:0.00} down to {1:0.00} in steps of {2:0.00}." -f $RequestedDetThreshold, $MinDetThreshold, $DetThresholdStep)
+    }
+
     $FaceCropStart = [System.Diagnostics.Stopwatch]::StartNew()
-    conda run -n $FaceCropEnvName $FaceCropCommand `
-        -i $TempInputDir `
-        -o $CropOutDir `
-        -s 2048 `
-        -f png `
-        -r 3072 `
-        -st $Strategy `
-        -ff $FaceFactor `
-        -dt $DetThreshold
+    $DetectedFaceCropFiles = @()
+    foreach ($TryThreshold in $ThresholdAttempts) {
+        # Ensure each attempt starts from an empty crop directory.
+        Get-ChildItem -LiteralPath $CropOutDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+
+        $TryThresholdText = "{0:0.00}" -f $TryThreshold
+        $AttemptedDetThresholds += [math]::Round([double]$TryThreshold, 2)
+        Write-Host "Face crop detect threshold: $TryThresholdText"
+
+        conda run -n $FaceCropEnvName $FaceCropCommand `
+            -i $TempInputDir `
+            -o $CropOutDir `
+            -s 2048 `
+            -f png `
+            -r 3072 `
+            -st $Strategy `
+            -ff $FaceFactor `
+            -dt $TryThresholdText
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Face crop failed (command: $FaceCropCommand, env: $FaceCropEnvName, threshold: $TryThresholdText)."
+        }
+
+        $DetectedFaceCropFiles = Get-FaceCropFiles $CropOutDir
+        Write-Host "Face crop attempt result: $($DetectedFaceCropFiles.Count) crop(s)"
+
+        if ($DetectedFaceCropFiles.Count -gt 0) {
+            $EffectiveDetThreshold = [math]::Round([double]$TryThreshold, 2)
+            if ([math]::Abs(($EffectiveDetThreshold - $RequestedDetThreshold)) -gt 1e-9) {
+                Write-Host "Detected faces after lowering threshold to $TryThresholdText."
+            }
+            break
+        }
+
+        if ($ThresholdAttempts.Count -gt 1 -and [math]::Abs(($TryThreshold - $ThresholdAttempts[-1])) -gt 1e-9) {
+            Write-Host "No faces found at threshold $TryThresholdText. Retrying with lower threshold..."
+        }
+    }
     $FaceCropStart.Stop()
     Write-Host "=== Face crop elapsed: $([math]::Round($FaceCropStart.Elapsed.TotalSeconds, 1))s ==="
-
-    if ($LASTEXITCODE -ne 0) {
-        throw "Face crop failed (command: $FaceCropCommand, env: $FaceCropEnvName)."
+    if ($DetectedFaceCropFiles.Count -eq 0) {
+        $AttemptedText = ($AttemptedDetThresholds | ForEach-Object { "{0:0.00}" -f $_ }) -join ", "
+        throw "No cropped face image files were created in: $CropOutDir (attempted thresholds: $AttemptedText)"
     }
 }
 else {
     Write-Host ""
     Write-Host "=== Face crop step skipped ==="
     Write-Host "Reusing existing crops from: $CropOutDir"
+    Write-Host "Crop output dir: $CropOutDir"
     Write-Host "Preset: $Preset  (wplus_step $W1 $W2)"
     Write-Host ""
 }
 
 # Gather cropped faces.
-$CropFiles = Get-ChildItem -LiteralPath $CropOutDir -File |
-    Where-Object { $_.Extension -match '^\.(png|jpg|jpeg|bmp|tif|tiff|webp)$' } |
-    Sort-Object @{
-        Expression = {
-            $stem = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
-            if ($stem -match '_(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue }
-        }
-    }, @{
-        Expression = { $_.Name }
-    }
+$CropFiles = Get-FaceCropFiles $CropOutDir
 
 if ($CropFiles.Count -eq 0) {
+    if ($AttemptedDetThresholds.Count -gt 0) {
+        $AttemptedText = ($AttemptedDetThresholds | ForEach-Object { "{0:0.00}" -f $_ }) -join ", "
+        throw "No cropped face image files were created in: $CropOutDir (attempted thresholds: $AttemptedText)"
+    }
     throw "No cropped face image files were created in: $CropOutDir"
 }
 
@@ -569,7 +666,13 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "WPlusStep=$W1,$W2"
     "Strategy=$Strategy"
     "FaceFactor=$FaceFactor"
-    "DetThreshold=$DetThreshold"
+    "DetThreshold=$RequestedDetThreshold"
+    "DetThresholdRequested=$RequestedDetThreshold"
+    "DetThresholdUsed=$EffectiveDetThreshold"
+    "AutoLowerDetThresholdOnNoFaces=$AutoLowerDetThresholdOnNoFaces"
+    "MinDetThreshold=$MinDetThreshold"
+    "DetThresholdStep=$DetThresholdStep"
+    "DetThresholdAttempts=$($(if ($AttemptedDetThresholds.Count -gt 0) { ($AttemptedDetThresholds | ForEach-Object { '{0:0.00}' -f $_ }) -join ',' } else { '' }))"
     "CropIndex=$CropIndex"
     "SelectedCropIndices=$SelectedCropIndices"
     "SelectedCropNames=$SelectedCropNames"

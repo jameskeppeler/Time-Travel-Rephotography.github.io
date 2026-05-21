@@ -660,6 +660,57 @@ class TestDialogsModule(unittest.TestCase):
         self.assertIn("from gui.dialogs import AdvancedSettingsDialog", source)
 
 
+class TestFalsePositiveGuardrails(unittest.TestCase):
+    """Mitigations for the auto-lower-threshold false-positive case:
+       1. Wrapper floor at 0.55 so auto-lower can't dredge frame edges.
+       2. Box-size badge on each filmstrip card.
+       3. Auto-deselect smaller faces when one is clearly dominant.
+       4. Remove-from-queue context menu on each card.
+    """
+
+    def test_wrapper_auto_lower_floor(self):
+        src = (REPO_ROOT / "run_rephoto_with_facecrop.ps1").read_text(encoding="utf-8")
+        # The default floor must be >= 0.55 -- 0.1 was the previous,
+        # too-permissive value that let the detector return mat-corner
+        # false positives.
+        match = re.search(r"\[double\]\$MinDetThreshold\s*=\s*([0-9.]+)", src)
+        self.assertIsNotNone(match, "MinDetThreshold default must be parseable")
+        value = float(match.group(1))
+        self.assertGreaterEqual(
+            value, 0.55,
+            f"MinDetThreshold floor regressed to {value} -- raise it back to >= 0.55",
+        )
+
+    def test_size_badge_paint_path(self):
+        src = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
+        # The icon factory must accept a relative_size kwarg.
+        self.assertIn("def _make_face_thumb_icon(self, image_path, fallback_text, muted=False, thumb_size=84, relative_size=None):", src)
+        # Three-tone colour mapping must be present.
+        self.assertIn("badge_bg = QColor(70, 130, 90, 200)", src)   # green
+        self.assertIn("badge_bg = QColor(140, 110, 40, 200)", src)  # yellow
+        self.assertIn("badge_bg = QColor(160, 60, 60, 200)", src)   # red
+
+    def test_auto_deselect_helper_exists(self):
+        src = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
+        self.assertIn("def _annotate_entries_with_box_sizes(self):", src)
+        # initialize_face_preview_entries must call the helper after the
+        # boxes have been refreshed -- otherwise there's nothing to size.
+        idx_init = src.find("def initialize_face_preview_entries(self,")
+        idx_call = src.find("self._annotate_entries_with_box_sizes()", idx_init)
+        idx_box_refresh = src.find("update_input_face_boxes_for_preview", idx_init)
+        self.assertGreater(idx_box_refresh, 0)
+        self.assertGreater(idx_call, idx_box_refresh,
+                           "Must annotate sizes AFTER box refresh")
+
+    def test_remove_face_entry_present(self):
+        src = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
+        self.assertIn("def remove_face_entry(self, face_index):", src)
+        self.assertIn("def _show_face_card_context_menu(self, anchor_widget, face_index, pos):", src)
+        # The card render must wire the customContextMenuRequested signal.
+        self.assertIn("button.setContextMenuPolicy(Qt.CustomContextMenu)", src)
+        self.assertIn("customContextMenuRequested.connect(", src)
+
+
 class TestDeadCodeRemoved(unittest.TestCase):
     """Dead-code sweep: stale symbols should not silently come back."""
 
