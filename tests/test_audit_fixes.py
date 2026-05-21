@@ -322,6 +322,74 @@ class TestConstantsModule(unittest.TestCase):
             )
 
 
+class TestPreviewMixin(unittest.TestCase):
+    """Sprint-4 architectural slice: PreviewMixin holds ~28 preview-related
+    methods (compare-wipe, async pixmap callbacks, scale caches, stage
+    overlays). MRO must keep them callable through self.<method>()."""
+
+    EXPECTED_METHODS = [
+        "set_input_preview_image",
+        "_on_input_pixmap_loaded",
+        "_on_input_pixmap_failed",
+        "set_result_preview_image",
+        "_get_result_pixmap_cached",
+        "_result_preview_cache_key",
+        "refresh_input_preview_scale",
+        "refresh_result_preview_scale",
+        "_apply_compare_wipe",
+        "_get_compare_before_source_pixmap",
+        "update_input_face_boxes_for_preview",
+        "set_input_detect_overlay",
+        "position_input_detect_overlay",
+        "set_result_stage_overlay",
+        "clear_result_stage_overlay",
+        "_hide_result_stage_overlay_for_pause",
+        "_restore_result_stage_overlay_after_pause",
+        "update_result_stage_overlay_animation",
+    ]
+
+    def test_mixin_module_exists(self):
+        self.assertTrue((REPO_ROOT / "gui" / "preview.py").exists())
+
+    def test_mixin_class_defined(self):
+        source = (REPO_ROOT / "gui" / "preview.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        self.assertIn("PreviewMixin", classes)
+
+    def test_methods_live_on_mixin(self):
+        source = (REPO_ROOT / "gui" / "preview.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        methods = set()
+        for cls in ast.iter_child_nodes(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "PreviewMixin":
+                for item in cls.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(item.name)
+        missing = [m for m in self.EXPECTED_METHODS if m not in methods]
+        self.assertFalse(missing, f"PreviewMixin missing: {missing}")
+
+    def test_methods_NOT_redefined_in_main_window(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
+                method_names = {
+                    item.name
+                    for item in cls.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
+                self.assertFalse(duplicates, f"Duplicates on MainWindow: {duplicates}")
+
+    def test_main_window_inherits_mixin(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"class\s+MainWindow\s*\([^)]*PreviewMixin[^)]*\)\s*:",
+        )
+
+
 class TestFaceStripMixin(unittest.TestCase):
     """Sprint-4 architectural slice: FaceStripMixin holds 31 face-strip
     methods that used to live on MainWindow. MRO must keep them callable
@@ -479,14 +547,15 @@ class TestCompareWipeCache(unittest.TestCase):
     """P10: scaled pixmaps in the compare-wipe loop should be cached."""
 
     def test_compare_wipe_cache_state_initialized(self):
-        s = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        # Cache state must be initialized so the first mouse-move doesn't
-        # AttributeError; and it must be CHECKED in the hot path.
-        self.assertIn("_compare_wipe_result_scaled_key = None", s)
-        self.assertIn("_compare_wipe_input_scaled_key = None", s)
-        # Hot-path check (re-use cache when key matches).
-        self.assertIn("_compare_wipe_result_scaled_key == result_key", s)
-        self.assertIn("_compare_wipe_input_scaled_key == input_key", s)
+        # Cache state must be initialized in MainWindow.__init__ so the
+        # first mouse-move doesn't AttributeError.
+        app_source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("_compare_wipe_result_scaled_key = None", app_source)
+        self.assertIn("_compare_wipe_input_scaled_key = None", app_source)
+        # Hot-path check lives in PreviewMixin since the Sprint-4 split.
+        preview_source = (REPO_ROOT / "gui" / "preview.py").read_text(encoding="utf-8")
+        self.assertIn("_compare_wipe_result_scaled_key == result_key", preview_source)
+        self.assertIn("_compare_wipe_input_scaled_key == input_key", preview_source)
 
 
 class TestPauseAckMechanism(unittest.TestCase):
