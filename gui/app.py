@@ -566,6 +566,17 @@ class MainWindow(
         super().__init__()
         self.setWindowTitle(self._BASE_WINDOW_TITLE)
 
+        # Sprint-4 polish: __init__ used to be 929 lines. It's now
+        # split into three named build steps that each do one job.
+        self._init_state()
+        self._build_ui()
+        self._finalize_init()
+
+    def _init_state(self):
+        """Set every MainWindow instance attribute used elsewhere on the
+        class. No widgets are created here; this method must be safe to
+        call before the central widget exists.
+        """
         self.app_root = self.detect_app_root()
         self.repo_root = self.app_root
         self.wrapper_script = self.resolve_resource_path("run_rephoto_with_facecrop.ps1")
@@ -705,6 +716,11 @@ class MainWindow(
         self._last_preprocess_progress_state = None
         self._last_rephoto_progress_state = None
 
+
+    def _build_ui(self):
+        """Construct the central widget tree, lay out widgets, and wire
+        signals. Reads attributes set by _init_state.
+        """
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         self.setCentralWidget(scroll_area)
@@ -1466,6 +1482,12 @@ class MainWindow(
 
         self.setup_menu_bar()
 
+
+    def _finalize_init(self):
+        """Run after _build_ui: install the responsive layout, run
+        first-paint initial-state pokes, and schedule the deferred
+        startup tasks (preflight, Haar cascade warmup).
+        """
         # --- Responsive page layout ---
         self.previews_group = previews_group
         self.previews_layout = previews_layout

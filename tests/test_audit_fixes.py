@@ -323,6 +323,44 @@ class TestConstantsModule(unittest.TestCase):
             )
 
 
+class TestInitSplit(unittest.TestCase):
+    """Sprint-4 polish: __init__ should be a slim dispatch over three named
+    build-step helpers (state / UI / finalize)."""
+
+    def _main_window_methods(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        out = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "MainWindow":
+                for item in node.body:
+                    if isinstance(item, ast.FunctionDef):
+                        out[item.name] = (item.lineno, item.end_lineno or item.lineno)
+        return out
+
+    def test_init_helpers_defined(self):
+        methods = self._main_window_methods()
+        for name in ("__init__", "_init_state", "_build_ui", "_finalize_init"):
+            self.assertIn(name, methods, f"MainWindow must define {name}")
+
+    def test_init_is_slim(self):
+        methods = self._main_window_methods()
+        start, end = methods["__init__"]
+        loc = end - start + 1
+        # Tolerance: was 929 lines; we expect well under 30 now.
+        self.assertLess(loc, 30, f"__init__ regressed to {loc} lines; expected slim dispatch")
+
+    def test_init_calls_helpers(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # Order matters: state must come before UI; UI before finalize.
+        s_idx = source.find("self._init_state()")
+        u_idx = source.find("self._build_ui()")
+        f_idx = source.find("self._finalize_init()")
+        self.assertGreater(s_idx, 0)
+        self.assertGreater(u_idx, s_idx, "_build_ui must run after _init_state")
+        self.assertGreater(f_idx, u_idx, "_finalize_init must run after _build_ui")
+
+
 class TestPreflightMixin(unittest.TestCase):
     """Sprint-4 architectural slice: PreflightMixin holds preflight
     collection + dialog, run-summary text + dialog, and hardware probe."""
