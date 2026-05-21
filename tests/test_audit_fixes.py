@@ -270,6 +270,81 @@ class TestModuleSplit(unittest.TestCase):
         self.assertIn("from gui.widgets import", source)
 
 
+class TestConstantsModule(unittest.TestCase):
+    """gui/constants.py owns the source-of-truth defaults and regexes."""
+
+    EXPECTED_NAMES = [
+        "DEFAULT_BASIC_ITER_VALUES",
+        "DEFAULT_ADVANCED_ITER_VALUES",
+        "DEFAULT_ITERATION",
+        "QUALITY_PRESET_LABELS",
+        "PHOTO_TYPE_DATE_HINTS",
+        "WIDE_LAYOUT_MIN_WIDTH",
+        "DEFAULT_FACE_FACTOR",
+        "DEFAULT_GFPGAN_BLEND",
+        "DEFAULT_DET_THRESHOLD",
+        "DEFAULT_GAUSSIAN",
+        "DEFAULT_NOISE_REGULARIZE",
+        "DEFAULT_LR",
+        "DEFAULT_CAMERA_LR",
+        "DEFAULT_MIX_LAYER_START",
+        "DEFAULT_MIX_LAYER_END",
+        "IMAGE_EXTENSIONS",
+        "CROPPED_FACE_COUNT_RE",
+        "ITER_PROGRESS_RE",
+        "FACE_SUFFIX_INDEX_RE",
+        "RETINA_FACE_BOX_RE",
+    ]
+
+    def test_constants_module_importable_without_qt(self):
+        # The module must not depend on PySide6 so it can be used in unit
+        # tests + non-GUI contexts.
+        import importlib
+        mod = importlib.import_module("gui.constants")
+        for name in self.EXPECTED_NAMES:
+            self.assertTrue(hasattr(mod, name), f"gui.constants missing {name}")
+
+    def test_no_constants_redefined_in_app(self):
+        # Constants must not be re-declared in gui/app.py (drift hazard).
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        module_assignments = set()
+        for node in ast.iter_child_nodes(tree):
+            if isinstance(node, ast.Assign):
+                for tgt in node.targets:
+                    if isinstance(tgt, ast.Name):
+                        module_assignments.add(tgt.id)
+        for name in self.EXPECTED_NAMES:
+            self.assertNotIn(
+                name,
+                module_assignments,
+                f"{name} must not be reassigned in gui/app.py (defined in gui/constants.py)",
+            )
+
+
+class TestDialogsModule(unittest.TestCase):
+    """gui/dialogs.py hosts AdvancedSettingsDialog after the second slice."""
+
+    def test_module_exists(self):
+        self.assertTrue((REPO_ROOT / "gui" / "dialogs.py").exists())
+
+    def test_dialog_defined_in_dialogs(self):
+        source = (REPO_ROOT / "gui" / "dialogs.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        defined = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        self.assertIn("AdvancedSettingsDialog", defined)
+
+    def test_dialog_not_redefined_in_app(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        defined = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        self.assertNotIn("AdvancedSettingsDialog", defined)
+
+    def test_app_imports_dialog(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("from gui.dialogs import AdvancedSettingsDialog", source)
+
+
 class TestDeadCodeRemoved(unittest.TestCase):
     """Dead-code sweep: stale symbols should not silently come back."""
 
