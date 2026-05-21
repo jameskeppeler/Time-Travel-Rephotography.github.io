@@ -521,10 +521,9 @@ class TestPipelineMixin(unittest.TestCase):
         )
 
 
-class TestPreviewMixin(unittest.TestCase):
-    """Sprint-4 architectural slice: PreviewMixin holds ~28 preview-related
-    methods (compare-wipe, async pixmap callbacks, scale caches, stage
-    overlays). MRO must keep them callable through self.<method>()."""
+class TestPreviewController(unittest.TestCase):
+    """Sprint-4 polish: PreviewMixin promoted to PreviewController.
+    MainWindow owns ``self.preview = PreviewController(self)``."""
 
     EXPECTED_METHODS = [
         "set_input_preview_image",
@@ -547,46 +546,35 @@ class TestPreviewMixin(unittest.TestCase):
         "update_result_stage_overlay_animation",
     ]
 
-    def test_mixin_module_exists(self):
+    def test_module_exists(self):
         self.assertTrue((REPO_ROOT / "gui" / "preview.py").exists())
 
-    def test_mixin_class_defined(self):
+    def test_controller_class_defined(self):
         source = (REPO_ROOT / "gui" / "preview.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
-        self.assertIn("PreviewMixin", classes)
+        self.assertIn("PreviewController", classes)
+        self.assertNotIn("PreviewMixin", classes)
 
-    def test_methods_live_on_mixin(self):
+    def test_methods_live_on_controller(self):
         source = (REPO_ROOT / "gui" / "preview.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         methods = set()
         for cls in ast.iter_child_nodes(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "PreviewMixin":
+            if isinstance(cls, ast.ClassDef) and cls.name == "PreviewController":
                 for item in cls.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         methods.add(item.name)
         missing = [m for m in self.EXPECTED_METHODS if m not in methods]
-        self.assertFalse(missing, f"PreviewMixin missing: {missing}")
+        self.assertFalse(missing, f"PreviewController missing: {missing}")
 
-    def test_methods_NOT_redefined_in_main_window(self):
+    def test_main_window_does_not_inherit_legacy_mixin(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
-                method_names = {
-                    item.name
-                    for item in cls.body
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                }
-                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
-                self.assertFalse(duplicates, f"Duplicates on MainWindow: {duplicates}")
+        self.assertNotIn("PreviewMixin", source)
 
-    def test_main_window_inherits_mixin(self):
+    def test_main_window_owns_controller_instance(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        self.assertRegex(
-            source,
-            r"class\s+MainWindow\s*\([^)]*PreviewMixin[^)]*\)\s*:",
-        )
+        self.assertIn("self.preview = PreviewController(self)", source)
 
 
 class TestFaceStripController(unittest.TestCase):
@@ -731,12 +719,14 @@ class TestCompareWipeCache(unittest.TestCase):
     """P10: scaled pixmaps in the compare-wipe loop should be cached."""
 
     def test_compare_wipe_cache_state_initialized(self):
-        # Cache state must be initialized in MainWindow.__init__ so the
-        # first mouse-move doesn't AttributeError.
+        # Cache state must be initialized by MainWindow.__init__ so the
+        # first mouse-move doesn't AttributeError. After the Preview
+        # controller promotion, init goes through self.preview.<attr>=...
+        # (which __setattr__-forwards to the window).
         app_source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
         self.assertIn("_compare_wipe_result_scaled_key = None", app_source)
         self.assertIn("_compare_wipe_input_scaled_key = None", app_source)
-        # Hot-path check lives in PreviewMixin since the Sprint-4 split.
+        # Hot-path check lives in PreviewController.
         preview_source = (REPO_ROOT / "gui" / "preview.py").read_text(encoding="utf-8")
         self.assertIn("_compare_wipe_result_scaled_key == result_key", preview_source)
         self.assertIn("_compare_wipe_input_scaled_key == input_key", preview_source)

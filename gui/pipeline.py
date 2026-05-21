@@ -167,8 +167,8 @@ class PipelineMixin:
             )
 
             self.stop_quick_face_probe()
-            self.set_input_detect_overlay(False)
-            self.clear_result_stage_overlay()
+            self.preview.set_input_detect_overlay(False)
+            self.preview.clear_result_stage_overlay()
             self.reset_progress_bars()
             self.current_run_summary_context = self._capture_run_context()
             self.current_run_phase = "preprocess"
@@ -271,13 +271,13 @@ class PipelineMixin:
 
         if s.startswith("=== Pause requested ==="):
             self.status_label.setText("Status: Paused")
-            self._hide_result_stage_overlay_for_pause()
+            self.preview._hide_result_stage_overlay_for_pause()
             # Backend acknowledged — no nag needed.
             self._cancel_pause_ack_warning()
             return
         if s.startswith("=== Resume requested ==="):
             self._set_status_for_running_state()
-            self._restore_result_stage_overlay_after_pause()
+            self.preview._restore_result_stage_overlay_after_pause()
             self._cancel_pause_ack_warning()
             return
 
@@ -363,7 +363,7 @@ class PipelineMixin:
                     self.rephoto_face_current_index + 1
                 )
                 self.set_rephoto_progress(0, "Processing")
-                self.set_result_stage_overlay("Rephotographing")
+                self.preview.set_result_stage_overlay("Rephotographing")
             return
 
         # Crop‑only skip notice
@@ -390,14 +390,14 @@ class PipelineMixin:
                     if not suppress_all_preprocess_ui:
                         self.set_preprocess_progress(20, "Cropping faces")
                         self.preprocess_stage = "cropping"
-                        self.set_result_stage_overlay("Cropping")
+                        self.preview.set_result_stage_overlay("Cropping")
                 return
 
             if s.startswith("=== GFPGAN step"):
                 if not suppress_all_preprocess_ui:
                     self.set_preprocess_progress(60, "Enhancing faces")
                     self.preprocess_stage = "enhancing"
-                    self.set_result_stage_overlay("Enhancing")
+                    self.preview.set_result_stage_overlay("Enhancing")
                 return
 
             if s.startswith("=== GPU pre-check") or s.startswith("=== Pre-flight check"):
@@ -420,7 +420,7 @@ class PipelineMixin:
                 if not suppress_all_preprocess_ui:
                     crop_image = self.find_latest_crop_output(after_epoch=self.run_started_at)
                     if crop_image:
-                        self.preview_stage_image_if_found(crop_image, "Cropping")
+                        self.preview.preview_stage_image_if_found(crop_image, "Cropping")
                 return
 
             # Watch for GFPGAN blended output
@@ -428,7 +428,7 @@ class PipelineMixin:
                 if not suppress_all_preprocess_ui:
                     enhanced_image = self.find_latest_enhanced_output(after_epoch=self.run_started_at)
                     if enhanced_image:
-                        self.preview_stage_image_if_found(enhanced_image, "Enhancing")
+                        self.preview.preview_stage_image_if_found(enhanced_image, "Enhancing")
                 return
 
         # Rephoto-specific updates (only during rephoto phase)
@@ -753,12 +753,12 @@ Write-Output "OK"
             if target:
                 self.log_box.append("Pause requested. Backend will pause at the next safe checkpoint.")
                 self.status_label.setText("Status: Pause requested...")
-                self._hide_result_stage_overlay_for_pause()
+                self.preview._hide_result_stage_overlay_for_pause()
                 self._arm_pause_ack_warning()
             else:
                 self.log_box.append("Run resumed.")
                 self._set_status_for_running_state()
-                self._restore_result_stage_overlay_after_pause()
+                self.preview._restore_result_stage_overlay_after_pause()
                 self._cancel_pause_ack_warning()
         self.face_strip.update_run_button_for_quick_face_hint()
         return True
@@ -1053,7 +1053,7 @@ Write-Output "OK"
         self.face_strip.update_run_button_for_quick_face_hint()
 
     def _prepare_face_selection_after_preprocess(self):
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         crop_files = self.collect_current_crop_files()
         crop_count = len(crop_files)
         self.set_preprocess_progress(0, "Preprocess ready")
@@ -1063,7 +1063,7 @@ Write-Output "OK"
             self.face_strip.render_face_preview_strip()
             self.log_box.append("No detected faces were found after preprocessing.")
             self.status_label.setText("Status: No faces detected")
-            self.clear_result_stage_overlay()
+            self.preview.clear_result_stage_overlay()
             self.preflight.show_run_summary_dialog(
                 success=False,
                 exit_code=1,
@@ -1108,7 +1108,7 @@ Write-Output "OK"
             self.face_select_none_button.setEnabled(True)
         self.status_label.setText("Status: Select one or more faces, then click Run")
         self.log_box.append(f"Detected {crop_count} faces. Select one or more faces in the strip, then click Run.")
-        self.clear_result_stage_overlay()
+        self.preview.clear_result_stage_overlay()
         self.face_strip.render_face_preview_strip()
 
     def continue_rephoto_with_selected_faces(self):
@@ -1126,7 +1126,7 @@ Write-Output "OK"
         self.awaiting_face_selection = False
         self.face_strip._user_inspecting_completed_face = False
         self.suppress_preprocess_ui_until_rephoto = False
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         self.update_image_import_controls()
         self.selection_preprocess_mode = False
         self.set_run_button_continue_mode(False)
@@ -1146,7 +1146,7 @@ Write-Output "OK"
         self.current_run_summary_context["selected_faces"] = self.face_strip.get_selected_face_count_text()
         self.update_runtime_label()
 
-        self.clear_result_stage_overlay()
+        self.preview.clear_result_stage_overlay()
         self.reset_progress_bars()
         self.current_run_phase = "preprocess"
         self.set_preprocess_progress(5, "Preparing selected faces...")
@@ -1227,7 +1227,7 @@ Write-Output "OK"
             # Stage 1 of two-step flow (crop detect/preview only).
             self.selection_preprocess_mode = False
             self.suppress_preprocess_ui_until_rephoto = False
-            self.set_input_detect_overlay(False)
+            self.preview.set_input_detect_overlay(False)
             self.process = None
             self.set_controls_for_running(False)
             self.run_started_at = None
@@ -1240,7 +1240,7 @@ Write-Output "OK"
             self.status_label.setText("Status: Preprocessing failed")
             self.set_preprocess_progress(0, "Preprocess ready")
             self.set_rephoto_progress(0, "Waiting...")
-            self.clear_result_stage_overlay()
+            self.preview.clear_result_stage_overlay()
             self.preflight.show_run_summary_dialog(
                 success=False,
                 exit_code=exit_code,
@@ -1280,18 +1280,18 @@ Write-Output "OK"
                     # Copy crop to results root
                     copied_path = self.copy_crop_outputs_to_results_root(crop_image)
                     if copied_path is not None:
-                        self.set_result_preview_image(copied_path)
+                        self.preview.set_result_preview_image(copied_path)
                         final_output_path = copied_path
                         self.log_box.append(f"Crop-only output copied to: {copied_path.parent}")
                         self.log_box.append(f"Previewing crop-only result: {copied_path.name}")
                         self.status_label.setText("Status: Crop-only output ready")
                     else:
                         self.log_box.append("Crop-only run: crop was produced but copy to results failed.")
-                        self.set_result_preview_image(crop_image)
+                        self.preview.set_result_preview_image(crop_image)
                         final_output_path = crop_image
                 else:
                     self.log_box.append("Crop-only run: no crop image was found.")
-                    self.set_result_preview_image(None)
+                    self.preview.set_result_preview_image(None)
             else:
                 self.face_strip._sync_face_preview_crop_paths()
                 self.face_strip.reconcile_face_preview_results(after_epoch=self.run_started_at)
@@ -1303,12 +1303,12 @@ Write-Output "OK"
                 if newest is None:
                     from_strip = self.face_strip.get_selected_face_preview_path()
                     if from_strip is not None:
-                        self.set_result_preview_image(from_strip)
+                        self.preview.set_result_preview_image(from_strip)
                         final_output_path = from_strip
                         self.log_box.append(f"Previewing latest face result: {from_strip.name}")
                     else:
                         self.log_box.append("No new result image was found in the results folder.")
-                        self.set_result_preview_image(None)
+                        self.preview.set_result_preview_image(None)
                 else:
                     run_folder = newest.parent
                     if len(self.face_strip.face_preview_entries) <= 1:
@@ -1318,20 +1318,20 @@ Write-Output "OK"
                         final_preview = newest
                     selected_face_preview = self.face_strip.get_selected_face_preview_path()
                     if selected_face_preview is not None:
-                        self.set_result_preview_image(selected_face_preview)
+                        self.preview.set_result_preview_image(selected_face_preview)
                         final_output_path = selected_face_preview
                         self.log_box.append(f"Previewing final face result: {selected_face_preview.name}")
                     else:
-                        self.set_result_preview_image(final_preview)
+                        self.preview.set_result_preview_image(final_preview)
                         final_output_path = final_preview
                         self.log_box.append(f"Previewing final result: {final_preview.name}")
 
             # Clear overlay after displaying final preview
-            self.clear_result_stage_overlay()
+            self.preview.clear_result_stage_overlay()
 
         else:
             self.status_label.setText("Status: Backend returned an error")
-            self.clear_result_stage_overlay()
+            self.preview.clear_result_stage_overlay()
 
         summary_text = self.preflight.store_run_summary_text(
             success=(exit_code == 0),
@@ -1344,7 +1344,7 @@ Write-Output "OK"
             self.preflight.show_run_summary_text_dialog(summary_text)
         self.selection_preprocess_mode = False
         self.suppress_preprocess_ui_until_rephoto = False
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         self.current_run_summary_context = None
 
         # Clear process reference BEFORE re-enabling face interaction so that
@@ -1396,9 +1396,9 @@ Write-Output "OK"
             self.face_strip.render_face_preview_strip()
         self.log_box.append(f"Process launch error: {process_error}")
         self.status_label.setText("Status: Process launch error")
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         self.suppress_preprocess_ui_until_rephoto = False
-        self.clear_result_stage_overlay()
+        self.preview.clear_result_stage_overlay()
         elapsed_seconds = (time.time() - self.run_started_at) if self.run_started_at is not None else None
         self.preflight.show_run_summary_dialog(
             success=False,
@@ -1447,9 +1447,9 @@ Write-Output "OK"
         self._cancel_pause_ack_warning()
         self.log_box.append("Cancel requested. Stopping backend process...")
         self.status_label.setText("Status: Cancelling...")
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         self.suppress_preprocess_ui_until_rephoto = False
-        self.clear_result_stage_overlay()
+        self.preview.clear_result_stage_overlay()
         self._clear_current_stop_flag()
         self._clear_current_pause_flag()
 
@@ -1501,7 +1501,7 @@ Write-Output "OK"
             self.status_label.setText("Status: Input image not found")
             return
 
-        self.set_input_preview_image(input_image_path)
+        self.preview.set_input_preview_image(input_image_path)
 
         if not self.wrapper_script.exists():
             self.log_box.append(f"Wrapper script not found: {self.wrapper_script}")
@@ -1540,8 +1540,8 @@ Write-Output "OK"
                 # Multi-face: show the face selection UI using existing crops,
                 # then the user clicks Run again to continue_rephoto_with_selected_faces
                 self.stop_quick_face_probe()
-                self.set_input_detect_overlay(False)
-                self.clear_result_stage_overlay()
+                self.preview.set_input_detect_overlay(False)
+                self.preview.clear_result_stage_overlay()
                 self.reset_progress_bars()
                 self.current_run_summary_context = self._capture_run_context()
                 self.current_run_phase = "preprocess"
@@ -1553,8 +1553,8 @@ Write-Output "OK"
 
             # Single-face: skip straight to enhancement with -UseExistingCrops
             self.stop_quick_face_probe()
-            self.set_input_detect_overlay(False)
-            self.clear_result_stage_overlay()
+            self.preview.set_input_detect_overlay(False)
+            self.preview.clear_result_stage_overlay()
             self.reset_progress_bars()
             self.face_strip.reset_face_preview_state(preserve_input_overlays=False)
             self.current_run_summary_context = self._capture_run_context()
@@ -1597,8 +1597,8 @@ Write-Output "OK"
             self.face_strip._pending_face_reselection = prev_selected if prev_selected else None
 
             self.stop_quick_face_probe()
-            self.set_input_detect_overlay(False)
-            self.clear_result_stage_overlay()
+            self.preview.set_input_detect_overlay(False)
+            self.preview.clear_result_stage_overlay()
             self.reset_progress_bars()
             self.current_run_summary_context = self._capture_run_context()
             self.current_run_phase = "preprocess"
@@ -1622,8 +1622,8 @@ Write-Output "OK"
         # Normal flow: run face detection + cropping from scratch
         # ----------------------------------------------------------
         self.stop_quick_face_probe()
-        self.set_input_detect_overlay(False)
-        self.clear_result_stage_overlay()
+        self.preview.set_input_detect_overlay(False)
+        self.preview.clear_result_stage_overlay()
         self.reset_progress_bars()
         self.face_strip.reset_face_preview_state(preserve_input_overlays=False)
         self.current_run_summary_context = self._capture_run_context()
@@ -1645,7 +1645,7 @@ Write-Output "OK"
         self._reset_wrapper_runtime_tracking()
         self._prepare_stop_flag_for_new_run()
         if self.suppress_preprocess_ui_until_rephoto:
-            self.set_input_detect_overlay(True, "Detecting Faces")
+            self.preview.set_input_detect_overlay(True, "Detecting Faces")
             self.set_preprocess_progress(0, "Preprocess ready")
             self.set_rephoto_progress(0, "Waiting...")
         else:

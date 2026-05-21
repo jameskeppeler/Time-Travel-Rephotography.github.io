@@ -40,8 +40,32 @@ from PySide6.QtGui import QColor, QImage, QImageReader, QPainter, QPen, QPixmap
 from gui.widgets import _PixmapLoader
 
 
-class PreviewMixin:
-    """Mix into MainWindow to provide input/result preview state + render."""
+class PreviewController:
+    """Controller that owns the input/result preview subsystem.
+
+    Promoted from PreviewMixin in the third Sprint-4 polish round.
+    MainWindow owns it as ``self.preview = PreviewController(self)``.
+
+    Method bodies are unchanged from the mixin era; reads/writes of
+    ``self.input_pixmap``, ``self.result_preview_label``, etc. fall
+    through to MainWindow via __getattr__ / __setattr__ until a future
+    slice migrates state ownership to the controller.
+    """
+
+    def __init__(self, window):
+        object.__setattr__(self, "_window", window)
+
+    def __getattr__(self, name):
+        if name.startswith("_PreviewController__") or name == "_window":
+            raise AttributeError(name)
+        return getattr(self._window, name)
+
+    def __setattr__(self, name, value):
+        if name == "_window":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._window, name, value)
+    """[Legacy docstring from the mixin era — see class header above]"""
 
     def _update_wide_preview_dimensions(self):
         """Track the current preview label width for face strip card sizing."""

@@ -56,7 +56,7 @@ from gui import format_utils, path_utils, runtime_estimator, timing_log as timin
 from gui.face_strip import FaceStripController
 from gui.pipeline import PipelineMixin
 from gui.preflight import PreflightController
-from gui.preview import PreviewMixin
+from gui.preview import PreviewController
 from gui.constants import (
     CROP_ALIGN_BOX_RE,
     CROPPED_FACE_COUNT_RE,
@@ -113,7 +113,6 @@ from gui.dialogs import AdvancedSettingsDialog
 
 class MainWindow(
     PipelineMixin,
-    PreviewMixin,
     QMainWindow,
 ):
     def make_form_label(self, label_text):
@@ -429,8 +428,8 @@ class MainWindow(
             self.menu_face_box_debug_action.setChecked(bool(getattr(self, "face_box_debug_overlay_enabled", False)))
 
     def set_face_box_debug_overlay_enabled(self, enabled):
-        self.face_box_debug_overlay_enabled = bool(enabled)
-        self.refresh_input_preview_scale()
+        self.preview.face_box_debug_overlay_enabled = bool(enabled)
+        self.preview.refresh_input_preview_scale()
 
     def detect_app_root(self):
         """Resolve the application root robustly for source runs and packaged executables."""
@@ -590,6 +589,7 @@ class MainWindow(
         # available everywhere downstream that reads self.preflight.* .
         self.preflight = PreflightController(self)
         self.face_strip = FaceStripController(self)
+        self.preview = PreviewController(self)
         self._timing_records_cache_path = None
         self._timing_records_cache_mtime = None
         self._timing_records_cache = []
@@ -602,15 +602,15 @@ class MainWindow(
 
         # Async pixmap loaders (input + result previews). Off-UI-thread image
         # decode avoids freezes on 50-200 MB historical scans.
-        self._pixmap_thread_pool = QThreadPool.globalInstance()
-        self._input_pixmap_loader_signals = _PixmapLoaderSignals()
-        self._input_pixmap_loader_signals.loaded.connect(self._on_input_pixmap_loaded)
-        self._input_pixmap_loader_signals.failed.connect(self._on_input_pixmap_failed)
-        self._input_pixmap_loader_path = None
-        self._result_pixmap_loader_signals = _PixmapLoaderSignals()
-        self._result_pixmap_loader_signals.loaded.connect(self._on_result_pixmap_loaded)
-        self._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
-        self._result_pixmap_loader_path = None
+        self.preview._pixmap_thread_pool = QThreadPool.globalInstance()
+        self.preview._input_pixmap_loader_signals = _PixmapLoaderSignals()
+        self.preview._input_pixmap_loader_signals.loaded.connect(self.preview._on_input_pixmap_loaded)
+        self.preview._input_pixmap_loader_signals.failed.connect(self.preview._on_input_pixmap_failed)
+        self.preview._input_pixmap_loader_path = None
+        self.preview._result_pixmap_loader_signals = _PixmapLoaderSignals()
+        self.preview._result_pixmap_loader_signals.loaded.connect(self._on_result_pixmap_loaded)
+        self.preview._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
+        self.preview._result_pixmap_loader_path = None
 
         self.preprocess_stage = "idle"
         self.rephoto_stage = None
@@ -653,29 +653,29 @@ class MainWindow(
         self.log_visible = False
 
         # Preview state
-        self.input_pixmap = None
-        self.result_pixmap = None
-        self.last_result_image_path = None
-        self.last_result_image_cache_key = None
+        self.preview.input_pixmap = None
+        self.preview.result_pixmap = None
+        self.preview.last_result_image_path = None
+        self.preview.last_result_image_cache_key = None
         # Proper LRU: OrderedDict + move_to_end on access avoids the
         # pop+reinsert dance and is robust against dict-ordering surprises.
-        self.result_preview_pixmap_cache = OrderedDict()
-        self.result_preview_pixmap_cache_max_entries = 96
-        self.result_preview_path_before_hover = None
-        self.input_face_boxes = []
-        self.input_face_box_source = None
-        self.face_box_debug_overlay_enabled = False
-        self.face_box_probe_cache = {}
-        self.face_box_probe_cache_max_entries = 24
-        self._face_overlay_detector_warned = False
-        self.input_preview_scaled_cache_key = None
-        self.input_preview_scaled_cache_pixmap = None
-        self.input_preview_render_cache_key = None
-        self.input_preview_render_cache_pixmap = None
-        self.input_preview_last_display_key = None
-        self.result_preview_scaled_cache_key = None
-        self.result_preview_scaled_cache_pixmap = None
-        self.result_preview_last_display_key = None
+        self.preview.result_preview_pixmap_cache = OrderedDict()
+        self.preview.result_preview_pixmap_cache_max_entries = 96
+        self.preview.result_preview_path_before_hover = None
+        self.preview.input_face_boxes = []
+        self.preview.input_face_box_source = None
+        self.preview.face_box_debug_overlay_enabled = False
+        self.preview.face_box_probe_cache = {}
+        self.preview.face_box_probe_cache_max_entries = 24
+        self.preview._face_overlay_detector_warned = False
+        self.preview.input_preview_scaled_cache_key = None
+        self.preview.input_preview_scaled_cache_pixmap = None
+        self.preview.input_preview_render_cache_key = None
+        self.preview.input_preview_render_cache_pixmap = None
+        self.preview.input_preview_last_display_key = None
+        self.preview.result_preview_scaled_cache_key = None
+        self.preview.result_preview_scaled_cache_pixmap = None
+        self.preview.result_preview_last_display_key = None
         self.face_strip.face_preview_thumb_icon_cache = {}
         self.face_strip.face_preview_thumb_icon_cache_max_entries = 256
         self.face_strip._face_strip_render_signature = None
@@ -691,7 +691,7 @@ class MainWindow(
         self.face_strip.hover_face_box_cache = {}
         self.quick_face_count_estimate = None
         self.face_strip._no_faces_detected = False
-        self.current_wide_preview_side = 360
+        self.preview.current_wide_preview_side = 360
         self.quick_face_probe_process = None
         self.quick_face_probe_token = 0
         self.quick_face_probe_target_input = None
@@ -1255,14 +1255,14 @@ class MainWindow(
         self.result_preview_label.setStyleSheet("border: 1px solid #868b94; border-radius: 4px; color: #b7bcc5;")
         self.result_preview_label.setMouseTracking(True)
         self.result_preview_label.installEventFilter(self)
-        self._compare_wipe_active = False
-        self._compare_wipe_last_pos = None  # Throttle: min Manhattan distance before scaling
+        self.preview._compare_wipe_active = False
+        self.preview._compare_wipe_last_pos = None  # Throttle: min Manhattan distance before scaling
         # Cache the scaled before/after pixmaps so the 60+Hz mouse-move loop
         # rescales only when the label size or source pixmap actually changes.
-        self._compare_wipe_result_scaled_key = None
-        self._compare_wipe_result_scaled = None
-        self._compare_wipe_input_scaled_key = None
-        self._compare_wipe_input_scaled = None
+        self.preview._compare_wipe_result_scaled_key = None
+        self.preview._compare_wipe_result_scaled = None
+        self.preview._compare_wipe_input_scaled_key = None
+        self.preview._compare_wipe_input_scaled = None
         result_layout.addWidget(self.result_preview_label)
 
         # Stage overlay label for animated stage indicator
@@ -1279,7 +1279,7 @@ class MainWindow(
         self.result_stage_dot_count = 0
         self._result_stage_timer = QTimer(self)
         self._result_stage_timer.setInterval(450)
-        self._result_stage_timer.timeout.connect(self.update_result_stage_overlay_animation)
+        self._result_stage_timer.timeout.connect(self.preview.update_result_stage_overlay_animation)
 
         self.face_preview_header = QWidget()
         face_header_layout = QHBoxLayout()
@@ -1518,18 +1518,18 @@ class MainWindow(
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.apply_responsive_layout()
-        self._update_wide_preview_dimensions()
-        self.refresh_input_preview_scale()
-        self.refresh_result_preview_scale()
-        self.position_input_detect_overlay()
-        self.position_result_stage_overlay()
+        self.preview._update_wide_preview_dimensions()
+        self.preview.refresh_input_preview_scale()
+        self.preview.refresh_result_preview_scale()
+        self.preview.position_input_detect_overlay()
+        self.preview.position_result_stage_overlay()
 
     def _on_splitter_moved(self, pos, index):
         """Rescale preview images when the user drags the splitter handle."""
-        self.refresh_input_preview_scale()
-        self.refresh_result_preview_scale()
-        self.position_input_detect_overlay()
-        self.position_result_stage_overlay()
+        self.preview.refresh_input_preview_scale()
+        self.preview.refresh_result_preview_scale()
+        self.preview.position_input_detect_overlay()
+        self.preview.position_result_stage_overlay()
 
     def changeEvent(self, event):
         super().changeEvent(event)
@@ -1634,9 +1634,9 @@ class MainWindow(
         self._apply_mode_layout_profile(use_wide_layout)
         # Always render filmstrip to show placeholders even when empty
         self.face_strip.render_face_preview_strip()
-        self.refresh_input_preview_scale()
-        self.refresh_result_preview_scale()
-        self.position_input_detect_overlay()
+        self.preview.refresh_input_preview_scale()
+        self.preview.refresh_result_preview_scale()
+        self.preview.position_input_detect_overlay()
 
     def _apply_mode_layout_profile(self, use_wide_layout):
         if use_wide_layout:
@@ -1997,21 +1997,21 @@ class MainWindow(
         self.suppress_preprocess_ui_until_rephoto = False
         if hasattr(self, "input_image_edit"):
             self.input_image_edit.setText("")
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         self.face_strip.reset_face_preview_state(preserve_input_overlays=False)
-        self.clear_result_stage_overlay()
+        self.preview.clear_result_stage_overlay()
         self.reset_progress_bars()
         self._reset_wrapper_runtime_tracking()
         self.current_run_summary_context = None
-        self.set_result_preview_image(None)
+        self.preview.set_result_preview_image(None)
         self.result_preview_label.setText("No result image yet.\nRun to generate a preview.")
         self._rephoto_result_path = None
         self._recomposited_result_path = None
-        self._compare_wipe_last_pos = None  # Reset wipe throttle
-        self._compare_wipe_result_scaled_key = None
-        self._compare_wipe_result_scaled = None
-        self._compare_wipe_input_scaled_key = None
-        self._compare_wipe_input_scaled = None
+        self.preview._compare_wipe_last_pos = None  # Reset wipe throttle
+        self.preview._compare_wipe_result_scaled_key = None
+        self.preview._compare_wipe_result_scaled = None
+        self.preview._compare_wipe_input_scaled_key = None
+        self.preview._compare_wipe_input_scaled = None
         self.result_view_toggle.setVisible(False)
         self.result_view_toggle.setChecked(False)
         self.result_view_toggle.setText("Rephoto")
@@ -2030,7 +2030,7 @@ class MainWindow(
             return
 
         self.stop_quick_face_probe()
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
         self.suppress_preprocess_ui_until_rephoto = False
         # Reset all advanced-settings values to their defaults.
         self.advanced_dialog.restore_defaults()
@@ -2066,7 +2066,7 @@ class MainWindow(
             self.log_box.append("Face selection canceled: new image imported.")
         self.log_box.append(f"Selected image: {file_path}")
         self.status_label.setText("Status: Image selected")
-        self.set_input_preview_image(Path(file_path))
+        self.preview.set_input_preview_image(Path(file_path))
         self.refresh_quick_face_hint_from_input()
 
     def browse_for_image(self):
@@ -2998,7 +2998,7 @@ class MainWindow(
         self.quick_face_probe_last_error = ""
 
         # Probe finished - stop the "Detecting Faces" overlay.
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
 
         # Reset the trigger guard so auto-detect can re-fire with the
         # accurate count from the probe (it may have been set earlier).
@@ -3113,8 +3113,8 @@ class MainWindow(
         self.selection_preprocess_mode = False
         self.suppress_preprocess_ui_until_rephoto = False
         self.current_run_phase = "preprocess"
-        self.input_face_boxes = original_boxes
-        self.input_face_box_source = "retina_probe"
+        self.preview.input_face_boxes = original_boxes
+        self.preview.input_face_box_source = "retina_probe"
         self.log_box.append(f"In-process face detection: {len(crop_paths)} faces found instantly.")
         self.status_label.setText(f"Status: {len(crop_paths)} faces detected")
         self.set_preprocess_progress(100, "Preprocessing complete")
@@ -3166,7 +3166,7 @@ class MainWindow(
             self.stop_quick_face_probe()
             self.quick_face_count_estimate = None
             self.face_strip.update_run_button_for_quick_face_hint()
-            self.set_input_detect_overlay(False)
+            self.preview.set_input_detect_overlay(False)
             return
 
         image_path = Path(image_path_text)
@@ -3174,7 +3174,7 @@ class MainWindow(
             self.stop_quick_face_probe()
             self.quick_face_count_estimate = None
             self.face_strip.update_run_button_for_quick_face_hint()
-            self.set_input_detect_overlay(False)
+            self.preview.set_input_detect_overlay(False)
             return
 
         # Launch RetinaFace probe for face detection.
@@ -3182,12 +3182,12 @@ class MainWindow(
         # face count, create preview crops, and populate the filmstrip.
         self.face_strip.update_run_button_for_quick_face_hint()
         if self._start_quick_face_probe(image_path, fallback_count=None):
-            self.set_input_detect_overlay(True, "Detecting Faces")
+            self.preview.set_input_detect_overlay(True, "Detecting Faces")
             self.log_box.append("Detecting faces (RetinaFace)...")
             return
 
         # Probe couldn't be launched. Stop the overlay.
-        self.set_input_detect_overlay(False)
+        self.preview.set_input_detect_overlay(False)
 
     def resolve_input_face_boxes_via_retina_probe(self, image_path: Path, expected_count=None):
         if image_path is None or (not image_path.exists()):
@@ -3298,10 +3298,10 @@ class MainWindow(
         )
 
     def _set_face_box_probe_cache(self, key, boxes):
-        self.face_box_probe_cache[key] = [tuple(map(int, b)) for b in boxes]
-        while len(self.face_box_probe_cache) > int(self.face_box_probe_cache_max_entries):
-            oldest_key = next(iter(self.face_box_probe_cache))
-            self.face_box_probe_cache.pop(oldest_key, None)
+        self.preview.face_box_probe_cache[key] = [tuple(map(int, b)) for b in boxes]
+        while len(self.preview.face_box_probe_cache) > int(self.preview.face_box_probe_cache_max_entries):
+            oldest_key = next(iter(self.preview.face_box_probe_cache))
+            self.preview.face_box_probe_cache.pop(oldest_key, None)
 
     def resolve_input_face_boxes_via_cropper_probe(self, image_path: Path, expected_count=None):
         if image_path is None or (not image_path.exists()):
@@ -3322,8 +3322,8 @@ class MainWindow(
             det_threshold=det_threshold,
             face_factor=face_factor,
         )
-        if cache_key in self.face_box_probe_cache:
-            return list(self.face_box_probe_cache.get(cache_key, []))
+        if cache_key in self.preview.face_box_probe_cache:
+            return list(self.preview.face_box_probe_cache.get(cache_key, []))
 
         facecrop_env = self.resolve_facecrop_env_name()
         command = [
@@ -3478,7 +3478,7 @@ class MainWindow(
             if idx in self.face_strip.hover_face_box_cache:
                 box = self.face_strip.hover_face_box_cache.get(idx)
             else:
-                box = self.resolve_hover_face_box(idx)
+                box = self.preview.resolve_hover_face_box(idx)
                 self.face_strip.hover_face_box_cache[idx] = box
             if box is None:
                 continue
@@ -3489,7 +3489,7 @@ class MainWindow(
         return resolved
 
     def _hit_test_input_face_index(self, pos):
-        src_pt = self._source_point_from_input_preview_pos(pos)
+        src_pt = self.preview._source_point_from_input_preview_pos(pos)
         if src_pt is None:
             return None
         sx, sy = src_pt
@@ -3621,14 +3621,14 @@ class MainWindow(
             # Before/after wipe comparison on the result preview label.
             if watched is self.result_preview_label:
                 et = event.type()
-                if et == QEvent.MouseMove and self.result_pixmap is not None and self.input_pixmap is not None:
-                    self._apply_compare_wipe(event.pos())
+                if et == QEvent.MouseMove and self.preview.result_pixmap is not None and self.preview.input_pixmap is not None:
+                    self.preview._apply_compare_wipe(event.pos())
                     return False
                 elif et in (QEvent.Leave, QEvent.HoverLeave):
-                    if self._compare_wipe_active:
-                        self._compare_wipe_active = False
-                        self._compare_wipe_last_pos = None  # Reset throttle for next wipe
-                        self.refresh_result_preview_scale()
+                    if self.preview._compare_wipe_active:
+                        self.preview._compare_wipe_active = False
+                        self.preview._compare_wipe_last_pos = None  # Reset throttle for next wipe
+                        self.preview.refresh_result_preview_scale()
                     return False
 
             if hasattr(self, "face_preview_strip_scroll") and watched is self.face_preview_strip_scroll.viewport():
@@ -3683,7 +3683,7 @@ class MainWindow(
         focused_idx = self.face_strip._get_focused_face_preview_index()
         focused_crop = self.face_strip._get_face_crop_path(focused_idx) if focused_idx is not None else None
         if focused_crop is not None:
-            focused_enhanced = self._resolve_enhanced_preview_for_crop(focused_crop)
+            focused_enhanced = self.preview._resolve_enhanced_preview_for_crop(focused_crop)
             if focused_enhanced is not None:
                 if after_epoch is None:
                     return focused_enhanced
@@ -3729,7 +3729,7 @@ class MainWindow(
         """Enable the Recomposite button when we have a result image and a face crop to blend with."""
         if not hasattr(self, "recomposite_button"):
             return
-        has_result = self.last_result_image_path is not None
+        has_result = self.preview.last_result_image_path is not None
         crop_path = self._get_recomposite_crop_path()
         self.recomposite_button.setEnabled(has_result and crop_path is not None)
 
@@ -3742,7 +3742,7 @@ class MainWindow(
 
     def run_recomposite(self):
         """Apply Photoshop-style Color blend + Auto Color using the face crop as the base."""
-        if self.last_result_image_path is None:
+        if self.preview.last_result_image_path is None:
             self.log_box.append("Recomposite: No result image available.")
             return
 
@@ -3751,7 +3751,7 @@ class MainWindow(
             self.log_box.append("Recomposite: No face crop found for the current face.")
             return
 
-        result_path = Path(self.last_result_image_path)
+        result_path = Path(self.preview.last_result_image_path)
         if not result_path.exists():
             self.log_box.append(f"Recomposite: Result file not found: {result_path}")
             return
@@ -3795,7 +3795,7 @@ class MainWindow(
             self.result_view_toggle.setVisible(True)
             self.result_view_toggle.setChecked(True)
             self.result_view_toggle.setText("Recomposited")
-            self.set_result_preview_image(ac_path)
+            self.preview.set_result_preview_image(ac_path)
 
         except Exception as e:
             self.log_box.append(f"Recomposite failed: {e}")
@@ -3805,19 +3805,19 @@ class MainWindow(
         is_recomposited = self.result_view_toggle.isChecked()
         if is_recomposited and self._recomposited_result_path is not None:
             self.result_view_toggle.setText("Recomposited")
-            self.set_result_preview_image(self._recomposited_result_path)
+            self.preview.set_result_preview_image(self._recomposited_result_path)
         elif self._rephoto_result_path is not None:
             self.result_view_toggle.setText("Rephoto")
-            self.set_result_preview_image(self._rephoto_result_path)
+            self.preview.set_result_preview_image(self._rephoto_result_path)
 
     def update_elapsed_label(self):
         self.update_rephoto_bar_format()
 
     def open_result_image_location(self):
-        if self.last_result_image_path is None:
+        if self.preview.last_result_image_path is None:
             return
 
-        img_path = self.last_result_image_path.resolve()
+        img_path = self.preview.last_result_image_path.resolve()
         results_dir = img_path.parent
 
         # Organize results folder: move intermediate files, keep only final outputs

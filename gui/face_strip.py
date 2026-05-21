@@ -197,7 +197,7 @@ class FaceStripController:
         if self.hover_face_preview_index is not None:
             self.hover_face_preview_index = None
             self.hover_face_preview_source = None
-            self.refresh_input_preview_scale()
+            self.preview.refresh_input_preview_scale()
         while self.face_preview_strip_layout.count() > 0:
             item = self.face_preview_strip_layout.takeAt(0)
             widget = item.widget()
@@ -225,12 +225,12 @@ class FaceStripController:
         self._face_strip_render_signature = None
 
         if not preserve_input_overlays:
-            self.input_face_boxes = []
-            self.input_face_box_source = None
-            self.input_preview_render_cache_key = None
-            self.input_preview_render_cache_pixmap = None
-            self.input_preview_last_display_key = None
-            self.refresh_input_preview_scale()
+            self.preview.input_face_boxes = []
+            self.preview.input_face_box_source = None
+            self.preview.input_preview_render_cache_key = None
+            self.preview.input_preview_render_cache_pixmap = None
+            self.preview.input_preview_last_display_key = None
+            self.preview.refresh_input_preview_scale()
         self.update_runtime_label()
         self.update_image_import_controls()
 
@@ -433,7 +433,7 @@ class FaceStripController:
         self.active_face_preview_index = None
         self.selected_face_preview_index = 0 if self.face_preview_entries else None
         self._sync_face_preview_crop_paths()
-        self.update_input_face_boxes_for_preview(expected_count=expected_count)
+        self.preview.update_input_face_boxes_for_preview(expected_count=expected_count)
         self.update_runtime_label()
         self.render_face_preview_strip()
 
@@ -793,20 +793,20 @@ class FaceStripController:
         if self.hover_face_preview_index == idx and self.hover_face_preview_source == source_name:
             return
         if self.hover_face_preview_index is None:
-            self.result_preview_path_before_hover = self.last_result_image_path
+            self.preview.result_preview_path_before_hover = self.preview.last_result_image_path
         self.hover_face_preview_index = idx
         self.hover_face_preview_source = source_name if isinstance(idx, int) else None
         self.hover_face_box_override = None
         if isinstance(idx, int):
             cached_box = self.hover_face_box_cache.get(idx)
             if cached_box is None:
-                cached_box = self.resolve_hover_face_box(idx)
+                cached_box = self.preview.resolve_hover_face_box(idx)
                 self.hover_face_box_cache[idx] = cached_box
             self.hover_face_box_override = cached_box
             hover_preview_path = self.get_face_preview_path(idx)
             if hover_preview_path is not None:
-                self.set_result_preview_image(hover_preview_path)
-        self.refresh_input_preview_scale()
+                self.preview.set_result_preview_image(hover_preview_path)
+        self.preview.refresh_input_preview_scale()
 
     def clear_hover_face_preview_index(self):
         had_hover = (self.hover_face_preview_index is not None) or (self.hover_face_box_override is not None)
@@ -816,11 +816,11 @@ class FaceStripController:
         if had_hover:
             restore_path = self.get_selected_face_preview_path()
             if restore_path is None:
-                restore_path = self.result_preview_path_before_hover
+                restore_path = self.preview.result_preview_path_before_hover
             if restore_path is not None:
-                self.set_result_preview_image(restore_path)
-            self.result_preview_path_before_hover = None
-            self.refresh_input_preview_scale()
+                self.preview.set_result_preview_image(restore_path)
+            self.preview.result_preview_path_before_hover = None
+            self.preview.refresh_input_preview_scale()
 
     def _cursor_face_preview_index(self):
         """Get the face index of the currently hovered button.
@@ -850,7 +850,7 @@ class FaceStripController:
                 entry["selected"] = bool(selection_checked)
         chosen_path = self.get_face_preview_path(face_index)
         if chosen_path is not None and Path(chosen_path).exists():
-            self.set_result_preview_image(Path(chosen_path))
+            self.preview.set_result_preview_image(Path(chosen_path))
 
         if user_initiated and (not self.awaiting_face_selection) and self._is_processing_active():
             # User manually clicked a face during processing — suppress auto-follow
@@ -873,7 +873,7 @@ class FaceStripController:
                     self.status_label.setText("Status: Select at least one face, then click Run")
 
         self.render_face_preview_strip()
-        self.refresh_input_preview_scale()
+        self.preview.refresh_input_preview_scale()
 
     def handle_face_auto_follow_toggled(self, checked):
         if not checked or not self.face_preview_entries:
@@ -901,7 +901,7 @@ class FaceStripController:
         self.run_button.setEnabled(len(self.get_selected_face_indices()) > 0)
         self.update_runtime_label()
         self.render_face_preview_strip()
-        self.refresh_input_preview_scale()
+        self.preview.refresh_input_preview_scale()
 
     def get_selected_face_preview_path(self):
         if not self.face_preview_entries:
@@ -947,7 +947,7 @@ class FaceStripController:
         if crop_path is not None:
             # Only check for enhanced version if we don't already have a result_path set
             if preview_path is None:
-                enhanced = self._resolve_enhanced_preview_for_crop(Path(crop_path))
+                enhanced = self.preview._resolve_enhanced_preview_for_crop(Path(crop_path))
                 if enhanced is not None:
                     preview_path = enhanced
             if preview_path is None:
@@ -1071,14 +1071,14 @@ class FaceStripController:
             preview_path = entry.get("result_path")
             if preview_path is None:
                 # Try to resolve the enhanced/blended version for display
-                enhanced = self._resolve_enhanced_preview_for_crop(crop_path)
+                enhanced = self.preview._resolve_enhanced_preview_for_crop(crop_path)
                 if enhanced is None:
                     original_crop = entry.get("crop_path")
                     if original_crop is not None:
-                        enhanced = self._resolve_enhanced_preview_for_crop(Path(original_crop))
+                        enhanced = self.preview._resolve_enhanced_preview_for_crop(Path(original_crop))
                 preview_path = enhanced or entry.get("crop_path")
             if preview_path is not None and Path(preview_path).exists():
-                self.set_result_preview_image(Path(preview_path))
+                self.preview.set_result_preview_image(Path(preview_path))
         self.render_face_preview_strip()
 
     def mark_face_done_from_result_path(self, result_path_text):
@@ -1117,7 +1117,7 @@ class FaceStripController:
         if self.face_preview_auto_follow_checkbox.isChecked() and not self._user_inspecting_completed_face:
             self.selected_face_preview_index = idx
             if result_path.exists():
-                self.set_result_preview_image(result_path)
+                self.preview.set_result_preview_image(result_path)
 
         self.render_face_preview_strip()
 
