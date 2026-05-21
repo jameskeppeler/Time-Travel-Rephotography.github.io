@@ -197,7 +197,8 @@ class TestExecuteWrapperCommandResolved(unittest.TestCase):
         )
 
     def test_run_face_detection_calls_start_wrapper(self):
-        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # run_face_detection moved to PipelineMixin in the Sprint-4 split.
+        source = (REPO_ROOT / "gui" / "pipeline.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
 
         target = None
@@ -205,7 +206,7 @@ class TestExecuteWrapperCommandResolved(unittest.TestCase):
             if isinstance(node, ast.FunctionDef) and node.name == "run_face_detection":
                 target = node
                 break
-        self.assertIsNotNone(target, "run_face_detection method must exist on MainWindow")
+        self.assertIsNotNone(target, "run_face_detection must exist on PipelineMixin")
 
         calls_to_start = False
         for node in ast.walk(target):
@@ -320,6 +321,86 @@ class TestConstantsModule(unittest.TestCase):
                 module_assignments,
                 f"{name} must not be reassigned in gui/app.py (defined in gui/constants.py)",
             )
+
+
+class TestPipelineMixin(unittest.TestCase):
+    """Sprint-4 architectural slice: PipelineMixin holds the subprocess
+    lifecycle, stdout parsing, and run-control surface."""
+
+    EXPECTED_METHODS = [
+        "run_wrapper",
+        "run_face_detection",
+        "handle_run_button_clicked",
+        "_start_wrapper_process",
+        "process_finished",
+        "process_error",
+        "cancel_run",
+        "request_end_run_early",
+        "_kill_process_if_running",
+        "_terminate_process_nonblocking",
+        "set_backend_paused",
+        "toggle_pause_resume",
+        "_arm_pause_ack_warning",
+        "_cancel_pause_ack_warning",
+        "_on_pause_ack_warning_timeout",
+        "append_stdout_from_process",
+        "append_stderr_from_process",
+        "update_progress_from_line",
+        "_consume_process_output_lines",
+        "_append_process_log_text",
+        "_flush_process_log_buffer",
+        "build_wrapper_command",
+        "_prepare_face_selection_after_preprocess",
+        "continue_rephoto_with_selected_faces",
+        "_can_reuse_existing_crops",
+        "_reset_wrapper_runtime_tracking",
+        "set_controls_for_running",
+        "set_preprocess_progress",
+        "set_rephoto_progress",
+        "reset_progress_bars",
+        "_confirm_high_iteration_count",
+    ]
+
+    def test_mixin_module_exists(self):
+        self.assertTrue((REPO_ROOT / "gui" / "pipeline.py").exists())
+
+    def test_mixin_class_defined(self):
+        source = (REPO_ROOT / "gui" / "pipeline.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        self.assertIn("PipelineMixin", classes)
+
+    def test_methods_live_on_mixin(self):
+        source = (REPO_ROOT / "gui" / "pipeline.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        methods = set()
+        for cls in ast.iter_child_nodes(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "PipelineMixin":
+                for item in cls.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(item.name)
+        missing = [m for m in self.EXPECTED_METHODS if m not in methods]
+        self.assertFalse(missing, f"PipelineMixin missing: {missing}")
+
+    def test_methods_NOT_redefined_in_main_window(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
+                method_names = {
+                    item.name
+                    for item in cls.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
+                self.assertFalse(duplicates, f"Duplicates on MainWindow: {duplicates}")
+
+    def test_main_window_inherits_mixin(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"class\s+MainWindow\s*\([^)]*PipelineMixin[^)]*\)\s*:",
+        )
 
 
 class TestPreviewMixin(unittest.TestCase):
@@ -560,10 +641,12 @@ class TestCompareWipeCache(unittest.TestCase):
 
 class TestPauseAckMechanism(unittest.TestCase):
     """The pause-ACK warning timer must be armed on request and cleared on
-    every termination path so it never nags after the run is over."""
+    every termination path so it never nags after the run is over.
+
+    Pause/cancel/finish methods live in PipelineMixin since Sprint-4."""
 
     def _source(self):
-        return (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        return (REPO_ROOT / "gui" / "pipeline.py").read_text(encoding="utf-8")
 
     def test_helpers_defined(self):
         s = self._source()
