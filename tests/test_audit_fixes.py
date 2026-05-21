@@ -112,8 +112,9 @@ class TestLogLevelClassification(unittest.TestCase):
 
     def test_html_escaping_intent(self):
         # We don't construct the widget here, but verify the in-source
-        # escaping calls cover the dangerous characters.
-        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # escaping calls cover the dangerous characters. TimestampedLogBox
+        # was extracted to gui/widgets.py in the Sprint-4 split.
+        source = (REPO_ROOT / "gui" / "widgets.py").read_text(encoding="utf-8")
         # The colorization path must escape &, <, > before wrapping in <span>.
         self.assertIn('.replace("&", "&amp;")', source)
         self.assertIn('.replace("<", "&lt;")', source)
@@ -218,6 +219,55 @@ class TestExecuteWrapperCommandResolved(unittest.TestCase):
             calls_to_start,
             "run_face_detection must dispatch via self._start_wrapper_process",
         )
+
+
+class TestModuleSplit(unittest.TestCase):
+    """Sprint-4 first slice: widget classes and worker helpers must live in
+    gui/widgets.py and gui/app.py must import them, not define them."""
+
+    WIDGET_NAMES = [
+        "TimestampedLogBox",
+        "InstantToolButton",
+        "NoScrollComboBox",
+        "NoScrollDoubleSpinBox",
+        "NoScrollSpinBox",
+        "NoScrollSlider",
+        "FilmstripContainerWidget",
+        "FaceStripToolButton",
+        "InputDropLabel",
+        "ResultPreviewLabel",
+        "InputDetectOverlay",
+        "_PixmapLoaderSignals",
+        "_PixmapLoader",
+        "_PreflightSignals",
+        "_PreflightRunner",
+    ]
+
+    def test_widgets_module_exists(self):
+        widgets_path = REPO_ROOT / "gui" / "widgets.py"
+        self.assertTrue(widgets_path.exists(), "gui/widgets.py must exist after the split")
+
+    def test_widget_classes_defined_in_widgets(self):
+        source = (REPO_ROOT / "gui" / "widgets.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        defined = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        for name in self.WIDGET_NAMES:
+            self.assertIn(name, defined, f"{name} must be defined in gui/widgets.py")
+
+    def test_widget_classes_not_redefined_in_app(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        defined = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        for name in self.WIDGET_NAMES:
+            self.assertNotIn(
+                name,
+                defined,
+                f"{name} must not be redefined in gui/app.py (extracted to gui/widgets.py)",
+            )
+
+    def test_app_imports_widgets(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        self.assertIn("from gui.widgets import", source)
 
 
 class TestDeadCodeRemoved(unittest.TestCase):
