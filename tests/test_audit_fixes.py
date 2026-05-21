@@ -322,6 +322,92 @@ class TestConstantsModule(unittest.TestCase):
             )
 
 
+class TestFaceStripMixin(unittest.TestCase):
+    """Sprint-4 architectural slice: FaceStripMixin holds 31 face-strip
+    methods that used to live on MainWindow. MRO must keep them callable
+    through the existing self.<method>() call sites."""
+
+    EXPECTED_METHODS = [
+        "render_face_preview_strip",
+        "reset_face_preview_state",
+        "initialize_face_preview_entries",
+        "_compute_face_strip_render_signature",
+        "_sync_face_preview_crop_paths",
+        "_make_face_thumb_icon",
+        "set_hover_face_preview_index",
+        "clear_hover_face_preview_index",
+        "_cursor_face_preview_index",
+        "select_face_preview",
+        "set_all_faces_selected",
+        "get_selected_face_indices",
+        "get_selected_face_count_text",
+        "get_runtime_face_multiplier",
+        "get_selected_face_preview_path",
+        "get_face_preview_path",
+        "_get_face_crop_path",
+        "_find_face_index_for_crop_path",
+        "_find_face_index_for_result_path",
+        "mark_face_running_from_crop_path",
+        "mark_face_done_from_result_path",
+        "mark_face_failed_from_crop_name",
+        "reconcile_face_preview_results",
+        "clear_face_preview_strip_layout",
+        "update_run_button_for_quick_face_hint",
+        "handle_face_auto_follow_toggled",
+        "_rehost_face_preview_panel",
+        "_configure_face_preview_panel_for_mode",
+        "_get_face_preview_header_min_width",
+        "_get_face_strip_card_width",
+        "_get_focused_face_preview_index",
+    ]
+
+    def test_mixin_module_exists(self):
+        self.assertTrue((REPO_ROOT / "gui" / "face_strip.py").exists())
+
+    def test_mixin_class_defined(self):
+        source = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
+        self.assertIn("FaceStripMixin", classes)
+
+    def test_methods_live_on_mixin(self):
+        source = (REPO_ROOT / "gui" / "face_strip.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        methods = set()
+        for cls in ast.iter_child_nodes(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "FaceStripMixin":
+                for item in cls.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        methods.add(item.name)
+        missing = [m for m in self.EXPECTED_METHODS if m not in methods]
+        self.assertFalse(missing, f"Mixin missing: {missing}")
+
+    def test_methods_NOT_redefined_in_main_window(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for cls in ast.walk(tree):
+            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
+                method_names = {
+                    item.name
+                    for item in cls.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                }
+                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
+                self.assertFalse(
+                    duplicates,
+                    f"These mixin methods are also defined on MainWindow "
+                    f"(duplicate -- mixin version will be shadowed): {duplicates}",
+                )
+
+    def test_main_window_inherits_mixin(self):
+        source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # The class header must reference FaceStripMixin in its bases.
+        self.assertRegex(
+            source,
+            r"class\s+MainWindow\s*\([^)]*FaceStripMixin[^)]*\)\s*:",
+        )
+
+
 class TestDialogsModule(unittest.TestCase):
     """gui/dialogs.py hosts AdvancedSettingsDialog after the second slice."""
 
