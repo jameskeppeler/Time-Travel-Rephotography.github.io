@@ -3611,10 +3611,13 @@ class MainWindow(QMainWindow):
         if s.startswith("=== Pause requested ==="):
             self.status_label.setText("Status: Paused")
             self._hide_result_stage_overlay_for_pause()
+            # Backend acknowledged — no nag needed.
+            self._cancel_pause_ack_warning()
             return
         if s.startswith("=== Resume requested ==="):
             self._set_status_for_running_state()
             self._restore_result_stage_overlay_after_pause()
+            self._cancel_pause_ack_warning()
             return
 
         # === Path tracking from stdout ===
@@ -3822,6 +3825,10 @@ class MainWindow(QMainWindow):
         self._rephoto_result_path = None
         self._recomposited_result_path = None
         self._compare_wipe_last_pos = None  # Reset wipe throttle
+        self._compare_wipe_result_scaled_key = None
+        self._compare_wipe_result_scaled = None
+        self._compare_wipe_input_scaled_key = None
+        self._compare_wipe_input_scaled = None
         self.result_view_toggle.setVisible(False)
         self.result_view_toggle.setChecked(False)
         self.result_view_toggle.setText("Rephoto")
@@ -5236,12 +5243,47 @@ Write-Output "OK"
                 self.log_box.append("Pause requested. Backend will pause at the next safe checkpoint.")
                 self.status_label.setText("Status: Pause requested...")
                 self._hide_result_stage_overlay_for_pause()
+                self._arm_pause_ack_warning()
             else:
                 self.log_box.append("Run resumed.")
                 self._set_status_for_running_state()
                 self._restore_result_stage_overlay_after_pause()
+                self._cancel_pause_ack_warning()
         self.update_run_button_for_quick_face_hint()
         return True
+
+    # Pause ACK: backend prints "=== Pause requested ===" only when it reaches a
+    # safe checkpoint. If that marker doesn't arrive within this window, surface
+    # a hint so the user knows the request was received but the backend is
+    # still in a long step (e.g. mid-StyleGAN forward pass).
+    _PAUSE_ACK_WARN_MS = 10_000
+
+    def _arm_pause_ack_warning(self):
+        self._cancel_pause_ack_warning()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.timeout.connect(self._on_pause_ack_warning_timeout)
+        timer.start(self._PAUSE_ACK_WARN_MS)
+        self._pause_ack_warn_timer = timer
+
+    def _cancel_pause_ack_warning(self):
+        timer = getattr(self, "_pause_ack_warn_timer", None)
+        if timer is not None:
+            try:
+                timer.stop()
+            except RuntimeError:
+                pass
+            self._pause_ack_warn_timer = None
+
+    def _on_pause_ack_warning_timeout(self):
+        # Only nag if we're still in the "requested" state — if the backend
+        # already acknowledged, the stdout-handler cleared this timer.
+        if not self.run_paused or self.process is None:
+            return
+        self.log_box.append(
+            "Backend has not yet acknowledged pause. It will pause at the next "
+            "checkpoint (long forward passes can delay this by 5–30s)."
+        )
 
     def toggle_pause_resume(self):
         if self.process is None:
@@ -8582,6 +8624,7 @@ Write-Output "OK"
     def process_finished(self, exit_code, exit_status):
         self.run_paused = False
         self._user_inspecting_completed_face = False
+        self._cancel_pause_ack_warning()
         self._clear_current_stop_flag()
         self._clear_current_pause_flag()
         if hasattr(self, "_elapsed_timer"):
@@ -8772,6 +8815,7 @@ Write-Output "OK"
     def process_error(self, process_error):
         self.run_paused = False
         self._user_inspecting_completed_face = False
+        self._cancel_pause_ack_warning()
         self._clear_current_stop_flag()
         self._clear_current_pause_flag()
         if hasattr(self, "_elapsed_timer"):
@@ -8836,6 +8880,7 @@ Write-Output "OK"
         self.rephoto_progress_bar.setFormat(self.rephoto_progress_bar.format() + " (cancelled)")
         if hasattr(self, "_elapsed_timer"):
             self._elapsed_timer.stop()
+        self._cancel_pause_ack_warning()
         self.log_box.append("Cancel requested. Stopping backend process...")
         self.status_label.setText("Status: Cancelling...")
         self.set_input_detect_overlay(False)

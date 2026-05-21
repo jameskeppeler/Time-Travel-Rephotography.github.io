@@ -231,6 +231,61 @@ class TestCompareWipeCache(unittest.TestCase):
         self.assertIn("_compare_wipe_input_scaled_key == input_key", s)
 
 
+class TestPauseAckMechanism(unittest.TestCase):
+    """The pause-ACK warning timer must be armed on request and cleared on
+    every termination path so it never nags after the run is over."""
+
+    def _source(self):
+        return (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+
+    def test_helpers_defined(self):
+        s = self._source()
+        # The timer-management helpers must exist.
+        self.assertIn("def _arm_pause_ack_warning(self):", s)
+        self.assertIn("def _cancel_pause_ack_warning(self):", s)
+        self.assertIn("def _on_pause_ack_warning_timeout(self):", s)
+
+    def test_armed_on_pause_request(self):
+        s = self._source()
+        # Pause request site must arm the warning.
+        idx = s.find('"Status: Pause requested..."')
+        self.assertGreater(idx, 0, "Pause request status line must exist")
+        # Within the next ~800 characters of source, _arm_pause_ack_warning
+        # must be called.
+        window = s[idx:idx + 800]
+        self.assertIn("_arm_pause_ack_warning()", window)
+
+    def test_cancelled_on_ack_resume_and_termination(self):
+        s = self._source()
+        # Cancelled on stdout marker "=== Pause requested ===" arrival.
+        ack_idx = s.find('s.startswith("=== Pause requested ===")')
+        self.assertGreater(ack_idx, 0)
+        self.assertIn("_cancel_pause_ack_warning()", s[ack_idx:ack_idx + 400])
+        # Cancelled in process_finished, process_error, cancel_run.
+        for fn_name in ("def process_finished", "def process_error", "def cancel_run"):
+            fn_idx = s.find(fn_name)
+            self.assertGreater(fn_idx, 0, f"{fn_name} must exist")
+            self.assertIn(
+                "_cancel_pause_ack_warning()",
+                s[fn_idx:fn_idx + 1200],
+                f"{fn_name} must cancel the pause-ack warning timer",
+            )
+
+
+class TestCompareWipeCacheClearedOnReset(unittest.TestCase):
+    """Compare-wipe scaled caches must be cleared when the user loads a new
+    input image; otherwise stale scaled pixmaps from the previous result
+    could leak through during a transition."""
+
+    def test_reset_clears_compare_wipe_cache(self):
+        s = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        idx = s.find("def _reset_main_window_for_new_input")
+        self.assertGreater(idx, 0)
+        body = s[idx:idx + 1800]
+        self.assertIn("_compare_wipe_result_scaled_key = None", body)
+        self.assertIn("_compare_wipe_input_scaled_key = None", body)
+
+
 class TestSubprocessTimeoutSurfacing(unittest.TestCase):
     """P13: subprocess.TimeoutExpired must be caught separately and always logged."""
 
