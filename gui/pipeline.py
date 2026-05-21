@@ -55,8 +55,34 @@ from gui.constants import (
 )
 
 
-class PipelineMixin:
-    """Mix into MainWindow to provide subprocess + stdout-parsing pipeline."""
+class PipelineController:
+    """Controller that owns the subprocess + stdout-parsing pipeline.
+
+    Promoted from PipelineMixin in the final Sprint-4 polish round.
+    MainWindow owns it as ``self.pipeline = PipelineController(self)``.
+
+    Method bodies are unchanged from the mixin era; reads/writes of
+    ``self.process``, ``self.face_preview_entries``, etc. fall through
+    to MainWindow via __getattr__ / __setattr__. (Cross-controller
+    access -- e.g. self.face_strip.<...>, self.preview.<...>,
+    self.preflight.<...> -- was rewritten in earlier commits and still
+    works because those controllers live on MainWindow.)
+    """
+
+    def __init__(self, window):
+        object.__setattr__(self, "_window", window)
+
+    def __getattr__(self, name):
+        if name.startswith("_PipelineController__") or name == "_window":
+            raise AttributeError(name)
+        return getattr(self._window, name)
+
+    def __setattr__(self, name, value):
+        if name == "_window":
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._window, name, value)
+    """[Legacy docstring from the mixin era — see class header above]"""
 
     def _kill_process_if_running(self, proc):
         if proc is None:

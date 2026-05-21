@@ -54,7 +54,7 @@ from PySide6.QtWidgets import (
 # call sites that read them off the gui.app namespace keep working.
 from gui import format_utils, path_utils, runtime_estimator, timing_log as timing_log_io
 from gui.face_strip import FaceStripController
-from gui.pipeline import PipelineMixin
+from gui.pipeline import PipelineController
 from gui.preflight import PreflightController
 from gui.preview import PreviewController
 from gui.constants import (
@@ -112,7 +112,6 @@ from gui.widgets import (
 from gui.dialogs import AdvancedSettingsDialog
 
 class MainWindow(
-    PipelineMixin,
     QMainWindow,
 ):
     def make_form_label(self, label_text):
@@ -553,7 +552,7 @@ class MainWindow(
                     # Give it a short grace period, then force-kill if needed.
                     # We cannot block the close, so wait briefly and force.
                     if not proc.waitForFinished(500):
-                        self._kill_process_if_running(proc)
+                        self.pipeline._kill_process_if_running(proc)
             except RuntimeError:
                 pass
 
@@ -577,19 +576,20 @@ class MainWindow(
         self.app_root = self.detect_app_root()
         self.repo_root = self.app_root
         self.wrapper_script = self.resolve_resource_path("run_rephoto_with_facecrop.ps1")
-        self.process = None
-        self.run_paused = False
-        self.current_stop_flag_path = None
-        self.current_pause_flag_path = None
-        self.run_started_at = None
-        self.rephoto_started_at = None
-        self.current_run_summary_context = None
+        self.pipeline.process = None
+        self.pipeline.run_paused = False
+        self.pipeline.current_stop_flag_path = None
+        self.pipeline.current_pause_flag_path = None
+        self.pipeline.run_started_at = None
+        self.pipeline.rephoto_started_at = None
+        self.pipeline.current_run_summary_context = None
         # PreflightController owns last_run_summary_text / last_preflight_report /
         # hardware-info cache / running flag, etc. Instantiated here so it's
         # available everywhere downstream that reads self.preflight.* .
         self.preflight = PreflightController(self)
         self.face_strip = FaceStripController(self)
         self.preview = PreviewController(self)
+        self.pipeline = PipelineController(self)
         self._timing_records_cache_path = None
         self._timing_records_cache_mtime = None
         self._timing_records_cache = []
@@ -598,7 +598,7 @@ class MainWindow(
         self._facecrop_env_cache_key = None
         self._facecrop_env_name_cache = None
         self._quick_probe_det_threshold = None
-        self._last_backend_error_detail = ""
+        self.pipeline._last_backend_error_detail = ""
 
         # Async pixmap loaders (input + result previews). Off-UI-thread image
         # decode avoids freezes on 50-200 MB historical scans.
@@ -612,37 +612,37 @@ class MainWindow(
         self.preview._result_pixmap_loader_signals.failed.connect(self._on_result_pixmap_failed)
         self.preview._result_pixmap_loader_path = None
 
-        self.preprocess_stage = "idle"
-        self.rephoto_stage = None
-        self.rephoto_stage_name = None
-        self.rephoto_stage_current = 0
-        self.rephoto_stage_total = 0
-        self.rephoto_total_done_before_stage = 0
-        self.rephoto_total_work = 0
-        self.rephoto_step_pair = (250, 750)
-        self.rephoto_face_current_index = 0
-        self.rephoto_face_total = 1
+        self.pipeline.preprocess_stage = "idle"
+        self.pipeline.rephoto_stage = None
+        self.pipeline.rephoto_stage_name = None
+        self.pipeline.rephoto_stage_current = 0
+        self.pipeline.rephoto_stage_total = 0
+        self.pipeline.rephoto_total_done_before_stage = 0
+        self.pipeline.rephoto_total_work = 0
+        self.pipeline.rephoto_step_pair = (250, 750)
+        self.pipeline.rephoto_face_current_index = 0
+        self.pipeline.rephoto_face_total = 1
 
         # run phase state for gating progress bars
-        self.current_run_phase = "idle"  # idle, preprocess, rephoto, done, cancelled, crop_only_done
-        self.selection_preprocess_mode = False
-        self.awaiting_face_selection = False
+        self.pipeline.current_run_phase = "idle"  # idle, preprocess, rephoto, done, cancelled, crop_only_done
+        self.pipeline.selection_preprocess_mode = False
+        self.pipeline.awaiting_face_selection = False
 
         # Path tracking from stdout to avoid recursive folder scans
-        self.current_crop_output_dir = None
-        self.current_gfpgan_output_dir = None
-        self._inprocess_preview_crops = False
-        self._crop_source_input_key = None  # normalized path key of the input that produced current crops
-        self._crop_source_face_factor = None  # face_factor value used when crops were produced
+        self.pipeline.current_crop_output_dir = None
+        self.pipeline.current_gfpgan_output_dir = None
+        self.pipeline._inprocess_preview_crops = False
+        self.pipeline._crop_source_input_key = None  # normalized path key of the input that produced current crops
+        self.pipeline._crop_source_face_factor = None  # face_factor value used when crops were produced
         self.face_strip._pending_face_reselection = None  # set of face indices to pre-select after a re-crop
-        self.current_blended_faces_dir = None
-        self.current_results_dir = None
-        self.current_manifest_path = None
-        self.current_run_result_dirs = set()
+        self.pipeline.current_blended_faces_dir = None
+        self.pipeline.current_results_dir = None
+        self.pipeline.current_manifest_path = None
+        self.pipeline.current_run_result_dirs = set()
 
         # Stage timing instrumentation
-        self.stage_started_at = {}  # {"crop": timestamp, "enhance": timestamp, ...}
-        self.stage_elapsed = {}    # {"crop": seconds, "enhance": seconds, ...}
+        self.pipeline.stage_started_at = {}  # {"crop": timestamp, "enhance": timestamp, ...}
+        self.pipeline.stage_elapsed = {}    # {"crop": seconds, "enhance": seconds, ...}
         self._newest_image_query_cache = {}
         self._newest_image_query_cache_max_entries = 64
         self._runtime_label_cache_key = None
@@ -699,20 +699,20 @@ class MainWindow(
         self.quick_face_probe_warned = False
         self.quick_face_probe_stdout = ""
         self.quick_face_probe_last_error = ""
-        self._process_stdout_buffer = ""
-        self._process_stderr_buffer = ""
-        self._process_log_pending_text = []  # Use list for O(1) append instead of string +=
-        self._process_log_pending_text_bytes = 0  # Track size instead of len(string)
-        self._process_log_flush_queued = False
-        self.retina_face_box_probe_warned = False
-        self.cropper_face_box_probe_warned = False
-        self.auto_detect_faces_on_import = True
-        self.auto_detect_faces_armed_input = None
-        self.auto_detect_faces_triggered_input = None
-        self.suppress_preprocess_ui_until_rephoto = False
-        self._last_iter_progress_signature = None
-        self._last_preprocess_progress_state = None
-        self._last_rephoto_progress_state = None
+        self.pipeline._process_stdout_buffer = ""
+        self.pipeline._process_stderr_buffer = ""
+        self.pipeline._process_log_pending_text = []  # Use list for O(1) append instead of string +=
+        self.pipeline._process_log_pending_text_bytes = 0  # Track size instead of len(string)
+        self.pipeline._process_log_flush_queued = False
+        self.pipeline.retina_face_box_probe_warned = False
+        self.pipeline.cropper_face_box_probe_warned = False
+        self.pipeline.auto_detect_faces_on_import = True
+        self.pipeline.auto_detect_faces_armed_input = None
+        self.pipeline.auto_detect_faces_triggered_input = None
+        self.pipeline.suppress_preprocess_ui_until_rephoto = False
+        self.pipeline._last_iter_progress_signature = None
+        self.pipeline._last_preprocess_progress_state = None
+        self.pipeline._last_rephoto_progress_state = None
 
 
     def _build_ui(self):
@@ -1079,7 +1079,7 @@ class MainWindow(
         button_row = QHBoxLayout()
 
         self.run_button = QPushButton("Run")
-        self.run_button.clicked.connect(self.handle_run_button_clicked)
+        self.run_button.clicked.connect(self.pipeline.handle_run_button_clicked)
         self.run_button.setShortcut("Ctrl+Return")
         self.run_button.setToolTip("Start the rephotography run (Ctrl+Enter).")
         self.run_button.setAccessibleName("Run rephotography")
@@ -1095,7 +1095,7 @@ class MainWindow(
         )
         # Right-click on Run offers a quick "Preview Crops Only" option.
         self.run_button.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.run_button.customContextMenuRequested.connect(self._show_run_context_menu)
+        self.run_button.customContextMenuRequested.connect(self.pipeline._show_run_context_menu)
 
         secondary_button_style = (
             "QPushButton { border: 1px solid #4a4f57; border-radius: 4px; background-color: #252a31; color: #e6e8eb; } "
@@ -1111,7 +1111,7 @@ class MainWindow(
         )
 
         self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.clicked.connect(self.cancel_run)
+        self.cancel_button.clicked.connect(self.pipeline.cancel_run)
         self.cancel_button.setShortcut("Escape")
         self.cancel_button.setToolTip("Stop the current rephotography run (Esc).")
         self.cancel_button.setAccessibleName("Cancel rephotography")
@@ -1121,7 +1121,7 @@ class MainWindow(
         self.cancel_button.setStyleSheet(secondary_button_style)
 
         self.end_early_button = QPushButton("End Early")
-        self.end_early_button.clicked.connect(self.request_end_run_early)
+        self.end_early_button.clicked.connect(self.pipeline.request_end_run_early)
         self.end_early_button.setShortcut("Ctrl+E")
         self.end_early_button.setMinimumHeight(34)
         self.end_early_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -1200,7 +1200,7 @@ class MainWindow(
             "Use a lower threshold to detect more faces, higher to detect only clear faces."
         )
         self.redetect_faces_button.setAccessibleName("Re-detect faces")
-        self.redetect_faces_button.clicked.connect(self.run_face_detection)
+        self.redetect_faces_button.clicked.connect(self.pipeline.run_face_detection)
         self.redetect_faces_button.setEnabled(False)
         self.redetect_faces_button.setVisible(False)
         input_layout.addWidget(self.redetect_faces_button)
@@ -1707,10 +1707,10 @@ class MainWindow(
         self.iter_slider.setValue(closest_index)
 
     def get_elapsed_display_text(self):
-        if self.rephoto_started_at is None:
+        if self.pipeline.rephoto_started_at is None:
             return "0:00"
 
-        elapsed = int(time.time() - self.rephoto_started_at)
+        elapsed = int(time.time() - self.pipeline.rephoto_started_at)
         h, rem = divmod(elapsed, 3600)
         m, s = divmod(rem, 60)
 
@@ -1721,9 +1721,9 @@ class MainWindow(
     def update_rephoto_bar_format(self):
         elapsed_text = self.get_elapsed_display_text()
         face_prefix = ""
-        if self.current_run_phase == "rephoto" and self.rephoto_face_total > 1:
-            shown_index = max(1, min(self.rephoto_face_current_index, self.rephoto_face_total))
-            face_prefix = f"{shown_index}/{self.rephoto_face_total} "
+        if self.pipeline.current_run_phase == "rephoto" and self.pipeline.rephoto_face_total > 1:
+            shown_index = max(1, min(self.pipeline.rephoto_face_current_index, self.pipeline.rephoto_face_total))
+            face_prefix = f"{shown_index}/{self.pipeline.rephoto_face_total} "
         self.rephoto_progress_bar.setFormat(f"{face_prefix}{self.rephoto_status_text} %p% | {elapsed_text}")
 
     def get_effective_rephoto_steps(self):
@@ -1749,39 +1749,39 @@ class MainWindow(
             self.setWindowTitle(self._BASE_WINDOW_TITLE)
 
     def start_rephoto_progress_tracking(self):
-        self.rephoto_step_pair = self.get_effective_rephoto_steps()
-        self.rephoto_total_work = self.rephoto_step_pair[0] + self.rephoto_step_pair[1]
-        self.rephoto_stage = None
-        self.rephoto_stage_name = None
-        self.rephoto_stage_current = 0
-        self.rephoto_stage_total = 0
-        self.rephoto_total_done_before_stage = 0
+        self.pipeline.rephoto_step_pair = self.get_effective_rephoto_steps()
+        self.pipeline.rephoto_total_work = self.pipeline.rephoto_step_pair[0] + self.pipeline.rephoto_step_pair[1]
+        self.pipeline.rephoto_stage = None
+        self.pipeline.rephoto_stage_name = None
+        self.pipeline.rephoto_stage_current = 0
+        self.pipeline.rephoto_stage_total = 0
+        self.pipeline.rephoto_total_done_before_stage = 0
         selected_count = len(self.face_strip.get_selected_face_indices())
-        self.rephoto_face_total = max(1, selected_count)
-        self.rephoto_face_current_index = 0
-        self._last_iter_progress_signature = None
+        self.pipeline.rephoto_face_total = max(1, selected_count)
+        self.pipeline.rephoto_face_current_index = 0
+        self.pipeline._last_iter_progress_signature = None
 
     def update_rephoto_progress_from_iteration(self, current_iter, total_iter):
-        if not self.rephoto_stage_name:
+        if not self.pipeline.rephoto_stage_name:
             return
         signature = (
-            self.rephoto_stage_name,
+            self.pipeline.rephoto_stage_name,
             int(current_iter),
             int(total_iter),
-            int(self.rephoto_face_current_index),
+            int(self.pipeline.rephoto_face_current_index),
         )
-        if self._last_iter_progress_signature == signature:
+        if self.pipeline._last_iter_progress_signature == signature:
             return
-        self._last_iter_progress_signature = signature
-        if self.rephoto_stage_name == "32x32":
-            self.rephoto_total_done_before_stage = 0
-            self.rephoto_stage_total = self.rephoto_step_pair[0]
-        elif self.rephoto_stage_name == "64x64":
-            self.rephoto_total_done_before_stage = self.rephoto_step_pair[0]
-            self.rephoto_stage_total = self.rephoto_step_pair[1]
-        overall_done = self.rephoto_total_done_before_stage + current_iter
-        percent = round(100 * overall_done / self.rephoto_total_work)
-        self.set_rephoto_progress(percent, "Processing")
+        self.pipeline._last_iter_progress_signature = signature
+        if self.pipeline.rephoto_stage_name == "32x32":
+            self.pipeline.rephoto_total_done_before_stage = 0
+            self.pipeline.rephoto_stage_total = self.pipeline.rephoto_step_pair[0]
+        elif self.pipeline.rephoto_stage_name == "64x64":
+            self.pipeline.rephoto_total_done_before_stage = self.pipeline.rephoto_step_pair[0]
+            self.pipeline.rephoto_stage_total = self.pipeline.rephoto_step_pair[1]
+        overall_done = self.pipeline.rephoto_total_done_before_stage + current_iter
+        percent = round(100 * overall_done / self.pipeline.rephoto_total_work)
+        self.pipeline.set_rephoto_progress(percent, "Processing")
 
     def update_iteration_label(self):
         v = self.iter_values[self.iter_slider.value()]
@@ -1864,7 +1864,7 @@ class MainWindow(
         approx_year = self.parse_approximate_year(self.approx_date_edit.text())
 
         # PRIORITY 1: True photographic processes
-        if self.is_true_process_type(photo_type):
+        if self.pipeline.is_true_process_type(photo_type):
             return "Blue-sensitive"
 
         # PRIORITY 3: Format-based types
@@ -1936,7 +1936,7 @@ class MainWindow(
 
     def can_select_new_image(self, show_message=False):
         reason = ""
-        if self.process is not None:
+        if self.pipeline.process is not None:
             reason = "A run is currently in progress."
 
         if reason:
@@ -1958,7 +1958,7 @@ class MainWindow(
     # Progress tracking
     # ------------------------------
     def _try_fast_rephoto_iteration_progress(self, text: str):
-        if self.current_run_phase != "rephoto":
+        if self.pipeline.current_run_phase != "rephoto":
             return False
         if "/" not in text:
             return False
@@ -1967,16 +1967,16 @@ class MainWindow(
             return False
         current = int(m.group(1))
         total = int(m.group(2))
-        allowed_totals = {self.rephoto_step_pair[0], self.rephoto_step_pair[1]}
+        allowed_totals = {self.pipeline.rephoto_step_pair[0], self.pipeline.rephoto_step_pair[1]}
         if total not in allowed_totals:
             return False
-        if total == self.rephoto_step_pair[0]:
-            self.rephoto_stage = "32x32"
-            self.rephoto_stage_name = "32x32"
-        elif total == self.rephoto_step_pair[1]:
-            self.rephoto_stage = "64x64"
-            self.rephoto_stage_name = "64x64"
-        self.rephoto_stage_total = total
+        if total == self.pipeline.rephoto_step_pair[0]:
+            self.pipeline.rephoto_stage = "32x32"
+            self.pipeline.rephoto_stage_name = "32x32"
+        elif total == self.pipeline.rephoto_step_pair[1]:
+            self.pipeline.rephoto_stage = "64x64"
+            self.pipeline.rephoto_stage_name = "64x64"
+        self.pipeline.rephoto_stage_total = total
         self.update_rephoto_progress_from_iteration(current, total)
         return True
 
@@ -1986,23 +1986,23 @@ class MainWindow(
     def _reset_main_window_for_new_input(self):
         """Clear selection/runtime preview state when user imports a new input image."""
         self.stop_quick_face_probe()
-        self._clear_current_stop_flag()
-        self._clear_current_pause_flag()
+        self.pipeline._clear_current_stop_flag()
+        self.pipeline._clear_current_pause_flag()
         self.quick_face_count_estimate = None
         self._quick_probe_det_threshold = None
-        self._last_backend_error_detail = ""
+        self.pipeline._last_backend_error_detail = ""
         self._template_match_cache = {}
-        self.auto_detect_faces_armed_input = None
-        self.auto_detect_faces_triggered_input = None
-        self.suppress_preprocess_ui_until_rephoto = False
+        self.pipeline.auto_detect_faces_armed_input = None
+        self.pipeline.auto_detect_faces_triggered_input = None
+        self.pipeline.suppress_preprocess_ui_until_rephoto = False
         if hasattr(self, "input_image_edit"):
             self.input_image_edit.setText("")
         self.preview.set_input_detect_overlay(False)
         self.face_strip.reset_face_preview_state(preserve_input_overlays=False)
         self.preview.clear_result_stage_overlay()
-        self.reset_progress_bars()
-        self._reset_wrapper_runtime_tracking()
-        self.current_run_summary_context = None
+        self.pipeline.reset_progress_bars()
+        self.pipeline._reset_wrapper_runtime_tracking()
+        self.pipeline.current_run_summary_context = None
         self.preview.set_result_preview_image(None)
         self.result_preview_label.setText("No result image yet.\nRun to generate a preview.")
         self._rephoto_result_path = None
@@ -2031,7 +2031,7 @@ class MainWindow(
 
         self.stop_quick_face_probe()
         self.preview.set_input_detect_overlay(False)
-        self.suppress_preprocess_ui_until_rephoto = False
+        self.pipeline.suppress_preprocess_ui_until_rephoto = False
         # Reset all advanced-settings values to their defaults.
         self.advanced_dialog.restore_defaults()
 
@@ -2056,12 +2056,12 @@ class MainWindow(
     def set_selected_input_image(self, file_path):
         if not self.can_select_new_image(show_message=True):
             return
-        was_awaiting = bool(self.awaiting_face_selection)
+        was_awaiting = bool(self.pipeline.awaiting_face_selection)
         self._reset_main_window_for_new_input()
         self.input_image_edit.setText(file_path)
         current_key = self._normalized_path_key(file_path)
-        self.auto_detect_faces_armed_input = current_key
-        self.auto_detect_faces_triggered_input = None
+        self.pipeline.auto_detect_faces_armed_input = current_key
+        self.pipeline.auto_detect_faces_triggered_input = None
         if was_awaiting:
             self.log_box.append("Face selection canceled: new image imported.")
         self.log_box.append(f"Selected image: {file_path}")
@@ -2089,7 +2089,7 @@ class MainWindow(
             self.log_box.append(f"Results folder set: {dir_path}")
 
     def open_advanced_settings_dialog(self):
-        if self.process is not None:
+        if self.pipeline.process is not None:
             self.log_box.append("Cannot change advanced settings while a run is active.")
             return
 
@@ -2521,10 +2521,10 @@ class MainWindow(
 
     def find_latest_image(self, root: Path, after_epoch: float | None):
         # Prefer tracked directories from the active run to avoid scanning large historical trees.
-        if self.current_run_result_dirs:
+        if self.pipeline.current_run_result_dirs:
             newest = None
             newest_mtime = -1.0
-            for dir_text in self.current_run_result_dirs:
+            for dir_text in self.pipeline.current_run_result_dirs:
                 candidate = self._find_newest_image_in_dir(Path(dir_text), after_epoch=after_epoch)
                 if candidate is None:
                     continue
@@ -2562,8 +2562,8 @@ class MainWindow(
         Returns Path to the newest crop image, or None if not found.
         """
         # If we have a tracked crop output dir from stdout, use it directly
-        if self.current_crop_output_dir:
-            tracked_dir = Path(self.current_crop_output_dir)
+        if self.pipeline.current_crop_output_dir:
+            tracked_dir = Path(self.pipeline.current_crop_output_dir)
             newest = self._find_newest_image_in_dir(tracked_dir, after_epoch=after_epoch)
             if newest is not None:
                 return newest
@@ -2699,11 +2699,11 @@ class MainWindow(
         return path_utils.make_safe_base_name(base_text)
 
     def maybe_auto_start_face_detection_from_import(self, allow_during_probe=False):
-        if not self.auto_detect_faces_on_import:
+        if not self.pipeline.auto_detect_faces_on_import:
             return
-        if self.process is not None or self.awaiting_face_selection:
+        if self.pipeline.process is not None or self.pipeline.awaiting_face_selection:
             return
-        if self.current_run_phase in {"preprocess", "rephoto"}:
+        if self.pipeline.current_run_phase in {"preprocess", "rephoto"}:
             return
         if self.advanced_dialog.crop_only_checkbox.isChecked():
             return
@@ -2716,9 +2716,9 @@ class MainWindow(
         current_key = self._normalized_path_key(current_input)
         if current_key is None:
             return
-        if self.auto_detect_faces_armed_input != current_key:
+        if self.pipeline.auto_detect_faces_armed_input != current_key:
             return
-        if self.auto_detect_faces_triggered_input == current_key:
+        if self.pipeline.auto_detect_faces_triggered_input == current_key:
             return
 
         quick_count = self.quick_face_count_estimate if isinstance(self.quick_face_count_estimate, int) else None
@@ -2726,7 +2726,7 @@ class MainWindow(
         if quick_count is None or quick_count <= 1:
             return
 
-        self.auto_detect_faces_triggered_input = current_key
+        self.pipeline.auto_detect_faces_triggered_input = current_key
 
         # Always use wrapper preprocessing for selection flow.
         # In-process preview crops are useful for speed, but can desync face
@@ -2736,7 +2736,7 @@ class MainWindow(
         if quick_count >= 2:
             self.log_box.append("Multi-face import detected. Auto-starting face detection...")
             self.status_label.setText("Status: Auto-starting face detection...")
-            QTimer.singleShot(0, self.run_wrapper)
+            QTimer.singleShot(0, self.pipeline.run_wrapper)
 
     def resolve_conda_executable(self):
         cached = self._conda_executable_cache
@@ -3004,8 +3004,8 @@ class MainWindow(
         # accurate count from the probe (it may have been set earlier).
         current_input = self.input_image_edit.text().strip()
         current_key = self._normalized_path_key(current_input)
-        if current_key is not None and self.auto_detect_faces_triggered_input == current_key:
-            self.auto_detect_faces_triggered_input = None
+        if current_key is not None and self.pipeline.auto_detect_faces_triggered_input == current_key:
+            self.pipeline.auto_detect_faces_triggered_input = None
 
         self.face_strip.update_run_button_for_quick_face_hint()
         self.maybe_auto_start_face_detection_from_import()
@@ -3102,23 +3102,23 @@ class MainWindow(
             return False
 
         # Wire up the filmstrip as if the PS1 wrapper had just finished.
-        self.current_crop_output_dir = str(crop_out_dir)
-        self._crop_source_input_key = self._normalized_path_key(self.input_image_edit.text().strip())
-        self._crop_source_face_factor = self.advanced_dialog.face_factor_edit.value()
+        self.pipeline.current_crop_output_dir = str(crop_out_dir)
+        self.pipeline._crop_source_input_key = self._normalized_path_key(self.input_image_edit.text().strip())
+        self.pipeline._crop_source_face_factor = self.advanced_dialog.face_factor_edit.value()
         # Flag that these are rough preview crops — the PS1 wrapper must re-crop
         # with face-crop-plus for proper alignment when the user clicks Run.
-        self._inprocess_preview_crops = True
+        self.pipeline._inprocess_preview_crops = True
         # Set state that _prepare_face_selection_after_preprocess expects
         # (normally set by the PS1 wrapper flow / process_finished).
-        self.selection_preprocess_mode = False
-        self.suppress_preprocess_ui_until_rephoto = False
-        self.current_run_phase = "preprocess"
+        self.pipeline.selection_preprocess_mode = False
+        self.pipeline.suppress_preprocess_ui_until_rephoto = False
+        self.pipeline.current_run_phase = "preprocess"
         self.preview.input_face_boxes = original_boxes
         self.preview.input_face_box_source = "retina_probe"
         self.log_box.append(f"In-process face detection: {len(crop_paths)} faces found instantly.")
         self.status_label.setText(f"Status: {len(crop_paths)} faces detected")
-        self.set_preprocess_progress(100, "Preprocessing complete")
-        self._prepare_face_selection_after_preprocess()
+        self.pipeline.set_preprocess_progress(100, "Preprocessing complete")
+        self.pipeline._prepare_face_selection_after_preprocess()
         return True
 
     def estimate_faces_for_quick_hint(self, image_path: Path):
@@ -3247,17 +3247,17 @@ class MainWindow(
             )
             return []
         except Exception as exc:
-            if not self.retina_face_box_probe_warned:
+            if not self.pipeline.retina_face_box_probe_warned:
                 self.log_box.append(f"Retina face-box probe failed to launch: {exc}")
-                self.retina_face_box_probe_warned = True
+                self.pipeline.retina_face_box_probe_warned = True
             return []
 
         if proc.returncode != 0:
-            if not self.retina_face_box_probe_warned:
+            if not self.pipeline.retina_face_box_probe_warned:
                 tail = (proc.stderr or proc.stdout or "").strip().splitlines()
                 suffix = f" ({tail[-1]})" if tail else ""
                 self.log_box.append(f"Retina face-box probe failed{suffix}")
-                self.retina_face_box_probe_warned = True
+                self.pipeline.retina_face_box_probe_warned = True
             return []
 
         boxes_by_index = {}
@@ -3364,17 +3364,17 @@ class MainWindow(
             )
             return []
         except Exception as exc:
-            if not self.cropper_face_box_probe_warned:
+            if not self.pipeline.cropper_face_box_probe_warned:
                 self.log_box.append(f"Cropper face-box probe failed to launch: {exc}")
-                self.cropper_face_box_probe_warned = True
+                self.pipeline.cropper_face_box_probe_warned = True
             return []
 
         if proc.returncode != 0:
-            if not self.cropper_face_box_probe_warned:
+            if not self.pipeline.cropper_face_box_probe_warned:
                 tail = (proc.stderr or proc.stdout or "").strip().splitlines()
                 suffix = f" ({tail[-1]})" if tail else ""
                 self.log_box.append(f"Cropper face-box probe failed{suffix}")
-                self.cropper_face_box_probe_warned = True
+                self.pipeline.cropper_face_box_probe_warned = True
             return []
 
         boxes_by_index = {}
@@ -3401,8 +3401,8 @@ class MainWindow(
         return path_utils.list_image_files_in_dir(folder)
 
     def collect_current_crop_files(self):
-        if self.current_crop_output_dir:
-            tracked = Path(self.current_crop_output_dir)
+        if self.pipeline.current_crop_output_dir:
+            tracked = Path(self.pipeline.current_crop_output_dir)
             tracked_files = self._list_image_files_in_dir(tracked)
             if tracked_files:
                 return tracked_files
@@ -3420,7 +3420,7 @@ class MainWindow(
                 mtime = p.stat().st_mtime
             except OSError:
                 continue
-            if self.run_started_at is not None and mtime < self.run_started_at:
+            if self.pipeline.run_started_at is not None and mtime < self.pipeline.run_started_at:
                 continue
             if mtime > newest_mtime:
                 newest_mtime = mtime
@@ -3450,7 +3450,7 @@ class MainWindow(
         return (normalized, str(fallback_text), bool(muted), int(thumb_size), mtime_ns, file_size)
 
     def _is_processing_active(self):
-        return (self.process is not None) or (self.current_run_phase in {"preprocess", "rephoto"})
+        return (self.pipeline.process is not None) or (self.pipeline.current_run_phase in {"preprocess", "rephoto"})
 
     def _is_face_interaction_allowed(self, face_index):
         try:
@@ -3459,7 +3459,7 @@ class MainWindow(
             return False
         if idx < 0 or idx >= len(self.face_strip.face_preview_entries):
             return False
-        if self.awaiting_face_selection:
+        if self.pipeline.awaiting_face_selection:
             return True
         if not self._is_processing_active():
             return True
@@ -3694,15 +3694,15 @@ class MainWindow(
                     pass
 
         # Try tracked blended_faces dir first
-        if self.current_blended_faces_dir:
-            tracked_dir = Path(self.current_blended_faces_dir)
+        if self.pipeline.current_blended_faces_dir:
+            tracked_dir = Path(self.pipeline.current_blended_faces_dir)
             newest = self._find_newest_image_in_dir(tracked_dir, after_epoch=after_epoch)
             if newest:
                 return newest
 
         # Try tracked GFPGAN output dir (prefer restored/blended-like assets, avoid cmp collages).
-        if self.current_gfpgan_output_dir:
-            tracked_dir = Path(self.current_gfpgan_output_dir)
+        if self.pipeline.current_gfpgan_output_dir:
+            tracked_dir = Path(self.pipeline.current_gfpgan_output_dir)
             restored_dir = tracked_dir / "restored_faces"
             newest = self._find_newest_image_in_dir(restored_dir, after_epoch=after_epoch)
             if newest:

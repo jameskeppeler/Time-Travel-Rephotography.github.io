@@ -171,9 +171,9 @@ class PreviewController:
         if stem.endswith("_blend") and crop_path.exists():
             return crop_path
 
-        if not self.current_blended_faces_dir:
+        if not self.pipeline.current_blended_faces_dir:
             return None
-        blended_dir = Path(self.current_blended_faces_dir)
+        blended_dir = Path(self.pipeline.current_blended_faces_dir)
         if not blended_dir.exists():
             return None
 
@@ -454,7 +454,7 @@ class PreviewController:
                 self.face_strip.hover_face_box_cache[active_idx] = cached_box
             active_box = cached_box
 
-        if self.awaiting_face_selection:
+        if self.pipeline.awaiting_face_selection:
             selected_indices = [e["index"] for e in self.face_strip.face_preview_entries if e.get("selected", False)]
         else:
             selected_indices = []
@@ -763,12 +763,12 @@ class PreviewController:
     def _restore_result_stage_overlay_after_pause(self):
         base = str(getattr(self, "_paused_result_stage_base_text", "") or "").strip()
         self._paused_result_stage_base_text = ""
-        if self.process is None:
+        if self.pipeline.process is None:
             return
         if base:
             self.set_result_stage_overlay(base)
             return
-        if self.current_run_phase == "rephoto":
+        if self.pipeline.current_run_phase == "rephoto":
             self.set_result_stage_overlay("Rephotographing")
 
     def update_result_stage_overlay_animation(self):

@@ -441,9 +441,9 @@ class TestPreflightController(unittest.TestCase):
                 )
 
 
-class TestPipelineMixin(unittest.TestCase):
-    """Sprint-4 architectural slice: PipelineMixin holds the subprocess
-    lifecycle, stdout parsing, and run-control surface."""
+class TestPipelineController(unittest.TestCase):
+    """Sprint-4 polish: PipelineMixin promoted to PipelineController.
+    MainWindow owns ``self.pipeline = PipelineController(self)``."""
 
     EXPECTED_METHODS = [
         "run_wrapper",
@@ -479,46 +479,35 @@ class TestPipelineMixin(unittest.TestCase):
         "_confirm_high_iteration_count",
     ]
 
-    def test_mixin_module_exists(self):
+    def test_module_exists(self):
         self.assertTrue((REPO_ROOT / "gui" / "pipeline.py").exists())
 
-    def test_mixin_class_defined(self):
+    def test_controller_class_defined(self):
         source = (REPO_ROOT / "gui" / "pipeline.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         classes = {n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.ClassDef)}
-        self.assertIn("PipelineMixin", classes)
+        self.assertIn("PipelineController", classes)
+        self.assertNotIn("PipelineMixin", classes)
 
-    def test_methods_live_on_mixin(self):
+    def test_methods_live_on_controller(self):
         source = (REPO_ROOT / "gui" / "pipeline.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
         methods = set()
         for cls in ast.iter_child_nodes(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "PipelineMixin":
+            if isinstance(cls, ast.ClassDef) and cls.name == "PipelineController":
                 for item in cls.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         methods.add(item.name)
         missing = [m for m in self.EXPECTED_METHODS if m not in methods]
-        self.assertFalse(missing, f"PipelineMixin missing: {missing}")
+        self.assertFalse(missing, f"PipelineController missing: {missing}")
 
-    def test_methods_NOT_redefined_in_main_window(self):
+    def test_main_window_does_not_inherit_legacy_mixin(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        for cls in ast.walk(tree):
-            if isinstance(cls, ast.ClassDef) and cls.name == "MainWindow":
-                method_names = {
-                    item.name
-                    for item in cls.body
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                }
-                duplicates = [m for m in self.EXPECTED_METHODS if m in method_names]
-                self.assertFalse(duplicates, f"Duplicates on MainWindow: {duplicates}")
+        self.assertNotIn("PipelineMixin", source)
 
-    def test_main_window_inherits_mixin(self):
+    def test_main_window_owns_controller_instance(self):
         source = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
-        self.assertRegex(
-            source,
-            r"class\s+MainWindow\s*\([^)]*PipelineMixin[^)]*\)\s*:",
-        )
+        self.assertIn("self.pipeline = PipelineController(self)", source)
 
 
 class TestPreviewController(unittest.TestCase):

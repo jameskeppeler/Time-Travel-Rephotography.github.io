@@ -213,7 +213,7 @@ class FaceStripController:
         self.hover_face_preview_source = None
         self.hover_face_box_override = None
         self.hover_face_box_cache = {}
-        self.awaiting_face_selection = False
+        self.pipeline.awaiting_face_selection = False
         self.face_preview_summary_label.setText("Faces: none")
         self.clear_face_preview_strip_layout()
         # Keep filmstrip visible even when reset (shows empty state)
@@ -221,7 +221,7 @@ class FaceStripController:
         self.face_preview_strip_filmstrip.setVisible(True)
         if hasattr(self, "face_preview_panel"):
             self.face_preview_panel.setVisible(True)
-        self.set_run_button_continue_mode(False)
+        self.pipeline.set_run_button_continue_mode(False)
         self._face_strip_render_signature = None
 
         if not preserve_input_overlays:
@@ -245,8 +245,8 @@ class FaceStripController:
                 self.run_button.setToolTip("Select at least one face in the filmstrip to enable Run.")
             return
 
-        if self.process is not None:
-            if self.run_paused:
+        if self.pipeline.process is not None:
+            if self.pipeline.run_paused:
                 self.run_button.setText("Resume")
                 self.run_button.setToolTip("Resume the paused backend run.")
             else:
@@ -255,7 +255,7 @@ class FaceStripController:
             self.run_button.setEnabled(True)
             return
 
-        if self.current_run_phase in {"preprocess", "rephoto"}:
+        if self.pipeline.current_run_phase in {"preprocess", "rephoto"}:
             self.run_button.setText("Run")
             self.run_button.setEnabled(False)
             self.run_button.setToolTip("Run the full rephotography workflow.")
@@ -334,8 +334,8 @@ class FaceStripController:
         if not self.face_preview_entries:
             return
         crop_files = []
-        if self.current_crop_output_dir:
-            crop_files = self._list_image_files_in_dir(Path(self.current_crop_output_dir))
+        if self.pipeline.current_crop_output_dir:
+            crop_files = self._list_image_files_in_dir(Path(self.pipeline.current_crop_output_dir))
 
         if not crop_files:
             input_path_text = self.input_image_edit.text().strip()
@@ -550,7 +550,7 @@ class FaceStripController:
 
     def render_face_preview_strip(self):
         entries = self.face_preview_entries
-        selection_mode = self.awaiting_face_selection
+        selection_mode = self.pipeline.awaiting_face_selection
         is_processing = self._is_processing_active()
         wide_mode = bool(getattr(self, "_wide_layout_active", False))
         render_signature = self._compute_face_strip_render_signature(
@@ -838,12 +838,12 @@ class FaceStripController:
     def select_face_preview(self, face_index, user_initiated=False, selection_checked=None):
         if face_index < 0 or face_index >= len(self.face_preview_entries):
             return
-        if user_initiated and (not self.awaiting_face_selection) and (not self._is_face_interaction_allowed(face_index)):
+        if user_initiated and (not self.pipeline.awaiting_face_selection) and (not self._is_face_interaction_allowed(face_index)):
             return
 
         self.selected_face_preview_index = face_index
         entry = self.face_preview_entries[face_index]
-        if self.awaiting_face_selection and user_initiated:
+        if self.pipeline.awaiting_face_selection and user_initiated:
             if selection_checked is None:
                 entry["selected"] = not bool(entry.get("selected", False))
             else:
@@ -852,12 +852,12 @@ class FaceStripController:
         if chosen_path is not None and Path(chosen_path).exists():
             self.preview.set_result_preview_image(Path(chosen_path))
 
-        if user_initiated and (not self.awaiting_face_selection) and self._is_processing_active():
+        if user_initiated and (not self.pipeline.awaiting_face_selection) and self._is_processing_active():
             # User manually clicked a face during processing — suppress auto-follow
             # so the before/after slider doesn't jump to a different face.
             self._user_inspecting_completed_face = True
 
-        if self.awaiting_face_selection:
+        if self.pipeline.awaiting_face_selection:
             selected_count = len(self.get_selected_face_indices())
             self.run_button.setEnabled(selected_count > 0)
             self.update_runtime_label()
@@ -894,7 +894,7 @@ class FaceStripController:
         self.select_face_preview(candidate_idx, user_initiated=False)
 
     def set_all_faces_selected(self, selected):
-        if not self.awaiting_face_selection or not self.face_preview_entries:
+        if not self.pipeline.awaiting_face_selection or not self.face_preview_entries:
             return
         for entry in self.face_preview_entries:
             entry["selected"] = bool(selected)
@@ -1174,7 +1174,7 @@ class FaceStripController:
 
         final_candidates = []
         search_dirs = []
-        for dir_text in sorted(self.current_run_result_dirs):
+        for dir_text in sorted(self.pipeline.current_run_result_dirs):
             p = Path(dir_text)
             if p.exists() and p.is_dir():
                 search_dirs.append(p)
