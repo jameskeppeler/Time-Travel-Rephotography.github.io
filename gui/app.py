@@ -2437,6 +2437,8 @@ class MainWindow(QMainWindow):
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.handle_run_button_clicked)
         self.run_button.setShortcut("Ctrl+Return")
+        self.run_button.setToolTip("Start the rephotography run (Ctrl+Enter).")
+        self.run_button.setAccessibleName("Run rephotography")
         self.run_button.setMinimumHeight(34)
         self.run_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.run_button.setStyleSheet(
@@ -2467,6 +2469,8 @@ class MainWindow(QMainWindow):
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.clicked.connect(self.cancel_run)
         self.cancel_button.setShortcut("Escape")
+        self.cancel_button.setToolTip("Stop the current rephotography run (Esc).")
+        self.cancel_button.setAccessibleName("Cancel rephotography")
         self.cancel_button.setEnabled(False)
         self.cancel_button.setMinimumHeight(34)
         self.cancel_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -2474,11 +2478,13 @@ class MainWindow(QMainWindow):
 
         self.end_early_button = QPushButton("End Early")
         self.end_early_button.clicked.connect(self.request_end_run_early)
+        self.end_early_button.setShortcut("Ctrl+E")
         self.end_early_button.setMinimumHeight(34)
         self.end_early_button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.end_early_button.setStyleSheet(secondary_button_style)
         self.end_early_button.setEnabled(False)
-        self.end_early_button.setToolTip("Finish this run early using completed iterations only.")
+        self.end_early_button.setToolTip("Finish this run early using completed iterations only (Ctrl+E).")
+        self.end_early_button.setAccessibleName("End run early")
 
         self.reset_button.setStyleSheet(secondary_button_style)
 
@@ -2544,10 +2550,12 @@ class MainWindow(QMainWindow):
         # Re-detect faces button (with adjusted threshold)
         self.redetect_faces_button = QPushButton("Re-detect Faces (with current threshold)")
         self.redetect_faces_button.setFixedHeight(32)
+        self.redetect_faces_button.setShortcut("Ctrl+D")
         self.redetect_faces_button.setToolTip(
-            "Run face detection again using the current threshold setting. "
+            "Run face detection again using the current threshold setting (Ctrl+D). "
             "Use a lower threshold to detect more faces, higher to detect only clear faces."
         )
+        self.redetect_faces_button.setAccessibleName("Re-detect faces")
         self.redetect_faces_button.clicked.connect(self.run_face_detection)
         self.redetect_faces_button.setEnabled(False)
         self.redetect_faces_button.setVisible(False)
@@ -2605,6 +2613,12 @@ class MainWindow(QMainWindow):
         self.result_preview_label.installEventFilter(self)
         self._compare_wipe_active = False
         self._compare_wipe_last_pos = None  # Throttle: min Manhattan distance before scaling
+        # Cache the scaled before/after pixmaps so the 60+Hz mouse-move loop
+        # rescales only when the label size or source pixmap actually changes.
+        self._compare_wipe_result_scaled_key = None
+        self._compare_wipe_result_scaled = None
+        self._compare_wipe_input_scaled_key = None
+        self._compare_wipe_input_scaled = None
         result_layout.addWidget(self.result_preview_label)
 
         # Stage overlay label for animated stage indicator
@@ -5916,6 +5930,12 @@ Write-Output "OK"
                 timeout=40,
                 cwd=str(self.repo_root),
             )
+        except subprocess.TimeoutExpired:
+            self.log_box.append(
+                "Retina face-box probe timed out (40s). Detection may have stalled; "
+                "see Help → Show Last Backend Error if the run also fails."
+            )
+            return []
         except Exception as exc:
             if not self.retina_face_box_probe_warned:
                 self.log_box.append(f"Retina face-box probe failed to launch: {exc}")
@@ -6025,6 +6045,14 @@ Write-Output "OK"
                 timeout=65,
                 cwd=str(self.repo_root),
             )
+        except subprocess.TimeoutExpired:
+            # Timeouts are environment-actionable (slow drive/CPU) and rare;
+            # log every one rather than suppressing after the first.
+            self.log_box.append(
+                "Cropper face-box probe timed out (65s). Falling back to "
+                "Haar/Retina detection. Slow disk or stalled conda env can cause this."
+            )
+            return []
         except Exception as exc:
             if not self.cropper_face_box_probe_warned:
                 self.log_box.append(f"Cropper face-box probe failed to launch: {exc}")
@@ -7851,17 +7879,47 @@ Write-Output "OK"
                 return
         self._compare_wipe_last_pos = mouse_pos
 
-        # Scale both to the same display size (cached from previous call if unchanged)
-        result_scaled = self.result_pixmap.scaled(lw, lh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        # Scale both to the same display size; reuse cached scaled pixmaps
+        # when source + target size are unchanged so the mouse-move loop is
+        # mostly composite work, not rescaling.
+        try:
+            result_key = (int(self.result_pixmap.cacheKey()), lw, lh)
+        except Exception:
+            result_key = None
+        if (
+            result_key is not None
+            and self._compare_wipe_result_scaled_key == result_key
+            and self._compare_wipe_result_scaled is not None
+            and not self._compare_wipe_result_scaled.isNull()
+        ):
+            result_scaled = self._compare_wipe_result_scaled
+        else:
+            result_scaled = self.result_pixmap.scaled(lw, lh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self._compare_wipe_result_scaled_key = result_key
+            self._compare_wipe_result_scaled = result_scaled
         sw, sh = result_scaled.width(), result_scaled.height()
         if sw <= 0 or sh <= 0:
             return
         before_pixmap = self._get_compare_before_source_pixmap()
         if before_pixmap is None:
             return
-        input_scaled = before_pixmap.scaled(
-            sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
-        )
+        try:
+            input_key = (int(before_pixmap.cacheKey()), sw, sh)
+        except Exception:
+            input_key = None
+        if (
+            input_key is not None
+            and self._compare_wipe_input_scaled_key == input_key
+            and self._compare_wipe_input_scaled is not None
+            and not self._compare_wipe_input_scaled.isNull()
+        ):
+            input_scaled = self._compare_wipe_input_scaled
+        else:
+            input_scaled = before_pixmap.scaled(
+                sw, sh, Qt.IgnoreAspectRatio, Qt.SmoothTransformation
+            )
+            self._compare_wipe_input_scaled_key = input_key
+            self._compare_wipe_input_scaled = input_scaled
         # Mouse x relative to the pixmap (centered in label).
         offset_x = (label.width() - sw) // 2
         split_x = max(0, min(sw, mouse_pos.x() - offset_x))

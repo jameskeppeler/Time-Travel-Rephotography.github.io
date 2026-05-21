@@ -173,5 +173,75 @@ class TestExecuteWrapperCommandResolved(unittest.TestCase):
         )
 
 
+class TestDeadCodeRemoved(unittest.TestCase):
+    """Dead-code sweep: stale symbols should not silently come back."""
+
+    def test_no_module_level_encode_color(self):
+        source = (REPO_ROOT / "tools" / "initialize.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        module_funcs = {
+            n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.FunctionDef)
+        }
+        # The module-level encode_color was unused dead code creating a fresh
+        # color encoder on every call. Production uses Initializer.encode_color.
+        self.assertNotIn("encode_color", module_funcs)
+
+    def test_no_module_level_transform_input(self):
+        source = (REPO_ROOT / "tools" / "initialize.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(source)
+        module_funcs = {
+            n.name for n in ast.iter_child_nodes(tree) if isinstance(n, ast.FunctionDef)
+        }
+        self.assertNotIn("transform_input", module_funcs)
+
+
+class TestKeyboardShortcuts(unittest.TestCase):
+    """Accessibility: primary action buttons must carry shortcuts + accessible names."""
+
+    def _source(self):
+        return (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+
+    def test_run_button_has_ctrl_enter(self):
+        s = self._source()
+        # The Run button setShortcut must remain Ctrl+Return (or equivalent).
+        self.assertIn('self.run_button.setShortcut("Ctrl+Return")', s)
+        self.assertIn('self.run_button.setAccessibleName(', s)
+
+    def test_cancel_button_has_escape(self):
+        s = self._source()
+        self.assertIn('self.cancel_button.setShortcut("Escape")', s)
+        self.assertIn('self.cancel_button.setAccessibleName(', s)
+
+    def test_redetect_button_has_ctrl_d(self):
+        s = self._source()
+        self.assertIn('self.redetect_faces_button.setShortcut("Ctrl+D")', s)
+
+
+class TestCompareWipeCache(unittest.TestCase):
+    """P10: scaled pixmaps in the compare-wipe loop should be cached."""
+
+    def test_compare_wipe_cache_state_initialized(self):
+        s = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # Cache state must be initialized so the first mouse-move doesn't
+        # AttributeError; and it must be CHECKED in the hot path.
+        self.assertIn("_compare_wipe_result_scaled_key = None", s)
+        self.assertIn("_compare_wipe_input_scaled_key = None", s)
+        # Hot-path check (re-use cache when key matches).
+        self.assertIn("_compare_wipe_result_scaled_key == result_key", s)
+        self.assertIn("_compare_wipe_input_scaled_key == input_key", s)
+
+
+class TestSubprocessTimeoutSurfacing(unittest.TestCase):
+    """P13: subprocess.TimeoutExpired must be caught separately and always logged."""
+
+    def test_cropper_probe_handles_timeout_distinctly(self):
+        s = (REPO_ROOT / "gui" / "app.py").read_text(encoding="utf-8")
+        # Both probe call sites should split TimeoutExpired from generic Exception
+        # so timeout cases are not suppressed by the once-only warning flag.
+        self.assertIn("subprocess.TimeoutExpired", s)
+        self.assertIn("Cropper face-box probe timed out", s)
+        self.assertIn("Retina face-box probe timed out", s)
+
+
 if __name__ == "__main__":
     unittest.main()
