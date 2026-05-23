@@ -584,7 +584,7 @@ class PipelineController:
             "-Preset",
             preset_value,
             "-Strategy",
-            "all",
+            self.advanced_dialog.strategy_combo.currentText().strip() or "best",
             "-FaceFactor",
             self.advanced_dialog.face_factor_edit.text().strip(),
             "-DetThreshold",

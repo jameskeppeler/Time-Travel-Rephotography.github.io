@@ -128,7 +128,21 @@ class AdvancedSettingsDialog(QDialog):
 
         # build widgets
         self.strategy_combo = NoScrollComboBox()
-        self.strategy_combo.addItems(["all"])
+        # face-crop-plus's three selection modes:
+        #   best    — single highest-confidence face per cluster (default)
+        #             cleanest for single-subject portraits; suppresses
+        #             near-duplicate detections of the same face.
+        #   largest — single biggest bounding box. Useful when "best"
+        #             picks a small secondary face.
+        #   all     — every detection. Use for group photos. Can return
+        #             near-duplicates on noisy / low-contrast historic shots.
+        self.strategy_combo.addItems(["best", "largest", "all"])
+        self.strategy_combo.setToolTip(
+            "Face detection mode:\n"
+            "  best    — single most-confident face (recommended for portraits)\n"
+            "  largest — single biggest face by area\n"
+            "  all     — every detection (use for group photos)"
+        )
 
         self.crop_only_checkbox = QCheckBox("Crop-only (debug)")
 
@@ -362,7 +376,7 @@ class AdvancedSettingsDialog(QDialog):
         layout.addLayout(button_row)
 
     def restore_defaults(self):
-        self.strategy_combo.setCurrentText("all")
+        self.strategy_combo.setCurrentText("best")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
         self.gfpgan_blend_edit.setValue(DEFAULT_GFPGAN_BLEND)

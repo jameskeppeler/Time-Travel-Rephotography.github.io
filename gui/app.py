@@ -646,7 +646,10 @@ class MainWindow(
         form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.advanced_dialog = AdvancedSettingsDialog(self)
-        self.advanced_dialog.strategy_combo.setCurrentText("all")
+        # Default to "best" — single highest-confidence face. Suppresses
+        # the near-duplicate detections face-crop-plus emits for the same
+        # face under -st all on dim historic photos.
+        self.advanced_dialog.strategy_combo.setCurrentText("best")
         self.advanced_dialog.crop_only_checkbox.setChecked(False)
         self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
         self.advanced_dialog.det_threshold_edit.setValue(0.90)
