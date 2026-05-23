@@ -376,7 +376,7 @@ class AdvancedSettingsDialog(QDialog):
         layout.addLayout(button_row)
 
     def restore_defaults(self):
-        self.strategy_combo.setCurrentText("best")
+        self.strategy_combo.setCurrentText("all")
         self.crop_only_checkbox.setChecked(False)
         self.use_gfpgan_checkbox.setChecked(False)
         self.gfpgan_blend_edit.setValue(DEFAULT_GFPGAN_BLEND)

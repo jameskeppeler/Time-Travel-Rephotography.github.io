@@ -646,10 +646,13 @@ class MainWindow(
         form_layout.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         self.advanced_dialog = AdvancedSettingsDialog(self)
-        # Default to "best" — single highest-confidence face. Suppresses
-        # the near-duplicate detections face-crop-plus emits for the same
-        # face under -st all on dim historic photos.
-        self.advanced_dialog.strategy_combo.setCurrentText("best")
+        # Default to "all" so multi-subject photos get every face.
+        # The duplicate-detection problem on single-subject historic
+        # photos is mitigated by the size-badge + auto-deselect + right-
+        # click-remove flow in the filmstrip; the strategy dropdown in
+        # Advanced Settings lets users switch to "best" / "largest" for
+        # single-subject runs.
+        self.advanced_dialog.strategy_combo.setCurrentText("all")
         self.advanced_dialog.crop_only_checkbox.setChecked(False)
         self.advanced_dialog.use_gfpgan_checkbox.setChecked(False)
         self.advanced_dialog.det_threshold_edit.setValue(0.90)
