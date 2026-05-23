@@ -1005,6 +1005,14 @@ class FaceStripController:
             return None
 
     def select_face_preview(self, face_index, user_initiated=False, selection_checked=None):
+        # TEMP DIAG: surface every entry so we can confirm the slot fires.
+        try:
+            self.log_box.append(
+                f"[diag] select_face_preview(face_index={face_index}, "
+                f"user_initiated={user_initiated}, selection_checked={selection_checked})"
+            )
+        except Exception:
+            pass
         if face_index < 0 or face_index >= len(self.face_preview_entries):
             return
         if user_initiated and (not self.pipeline.awaiting_face_selection) and (not self._is_face_interaction_allowed(face_index)):
@@ -1074,6 +1082,10 @@ class FaceStripController:
 
     def _show_face_card_context_menu(self, anchor_widget, face_index, pos):
         """Right-click on a face card: offer to skip / re-include / remove."""
+        try:
+            self.log_box.append(f"[diag] _show_face_card_context_menu(face_index={face_index})")
+        except Exception:
+            pass
         if face_index is None or face_index < 0 or face_index >= len(self.face_preview_entries):
             return
         entry = self.face_preview_entries[face_index]
@@ -1113,6 +1125,10 @@ class FaceStripController:
     def remove_face_entry(self, face_index):
         """Drop a face from the queue entirely. Reindexes the survivors so
         the filmstrip stays compact."""
+        try:
+            self.log_box.append(f"[diag] remove_face_entry(face_index={face_index})")
+        except Exception:
+            pass
         if face_index is None:
             return
         try:
