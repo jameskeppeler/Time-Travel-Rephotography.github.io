@@ -884,9 +884,13 @@ class FaceStripController:
             tip_lines.append("Click to toggle. Right-click for more options.")
             button.setToolTip("\n".join(tip_lines))
             button.setContextMenuPolicy(Qt.CustomContextMenu)
-            button.customContextMenuRequested.connect(
-                lambda pos, i=idx, btn=button: self._show_face_card_context_menu(btn, i, pos)
-            )
+            # Stash inline lambdas on the button itself. PySide6 can drop
+            # connections to unreferenced Python callables when the slot's
+            # receiver isn't a QObject (controller promotion side-effect);
+            # keeping a strong reference next to the QObject that fires the
+            # signal makes the connection robust.
+            button._context_handler = lambda pos, i=idx, btn=button: self._show_face_card_context_menu(btn, i, pos)
+            button.customContextMenuRequested.connect(button._context_handler)
 
             # Frame styling matching app color scheme
             if button.isChecked():
@@ -917,9 +921,11 @@ class FaceStripController:
             button.installEventFilter(self._window)
             button.hover_enter_callback = (lambda i=idx: self.set_hover_face_preview_index(i))
             button.hover_leave_callback = self.clear_hover_face_preview_index
-            button.clicked.connect(
-                lambda checked=False, i=idx: self.select_face_preview(i, user_initiated=True, selection_checked=checked)
+            # Stash on the button (see note above for context handler).
+            button._click_handler = lambda checked=False, i=idx: self.select_face_preview(
+                i, user_initiated=True, selection_checked=checked,
             )
+            button.clicked.connect(button._click_handler)
             self.face_preview_strip_layout.addWidget(button)
 
         self.face_preview_strip_layout.addStretch(1)
@@ -1079,25 +1085,26 @@ class FaceStripController:
         if self.pipeline.awaiting_face_selection or status == "queued":
             if is_selected:
                 act_toggle = menu.addAction("Skip this face")
-                act_toggle.triggered.connect(
-                    lambda _checked=False, i=face_index: self.select_face_preview(
-                        i, user_initiated=True, selection_checked=False
-                    )
+                # Stash the handler on the action so PySide6 doesn't drop
+                # the connection to a GC-eligible lambda (the controller
+                # is not a QObject, so the bound-method route doesn't
+                # protect inline lambdas).
+                act_toggle._handler = lambda _checked=False, i=face_index: self.select_face_preview(
+                    i, user_initiated=True, selection_checked=False,
                 )
+                act_toggle.triggered.connect(act_toggle._handler)
             else:
                 act_toggle = menu.addAction("Include this face")
-                act_toggle.triggered.connect(
-                    lambda _checked=False, i=face_index: self.select_face_preview(
-                        i, user_initiated=True, selection_checked=True
-                    )
+                act_toggle._handler = lambda _checked=False, i=face_index: self.select_face_preview(
+                    i, user_initiated=True, selection_checked=True,
                 )
+                act_toggle.triggered.connect(act_toggle._handler)
             menu.addSeparator()
         # Remove is always available unless the face is mid-run.
         if status != "running":
             act_remove = menu.addAction("Remove from queue")
-            act_remove.triggered.connect(
-                lambda _checked=False, i=face_index: self.remove_face_entry(i)
-            )
+            act_remove._handler = lambda _checked=False, i=face_index: self.remove_face_entry(i)
+            act_remove.triggered.connect(act_remove._handler)
         else:
             menu.addAction("Remove from queue (busy)").setEnabled(False)
         if menu.actions():

@@ -1842,6 +1842,18 @@ class MainWindow(
             self.spectral_sensitivity_combo.setEnabled(True)
             # do not overwrite user choice
 
+    # InputDropLabel calls these against parent_window (MainWindow).
+    # The implementations moved to PreviewController in the controller
+    # promotion; keep thin shims here so the widget keeps working.
+    def handle_input_preview_mouse_move(self, pos):
+        return self.preview.handle_input_preview_mouse_move(pos)
+
+    def handle_input_preview_mouse_leave(self):
+        return self.preview.handle_input_preview_mouse_leave()
+
+    def handle_input_preview_click(self, pos):
+        return self.preview.handle_input_preview_click(pos)
+
     def can_select_new_image(self, show_message=False):
         reason = ""
         if self.pipeline.process is not None:
