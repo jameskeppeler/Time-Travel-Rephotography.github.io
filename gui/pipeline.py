@@ -848,7 +848,8 @@ Write-Output "OK"
 
     def _arm_pause_ack_warning(self):
         self._cancel_pause_ack_warning()
-        timer = QTimer(self)
+        # Parent must be a QObject; self is the plain-Python PipelineController.
+        timer = QTimer(self._window)
         timer.setSingleShot(True)
         timer.timeout.connect(self._on_pause_ack_warning_timeout)
         timer.start(self._PAUSE_ACK_WARN_MS)
@@ -1126,7 +1127,9 @@ Write-Output "OK"
             self._elapsed_timer.start()
             self.update_elapsed_label()
 
-        self.process = QProcess(self)
+        # QObject parent must itself be a QObject; self is the plain-Python
+        # controller. Use the host window so the process auto-dies with it.
+        self.process = QProcess(self._window)
         self.process.setWorkingDirectory(str(self.repo_root))
         self.process.readyReadStandardOutput.connect(self.append_stdout_from_process)
         self.process.readyReadStandardError.connect(self.append_stderr_from_process)
@@ -1811,7 +1814,8 @@ Write-Output "OK"
             return False
 
         facecrop_env = self.resolve_facecrop_env_name()
-        process = QProcess(self)
+        # QObject parent must be a QObject; self is plain-Python.
+        process = QProcess(self._window)
         process.setWorkingDirectory(str(self.repo_root))
         process.readyReadStandardOutput.connect(
             lambda t=token: self._drain_quick_face_probe_output(t, is_error=False)

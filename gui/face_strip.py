@@ -912,7 +912,9 @@ class FaceStripController:
             if is_muted and (not selection_mode) and is_processing:
                 button.setEnabled(False)
             button.setProperty("faceIndex", idx)
-            button.installEventFilter(self)
+            # Event filters must be QObjects; the controller is plain-Python.
+            # MainWindow owns the eventFilter() method anyway.
+            button.installEventFilter(self._window)
             button.hover_enter_callback = (lambda i=idx: self.set_hover_face_preview_index(i))
             button.hover_leave_callback = self.clear_hover_face_preview_index
             button.clicked.connect(
