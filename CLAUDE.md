@@ -18,7 +18,8 @@ Windows + NVIDIA workstation.
 | --- | --- |
 | `projector.py` | Per-image research CLI (StyleGAN2 latent projection) |
 | `projector_batch.py` | Batch version that reuses loaded models across faces |
-| `gui/app.py` | PySide6 GUI (single 8.7k-LOC file — see "Architectural debt") |
+| `gui/app.py` | PySide6 `MainWindow` god-object (~3.7k LOC) — see "Architectural debt" |
+| `gui/` (other modules) | Controllers (`face_strip`, `pipeline`, `preview`, `preflight`), plus `widgets.py`, `dialogs.py`, utils |
 | `run_rephoto_with_facecrop.ps1` | Windows wrapper: detect → GFPGAN → projector → blend |
 | `run_rephoto_with_facecrop_batch.ps1` | Batch variant of the wrapper |
 | `bootstrap_local_assets.ps1` | Downloads / copies model checkpoints |
@@ -28,8 +29,8 @@ Windows + NVIDIA workstation.
 | `op/` | StyleGAN2 CUDA kernels (Windows falls back to pure-PyTorch) |
 | `models/` | StyleGAN2 generator, encoder4editing, VGGFace, face detector |
 | `tools/` | Initializer, face parsing, histogram matching, etc. |
-| `preprocess/` | Face crops + GFPGAN runs (working dirs) |
-| `tests/` | One file (`test_color_blend.py`) — see "Tests" |
+| `preprocess/` | Working dirs (staged inputs, face crops, GFPGAN runs) — **gitignored**, regenerated per run |
+| `tests/` | pytest suite (color blend, GUI smoke/utils, controllers, runtime est.) — see "Tests" |
 
 Reference docs:
 - [WINDOWS_SETUP.md](WINDOWS_SETUP.md) — verified install + run recipes.
@@ -48,13 +49,23 @@ Reference docs:
 
 ## Architectural debt — read before refactoring
 
-`gui/app.py` is currently 8,749 lines and contains one god-object
-`MainWindow` with 142+ attributes and 98+ signal/slot connections. **Avoid
-small refactors that touch many call sites here** — there are 83 references
-to `self.advanced_dialog.<widget>` alone, and there is no GUI test coverage.
-The audit roadmap calls for a module split (`widgets/`, `dialogs/`,
-`controllers/`, `workers/`, `pipeline/`, etc.); until that lands, surgical
-fixes are safer than design changes.
+The module split is **partially done**: custom widgets (`gui/widgets.py`), the
+Advanced Settings dialog (`gui/dialogs.py`), and four controllers
+(`gui/face_strip.py`, `pipeline.py`, `preview.py`, `preflight.py`) are
+extracted. But `MainWindow` in `gui/app.py` is still a ~3.7k-LOC god-object
+that the controllers delegate back into via `__getattr__` (`self._window`),
+and there is no GUI test coverage beyond smoke tests. **Avoid refactors that
+touch many call sites here** — there are 80+ references to
+`self.advanced_dialog.<widget>` alone; surgical fixes are safer than design
+changes.
+
+Gotcha (explains several recent bug-fix commits): the controllers are
+**plain-Python objects, not QObjects**. Inline lambdas connected to Qt
+signals can be garbage-collected, and event filters must be installed on
+`MainWindow` (the QObject), not on a controller. The codebase works around
+this by stashing handler lambdas on the QObject that fires the signal
+(e.g. `button._click_handler = ...; button.clicked.connect(button._click_handler)`).
+Keep that pattern when wiring new signals from controller code.
 
 State-mutation patterns to be aware of:
 - Pause/Cancel use **filesystem flag files** (not signals) to the subprocess.
@@ -81,10 +92,14 @@ State-mutation patterns to be aware of:
 
 ## Tests & CI
 
-- Only `tests/test_color_blend.py` exists. CI (`.github/workflows/ci.yml`)
-  runs that one file on push. Heavy deps (torch, PySide6, dlib, tensorflow)
-  are intentionally NOT installed in CI to keep it fast; future projector /
-  GUI tests should live behind a self-hosted GPU runner.
+- `tests/` has 6 files: `test_color_blend.py`, `test_audit_fixes.py`,
+  `test_gui_smoke.py`, `test_gui_utils.py`, `test_controllers_isolated.py`,
+  `test_runtime_estimator.py`. CI (`.github/workflows/ci.yml`) runs
+  `pytest tests/` on Python 3.8 + 3.10, installing only numpy/pytest plus
+  PySide6 on 3.10 for the GUI smoke/controller tests (offscreen Qt). Heavy
+  deps (torch, dlib, tensorflow) are intentionally NOT installed — projector /
+  GPU tests belong on a self-hosted runner. A second CI job compile-checks all
+  Python and runs ruff (non-blocking).
 - Locally: `python -m pytest tests/`.
 
 ## When you're asked to "fix" something
