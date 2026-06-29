@@ -26,8 +26,14 @@ def calculate_cdf(histogram):
     # Get the cumulative sum of the elements
     cdf = histogram.cumsum()
 
-    # Normalize the cdf
-    normalized_cdf = cdf / float(cdf.max())
+    # Normalize the cdf. Guard against an all-zero histogram (e.g. a fully
+    # masked-out channel): cdf.max() would be 0 and the division would yield
+    # NaN/inf that silently corrupts the matched image.
+    cdf_max = float(cdf.max())
+    if cdf_max <= 0:
+        return np.zeros_like(cdf, dtype=float)
+
+    normalized_cdf = cdf / cdf_max
 
     return normalized_cdf
 
