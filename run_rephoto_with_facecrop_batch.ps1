@@ -122,6 +122,13 @@ Write-Host "Image count: $($Files.Count)"
 Write-Host "Preset: $Preset"
 Write-Host ""
 
+# Track per-image outcomes so one failure doesn't abandon the rest of the
+# queue. The single-image wrapper sets $ErrorActionPreference = "Stop" and
+# throws on any failure; without a catch here that terminating error would
+# propagate out of the foreach and silently abort every remaining image.
+$SucceededFiles = @()
+$FailedFiles = @()
+
 foreach ($File in $Files) {
     Write-Host "=== Batch item ==="
     Write-Host "Image: $($File.FullName)"
@@ -174,5 +181,30 @@ foreach ($File in $Files) {
     if ($UseGFPGAN) {
         $RunArgs.UseGFPGAN = $true
     }
-    & $SingleRunner @RunArgs
+    try {
+        & $SingleRunner @RunArgs
+        $SucceededFiles += $File.Name
+    }
+    catch {
+        $FailedFiles += $File.Name
+        Write-Host ""
+        Write-Host "BATCH ITEM FAILED: $($File.Name) -- $($_.Exception.Message)"
+        Write-Host "Continuing with the next image..."
+        Write-Host ""
+    }
 }
+
+Write-Host ""
+Write-Host "=== Batch summary ==="
+# NOTE: avoid the "N/M" slash form here -- the GUI's ITER_PROGRESS_RE would
+# misread it as iteration progress. Use "N of M".
+Write-Host "Succeeded: $($SucceededFiles.Count) of $($Files.Count)"
+if ($FailedFiles.Count -gt 0) {
+    Write-Host "Failed: $($FailedFiles.Count)"
+    foreach ($name in $FailedFiles) {
+        Write-Host "  FAILED: $name"
+    }
+    Write-Host ""
+    exit 1
+}
+Write-Host "All images processed successfully."
