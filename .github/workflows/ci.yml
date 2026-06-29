@@ -27,11 +27,12 @@ jobs:
       - name: Install lightweight test deps
         run: |
           python -m pip install --upgrade pip
-          # numpy + pytest cover tests/test_color_blend.py and
-          # tests/test_audit_fixes.py. torch / dlib / tensorflow are
+          # numpy + pytest cover the unit tests. opencv-python-headless is
+          # required because tests/test_color_blend.py imports utils.color_blend,
+          # which imports cv2 at module load. torch / dlib / tensorflow are
           # intentionally absent — projector/GPU tests belong on a
           # self-hosted runner.
-          pip install numpy pytest
+          pip install numpy pytest opencv-python-headless
 
       - name: Install PySide6 for GUI smoke test (Python >= 3.9)
         if: matrix.python-version != '3.8'
