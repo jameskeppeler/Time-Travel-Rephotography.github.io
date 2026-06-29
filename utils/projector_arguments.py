@@ -44,6 +44,8 @@ class ProjectorArguments:
     def add_io_args(parser: ArgumentParser) -> ArgumentParser:
         parser.add_argument('input', type=str, help="input image path")
         parser.add_argument('--results_dir', default="results/projector", help="directory to save results.")
+        parser.add_argument('--stop_flag', type=str, default="", help="optional file path; if created, optimization ends early and saves current result")
+        parser.add_argument('--pause_flag', type=str, default="", help="optional file path; if present, optimization pauses until removed")
 
     @staticmethod
     def add_preprocess_args(parser: ArgumentParser):

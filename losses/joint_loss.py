@@ -57,6 +57,28 @@ class LossArguments:
         )
 
 
+def _sample_aligned_square_patches(
+    sibling: torch.Tensor,
+    img: torch.Tensor,
+    requested_size: int,
+):
+    h = min(int(sibling.shape[-2]), int(img.shape[-2]))
+    w = min(int(sibling.shape[-1]), int(img.shape[-1]))
+    crop_size = min(int(requested_size), h, w)
+    if crop_size <= 0:
+        return sibling[..., :0, :0], img[..., :0, :0]
+
+    y_max = h - crop_size
+    x_max = w - crop_size
+    y = int(np.random.randint(0, y_max + 1)) if y_max > 0 else 0
+    x = int(np.random.randint(0, x_max + 1)) if x_max > 0 else 0
+
+    return (
+        sibling[..., y:y + crop_size, x:x + crop_size],
+        img[..., y:y + crop_size, x:x + crop_size],
+    )
+
+
 class BakedMultiContextualLoss(nn.Module):
     """Random sample different image patches for different vgg layers."""
     def __init__(self, sibling: torch.Tensor, args: Namespace, size: int = 256):
@@ -68,10 +90,12 @@ class BakedMultiContextualLoss(nn.Module):
         self.sibling = sibling.detach()
 
     def forward(self, img: torch.Tensor):
-        cx_loss = 0
+        cx_loss = img.new_zeros(())
         for cx in self.cxs:
-            h, w = np.random.randint(0, high=img.shape[-1] - self.size, size=2)
-            cx_loss = cx(self.sibling[..., h:h+self.size, w:w+self.size], img[..., h:h+self.size, w:w+self.size]) + cx_loss
+            sibling_patch, img_patch = _sample_aligned_square_patches(self.sibling, img, self.size)
+            if sibling_patch.numel() == 0 or img_patch.numel() == 0:
+                continue
+            cx_loss = cx_loss + cx(sibling_patch, img_patch)
         return cx_loss
 
 
@@ -82,8 +106,10 @@ class BakedContextualLoss(ContextualLoss):
         self.sibling = sibling.detach()
 
     def forward(self, img: torch.Tensor):
-        h, w = np.random.randint(0, high=img.shape[-1] - self.size, size=2)
-        return super().forward(self.sibling[..., h:h+self.size, w:w+self.size], img[..., h:h+self.size, w:w+self.size])
+        sibling_patch, img_patch = _sample_aligned_square_patches(self.sibling, img, self.size)
+        if sibling_patch.numel() == 0 or img_patch.numel() == 0:
+            return img.new_zeros(())
+        return super().forward(sibling_patch, img_patch)
 
 
 class JointLoss(nn.Module):

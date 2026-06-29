@@ -36,19 +36,19 @@ class DNNLandmarksDetector:
         if DNN == "CAFFE":
             modelFile = "res10_300x300_ssd_iter_140000_fp16.caffemodel"
             configFile = "deploy.prototxt"
-            net = cv2.dnn.readNetFromCaffe(configFile, modelFile)
+            self.net = cv2.dnn.readNetFromCaffe(configFile, modelFile)
         else:
             modelFile = "opencv_face_detector_uint8.pb"
             configFile = "opencv_face_detector.pbtxt"
-            net = cv2.dnn.readNetFromTensorflow(modelFile, configFile)
+            self.net = cv2.dnn.readNetFromTensorflow(modelFile, configFile)
 
         self.shape_predictor = dlib.shape_predictor(predictor_model_path)
 
     def detect_faces(self, image, conf_threshold=0):
         H, W = image.shape[:2]
         blob = cv2.dnn.blobFromImage(image, 1.0, (300, 300), [104, 117, 123], False, False)
-        net.setInput(blob)
-        detections = net.forward()
+        self.net.setInput(blob)
+        detections = self.net.forward()
         bboxes = []
         for i in range(detections.shape[2]):
             confidence = detections[0, 0, i, 2]

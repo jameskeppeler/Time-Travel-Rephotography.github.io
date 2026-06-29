@@ -5,16 +5,9 @@ from typing import (
 )
 
 import numpy as np
-from PIL import Image
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torchvision.transforms import (
-    Compose,
-    Grayscale,
-    Resize,
-    ToTensor,
-)
 
 from models.encoder import Encoder
 from models.encoder4editing import (
@@ -70,32 +63,19 @@ class InitializerArguments:
 
 
 
+def _default_map_location():
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def create_color_encoder(args: Namespace):
     encoder = Encoder(1, args.encoder_size, 512)
-    ckpt = torch.load(args.encoder_ckpt)
+    map_loc = _default_map_location()
+    try:
+        ckpt = torch.load(args.encoder_ckpt, map_location=map_loc, weights_only=True)
+    except TypeError:
+        ckpt = torch.load(args.encoder_ckpt, map_location=map_loc)
     encoder.load_state_dict(ckpt["model"])
     return encoder
-
-
-def transform_input(img: Image):
-    tsfm = Compose([
-        Grayscale(),
-        Resize(args.encoder_size),
-        ToTensor(),
-    ])
-    return tsfm(img)
-
-
-def encode_color(imgs: torch.Tensor, args: Namespace) -> torch.Tensor:
-    assert args.encoder_size is not None
-
-    imgs = Resize(args.encoder_size)(imgs)
-
-    color_encoder = create_color_encoder(args).to(imgs.device)
-    color_encoder.eval()
-    with torch.no_grad():
-        latent = color_encoder(imgs)
-    return latent.detach()
 
 
 def resize(imgs: torch.Tensor, size: int) -> torch.Tensor:

@@ -2,7 +2,6 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$InputDir,
 
-    [ValidateSet("test", "1500", "3000", "6000")]
     [string]$Preset = "3000",
 
     [ValidateSet("all", "largest")]
@@ -10,6 +9,7 @@ param(
     [double]$FaceFactor = 0.65,
     [double]$DetThreshold = 0.9,
     [int]$CropIndex = -1,
+    [string]$SelectedCropIndices = "",
     [switch]$CropOnly,
     [switch]$UseExistingCrops,
     [switch]$UseGFPGAN,
@@ -26,13 +26,46 @@ param(
     [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
     [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
 
-[double]$GFPGANBlend = 0.35
+    [double]$GFPGANBlend = 0.35,
+    [ValidateSet("b", "gb", "g")]
+    [string]$SpectralSensitivity = "b",
+    [double]$Gaussian = 0.75,
+    [double]$VGGFace = 0.3,
+    [double]$VGG = 1.0,
+    [double]$ColorTransfer = 10000000000.0,
+    [double]$Eye = 0.1,
+    [double]$Contextual = 0.1,
+    [double]$NoiseRegularize = 50000.0,
+    [double]$LR = 0.1,
+    [double]$CameraLR = 0.01,
+    [int]$MixLayerStart = 10,
+    [int]$MixLayerEnd = 18
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 
 $ConfigPath = Join-Path $RepoRoot "rephoto_wrapper.config.json"
+
+function Test-IsDefaultPathValue([string]$CurrentValue, [string]$DefaultRelativePath) {
+    if ([string]::IsNullOrWhiteSpace($CurrentValue)) {
+        return $false
+    }
+
+    try {
+        $DefaultFull = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $DefaultRelativePath))
+        if ([System.IO.Path]::IsPathRooted($CurrentValue)) {
+            $CurrentFull = [System.IO.Path]::GetFullPath($CurrentValue)
+        }
+        else {
+            $CurrentFull = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $CurrentValue))
+        }
+        return [string]::Equals($CurrentFull, $DefaultFull, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    catch {
+        return $false
+    }
+}
 
 if (Test-Path -LiteralPath $ConfigPath) {
     $Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
@@ -52,16 +85,16 @@ if (Test-Path -LiteralPath $ConfigPath) {
     if ($RephotoEnvName -eq "rephoto_cuda11" -and $Config.RephotoEnvName) {
         $RephotoEnvName = $Config.RephotoEnvName
     }
-    if ($EncoderCkptPath -eq (Join-Path $PSScriptRoot "checkpoint\\encoder\\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
+    if ((Test-IsDefaultPathValue $EncoderCkptPath "checkpoint\encoder\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
         $EncoderCkptPath = Join-Path $RepoRoot $Config.EncoderCkptPath
     }
-    if ($ProjectorScriptPath -eq (Join-Path $PSScriptRoot "projector.py") -and $Config.ProjectorScriptPath) {
+    if ((Test-IsDefaultPathValue $ProjectorScriptPath "projector.py") -and $Config.ProjectorScriptPath) {
         $ProjectorScriptPath = Join-Path $RepoRoot $Config.ProjectorScriptPath
     }
-    if ($PreprocessRoot -eq (Join-Path $PSScriptRoot "preprocess") -and $Config.PreprocessRoot) {
+    if ((Test-IsDefaultPathValue $PreprocessRoot "preprocess") -and $Config.PreprocessRoot) {
         $PreprocessRoot = Join-Path $RepoRoot $Config.PreprocessRoot
     }
-    if ($ResultsRoot -eq (Join-Path $PSScriptRoot "results") -and $Config.ResultsRoot) {
+    if ((Test-IsDefaultPathValue $ResultsRoot "results") -and $Config.ResultsRoot) {
         $ResultsRoot = Join-Path $RepoRoot $Config.ResultsRoot
     }
 }
@@ -89,33 +122,56 @@ Write-Host "Image count: $($Files.Count)"
 Write-Host "Preset: $Preset"
 Write-Host ""
 
+# Track per-image outcomes so one failure doesn't abandon the rest of the
+# queue. The single-image wrapper sets $ErrorActionPreference = "Stop" and
+# throws on any failure; without a catch here that terminating error would
+# propagate out of the foreach and silently abort every remaining image.
+$SucceededFiles = @()
+$FailedFiles = @()
+
 foreach ($File in $Files) {
     Write-Host "=== Batch item ==="
     Write-Host "Image: $($File.FullName)"
     Write-Host ""
 
-$RunArgs = @{
-    InputImage      = $File.FullName
-    Preset          = $Preset
-    Strategy        = $Strategy
-    FaceFactor      = $FaceFactor
-    DetThreshold    = $DetThreshold
-    CropIndex       = $CropIndex
-    GFPGANEnvName   = $GFPGANEnvName
-    GFPGANRoot      = $GFPGANRoot
-    FaceCropEnvName = $FaceCropEnvName
-    RephotoEnvName  = $RephotoEnvName
-    EncoderCkptPath = $EncoderCkptPath
-    ProjectorScriptPath = $ProjectorScriptPath
-    PreprocessRoot  = $PreprocessRoot
-    ResultsRoot     = $ResultsRoot
-    FaceCropCommand = $FaceCropCommand
-    GFPGANBlend     = $GFPGANBlend
-    GFPGANVersion   = $GFPGANVersion
-}
+    $RunArgs = @{
+        InputImage      = $File.FullName
+        Preset          = $Preset
+        Strategy        = $Strategy
+        FaceFactor      = $FaceFactor
+        DetThreshold    = $DetThreshold
+        CropIndex       = $CropIndex
+        GFPGANEnvName   = $GFPGANEnvName
+        GFPGANRoot      = $GFPGANRoot
+        FaceCropEnvName = $FaceCropEnvName
+        RephotoEnvName  = $RephotoEnvName
+        EncoderCkptPath = $EncoderCkptPath
+        ProjectorScriptPath = $ProjectorScriptPath
+        PreprocessRoot  = $PreprocessRoot
+        ResultsRoot     = $ResultsRoot
+        FaceCropCommand = $FaceCropCommand
+        GFPGANBlend     = $GFPGANBlend
+        GFPGANVersion   = $GFPGANVersion
+        SpectralSensitivity = $SpectralSensitivity
+        Gaussian        = $Gaussian
+        VGGFace         = $VGGFace
+        VGG             = $VGG
+        ColorTransfer   = $ColorTransfer
+        Eye             = $Eye
+        Contextual      = $Contextual
+        NoiseRegularize = $NoiseRegularize
+        LR              = $LR
+        CameraLR        = $CameraLR
+        MixLayerStart   = $MixLayerStart
+        MixLayerEnd     = $MixLayerEnd
+    }
 
     if ($CropOnly) {
         $RunArgs.CropOnly = $true
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($SelectedCropIndices)) {
+        $RunArgs.SelectedCropIndices = $SelectedCropIndices
     }
 
     if ($UseExistingCrops) {
@@ -123,7 +179,32 @@ $RunArgs = @{
     }
 
     if ($UseGFPGAN) {
-    $RunArgs.UseGFPGAN = $true
+        $RunArgs.UseGFPGAN = $true
+    }
+    try {
+        & $SingleRunner @RunArgs
+        $SucceededFiles += $File.Name
+    }
+    catch {
+        $FailedFiles += $File.Name
+        Write-Host ""
+        Write-Host "BATCH ITEM FAILED: $($File.Name) -- $($_.Exception.Message)"
+        Write-Host "Continuing with the next image..."
+        Write-Host ""
+    }
 }
-    & $SingleRunner @RunArgs
+
+Write-Host ""
+Write-Host "=== Batch summary ==="
+# NOTE: avoid the "N/M" slash form here -- the GUI's ITER_PROGRESS_RE would
+# misread it as iteration progress. Use "N of M".
+Write-Host "Succeeded: $($SucceededFiles.Count) of $($Files.Count)"
+if ($FailedFiles.Count -gt 0) {
+    Write-Host "Failed: $($FailedFiles.Count)"
+    foreach ($name in $FailedFiles) {
+        Write-Host "  FAILED: $name"
+    }
+    Write-Host ""
+    exit 1
 }
+Write-Host "All images processed successfully."

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$InputImage,
 
@@ -10,14 +10,29 @@ param(
     [double]$FaceFactor = 0.65,
 
     [double]$DetThreshold = 0.9,
+    [bool]$AutoLowerDetThresholdOnNoFaces = $true,
+    # Floor for the auto-lower fallback. Below ~0.55 the detector starts
+    # returning false positives on dim tintypes (frame edges, mat borders,
+    # reflections), each of which gets fed through the StyleGAN pipeline
+    # and burns a full optimization run on a non-face crop. Raise this if
+    # you start missing real faces; lower with caution.
+    [double]$MinDetThreshold = 0.55,
+    [double]$DetThresholdStep = 0.1,
 
     [int]$CropIndex = -1,
+    [string]$SelectedCropIndices = "",
+    [string]$SelectedCropNames = "",
+    [string]$StopFlagPath = "",
+    [string]$PauseFlagPath = "",
 
     [switch]$CropOnly,
 
     [switch]$UseExistingCrops,
+    [switch]$RequireSelection,
 
     [switch]$UseGFPGAN,
+    [switch]$RecompositeOriginalImage,
+    [switch]$AutoColorAfterBlend,
 
     [ValidateSet("1.3", "1.4")]
     [string]$GFPGANVersion = "1.3",
@@ -26,13 +41,31 @@ param(
     [string]$FaceCropEnvName = "facecrop_py310",
     [string]$FaceCropCommand = "face-crop-plus",
     [string]$RephotoEnvName  = "rephoto_cuda11",
-    [string]$EncoderCkptPath = (Join-Path $PSScriptRoot "checkpoint\encoder\checkpoint_g.pt"),
-    [string]$PreprocessRoot  = (Join-Path $PSScriptRoot "preprocess"),
-    [string]$ProjectorScriptPath = (Join-Path $PSScriptRoot "projector.py"),
-    [string]$ResultsRoot     = (Join-Path $PSScriptRoot "results"),
+    [string]$EncoderCkptPath = ".\checkpoint\encoder\checkpoint_g.pt",
+    [string]$PreprocessRoot  = ".\preprocess",
+    [string]$ProjectorScriptPath = ".\projector.py",
+    [string]$ResultsRoot     = ".\results",
 
-    
-    [double]$GFPGANBlend = 0.35
+    [double]$GFPGANBlend = 0.35,
+    [ValidateSet("b", "gb", "g")]
+    [string]$SpectralSensitivity = "b",
+    [double]$Gaussian = 0.75,
+    [double]$VGGFace = 0.3,
+    [double]$VGG = 1.0,
+    [double]$ColorTransfer = 10000000000.0,
+    [double]$Eye = 0.1,
+    [double]$Contextual = 0.1,
+    [double]$NoiseRegularize = 50000.0,
+    [double]$LR = 0.1,
+    [double]$CameraLR = 0.01,
+    [int]$MixLayerStart = 10,
+    [int]$MixLayerEnd = 18,
+
+    # Backend optimization flags
+    [switch]$UseAMP,
+    [int]$EarlyStopPatience = 0,
+    [double]$EarlyStopMinDelta = 0.0001,
+    [double]$LRDecay = 0.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -41,6 +74,26 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 
 $ConfigPath = Join-Path $RepoRoot "rephoto_wrapper.config.json"
+
+function Test-IsDefaultPathValue([string]$CurrentValue, [string]$DefaultRelativePath) {
+    if ([string]::IsNullOrWhiteSpace($CurrentValue)) {
+        return $false
+    }
+
+    try {
+        $DefaultFull = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $DefaultRelativePath))
+        if ([System.IO.Path]::IsPathRooted($CurrentValue)) {
+            $CurrentFull = [System.IO.Path]::GetFullPath($CurrentValue)
+        }
+        else {
+            $CurrentFull = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $CurrentValue))
+        }
+        return [string]::Equals($CurrentFull, $DefaultFull, [System.StringComparison]::OrdinalIgnoreCase)
+    }
+    catch {
+        return $false
+    }
+}
 
 if (Test-Path -LiteralPath $ConfigPath) {
     $Config = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
@@ -60,18 +113,34 @@ if (Test-Path -LiteralPath $ConfigPath) {
     if ($RephotoEnvName -eq "rephoto_cuda11" -and $Config.RephotoEnvName) {
         $RephotoEnvName = $Config.RephotoEnvName
     }
-    if ($EncoderCkptPath -eq (Join-Path $PSScriptRoot "checkpoint\\encoder\\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
+    if ((Test-IsDefaultPathValue $EncoderCkptPath "checkpoint\encoder\checkpoint_g.pt") -and $Config.EncoderCkptPath) {
         $EncoderCkptPath = Join-Path $RepoRoot $Config.EncoderCkptPath
     }
-    if ($ProjectorScriptPath -eq (Join-Path $PSScriptRoot "projector.py") -and $Config.ProjectorScriptPath) {
+    if ((Test-IsDefaultPathValue $ProjectorScriptPath "projector.py") -and $Config.ProjectorScriptPath) {
         $ProjectorScriptPath = Join-Path $RepoRoot $Config.ProjectorScriptPath
     }
-    if ($PreprocessRoot -eq (Join-Path $PSScriptRoot "preprocess") -and $Config.PreprocessRoot) {
+    if ((Test-IsDefaultPathValue $PreprocessRoot "preprocess") -and $Config.PreprocessRoot) {
         $PreprocessRoot = Join-Path $RepoRoot $Config.PreprocessRoot
     }
-    if ($ResultsRoot -eq (Join-Path $PSScriptRoot "results") -and $Config.ResultsRoot) {
+    if ((Test-IsDefaultPathValue $ResultsRoot "results") -and $Config.ResultsRoot) {
         $ResultsRoot = Join-Path $RepoRoot $Config.ResultsRoot
     }
+}
+
+# Normalize paths: allow relative paths, but resolve them from the repo root.
+function Resolve-RepoPath([string]$p) {
+    if ([string]::IsNullOrWhiteSpace($p)) { return $p }
+    if ([System.IO.Path]::IsPathRooted($p)) { return $p }
+    return [System.IO.Path]::GetFullPath((Join-Path $RepoRoot $p))
+}
+
+$EncoderCkptPath      = Resolve-RepoPath $EncoderCkptPath
+$ProjectorScriptPath  = Resolve-RepoPath $ProjectorScriptPath
+$PreprocessRoot       = Resolve-RepoPath $PreprocessRoot
+$ResultsRoot          = Resolve-RepoPath $ResultsRoot
+
+if (-not [string]::IsNullOrWhiteSpace($GFPGANRoot)) {
+    $GFPGANRoot = Resolve-RepoPath $GFPGANRoot
 }
 
 # Resolve and validate input image path.
@@ -96,9 +165,13 @@ if ($PresetNorm -eq "test") {
     $W1 = 250
     $W2 = 750
 }
+elseif ($PresetNorm -eq "375") {
+    $W1 = 125
+    $W2 = 375
+}
 else {
     if (-not ($PresetNorm -match '^\d+$')) {
-        throw "Preset must be 'test' or a number (e.g., 1500, 3000, 6000, 18000). Got: $Preset"
+        throw "Preset must be 'test', 375, or a number (e.g., 1500, 3000, 6000, 18000). Got: $Preset"
     }
 
     $N = [int]$PresetNorm
@@ -107,15 +180,52 @@ else {
         # allowed special-case
     }
     elseif (($N % 1000) -ne 0) {
-        throw "Numeric preset must be 1500 or a multiple of 1000. Got: $N"
+        throw "Numeric preset must be 1500, 375, or a multiple of 1000. Got: $N"
     }
 
     if ($N -lt 1000 -or $N -gt 100000) {
-        throw "Numeric preset must be between 1000 and 100000 (or 1500). Got: $N"
+        throw "Numeric preset must be between 1000 and 100000 (or 1500, 375). Got: $N"
     }
 
     $W1 = 250
     $W2 = $N
+}
+
+if ($DetThreshold -lt 0 -or $DetThreshold -gt 1) {
+    throw "DetThreshold must be between 0 and 1. Got: $DetThreshold"
+}
+if ($MinDetThreshold -lt 0 -or $MinDetThreshold -gt 1) {
+    throw "MinDetThreshold must be between 0 and 1. Got: $MinDetThreshold"
+}
+if ($DetThresholdStep -le 0 -or $DetThresholdStep -gt 1) {
+    throw "DetThresholdStep must be > 0 and <= 1. Got: $DetThresholdStep"
+}
+if ($MinDetThreshold -gt $DetThreshold) {
+    throw "MinDetThreshold ($MinDetThreshold) must be <= DetThreshold ($DetThreshold)."
+}
+
+$RequestedDetThreshold = [math]::Round([double]$DetThreshold, 2)
+$MinDetThreshold       = [math]::Round([double]$MinDetThreshold, 2)
+$DetThresholdStep      = [math]::Round([double]$DetThresholdStep, 2)
+$EffectiveDetThreshold = $RequestedDetThreshold
+$AttemptedDetThresholds = @()
+
+function Get-FaceCropFiles([string]$DirPath) {
+    if (-not (Test-Path -LiteralPath $DirPath)) {
+        return @()
+    }
+    return @(
+        Get-ChildItem -LiteralPath $DirPath -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Extension -match '^\.(png|jpg|jpeg|bmp|tif|tiff|webp)$' } |
+            Sort-Object @{
+                Expression = {
+                    $stem = [System.IO.Path]::GetFileNameWithoutExtension($_.Name)
+                    if ($stem -match '_(\d+)$') { [int]$Matches[1] } else { [int]::MaxValue }
+                }
+            }, @{
+                Expression = { $_.Name }
+            }
+    )
 }
 
 # Working folders inside the repo.
@@ -147,17 +257,43 @@ $ProjectorInputDir = $CropOutDir
 
 New-Item -ItemType Directory -Path $TempInputDir    -Force | Out-Null
 New-Item -ItemType Directory -Path $CropOutDir      -Force | Out-Null
-New-Item -ItemType Directory -Path $GFPGANRunRoot   -Force | Out-Null
-New-Item -ItemType Directory -Path $GFPGANOutputDir -Force | Out-Null
-New-Item -ItemType Directory -Path $GFPGANBlendDir  -Force | Out-Null
 New-Item -ItemType Directory -Path $ResultRoot      -Force | Out-Null
+if ($UseGFPGAN) {
+    New-Item -ItemType Directory -Path $GFPGANRunRoot   -Force | Out-Null
+    New-Item -ItemType Directory -Path $GFPGANOutputDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $GFPGANBlendDir  -Force | Out-Null
+}
+
+if (-not [string]::IsNullOrWhiteSpace($StopFlagPath)) {
+    try {
+        if (Test-Path -LiteralPath $StopFlagPath) {
+            Remove-Item -LiteralPath $StopFlagPath -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Failed to clear stop flag path '$StopFlagPath' before run start: $($_.Exception.Message)"
+    }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($PauseFlagPath)) {
+    try {
+        if (Test-Path -LiteralPath $PauseFlagPath) {
+            Remove-Item -LiteralPath $PauseFlagPath -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Failed to clear pause flag path '$PauseFlagPath' before run start: $($_.Exception.Message)"
+    }
+}
 
 if (-not $UseExistingCrops) {
     # Clear prior temp input and prior cropped face files so only this run's files are used.
     Get-ChildItem -LiteralPath $TempInputDir    -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem -LiteralPath $CropOutDir      -File -ErrorAction SilentlyContinue | Remove-Item -Force
-    Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
-    Get-ChildItem -LiteralPath $GFPGANBlendDir  -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    if ($UseGFPGAN) {
+        Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
+        Get-ChildItem -LiteralPath $GFPGANBlendDir  -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    }
 
     # Copy the chosen image into a temp input folder with a safe name.
     $TempInputFile = Join-Path $TempInputDir "$SafeBase$InputExt"
@@ -168,39 +304,204 @@ if (-not $UseExistingCrops) {
     Write-Host "Input image: $ResolvedInput"
     Write-Host "Temp crop input: $TempInputFile"
     Write-Host "Crop output dir: $CropOutDir"
-    Write-Host "Preset: $Preset  (wplus_step $W1 $W2)"
+    Write-Host "Requested detect threshold: $RequestedDetThreshold"
+    $PresetLabel = if ($Preset -eq "test") { "750" } else { "$Preset" }
+    Write-Host "Preset: $PresetLabel  (wplus_step $W1 $W2)"
     Write-Host ""
 
     # Run face cropping in the facecrop environment.
-    conda run -n $FaceCropEnvName $FaceCropCommand `
-        -i $TempInputDir `
-        -o $CropOutDir `
-        -s 1000 `
-        -f jpg `
-        -st $Strategy `
-        -ff $FaceFactor `
-        -dt $DetThreshold
+    $ThresholdAttempts = @($RequestedDetThreshold)
+    if ($AutoLowerDetThresholdOnNoFaces -and $RequestedDetThreshold -gt ($MinDetThreshold + 1e-9)) {
+        $ThresholdAttempts = @()
+        $thr = $RequestedDetThreshold
+        while ($thr -ge ($MinDetThreshold - 1e-9)) {
+            $ThresholdAttempts += [math]::Round([double]$thr, 2)
+            $thr -= $DetThresholdStep
+        }
+        if ($ThresholdAttempts.Count -eq 0 -or [math]::Abs(($ThresholdAttempts[-1] - $MinDetThreshold)) -gt 1e-9) {
+            $ThresholdAttempts += $MinDetThreshold
+        }
+        $SeenThresholds = @{}
+        $UniqueThresholdAttempts = @()
+        foreach ($cand in $ThresholdAttempts) {
+            $key = "{0:0.00}" -f $cand
+            if (-not $SeenThresholds.ContainsKey($key)) {
+                $SeenThresholds[$key] = $true
+                $UniqueThresholdAttempts += [math]::Round([double]$cand, 2)
+            }
+        }
+        $ThresholdAttempts = $UniqueThresholdAttempts
+    }
+    if ($ThresholdAttempts.Count -gt 1) {
+        Write-Host ("Auto-threshold fallback enabled: {0:0.00} down to {1:0.00} in steps of {2:0.00}." -f $RequestedDetThreshold, $MinDetThreshold, $DetThresholdStep)
+    }
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "Face crop failed (command: $FaceCropCommand, env: $FaceCropEnvName)."
+    $FaceCropStart = [System.Diagnostics.Stopwatch]::StartNew()
+    $DetectedFaceCropFiles = @()
+    foreach ($TryThreshold in $ThresholdAttempts) {
+        # Ensure each attempt starts from an empty crop directory.
+        Get-ChildItem -LiteralPath $CropOutDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+
+        $TryThresholdText = "{0:0.00}" -f $TryThreshold
+        $AttemptedDetThresholds += [math]::Round([double]$TryThreshold, 2)
+        Write-Host "Face crop detect threshold: $TryThresholdText"
+
+        conda run -n $FaceCropEnvName $FaceCropCommand `
+            -i $TempInputDir `
+            -o $CropOutDir `
+            -s 2048 `
+            -f png `
+            -r 3072 `
+            -st $Strategy `
+            -ff $FaceFactor `
+            -dt $TryThresholdText
+
+        if ($LASTEXITCODE -ne 0) {
+            throw "Face crop failed (command: $FaceCropCommand, env: $FaceCropEnvName, threshold: $TryThresholdText)."
+        }
+
+        $DetectedFaceCropFiles = Get-FaceCropFiles $CropOutDir
+        Write-Host "Face crop attempt result: $($DetectedFaceCropFiles.Count) crop(s)"
+
+        if ($DetectedFaceCropFiles.Count -gt 0) {
+            $EffectiveDetThreshold = [math]::Round([double]$TryThreshold, 2)
+            if ([math]::Abs(($EffectiveDetThreshold - $RequestedDetThreshold)) -gt 1e-9) {
+                Write-Host "Detected faces after lowering threshold to $TryThresholdText."
+            }
+            break
+        }
+
+        if ($ThresholdAttempts.Count -gt 1 -and [math]::Abs(($TryThreshold - $ThresholdAttempts[-1])) -gt 1e-9) {
+            Write-Host "No faces found at threshold $TryThresholdText. Retrying with lower threshold..."
+        }
+    }
+    $FaceCropStart.Stop()
+    Write-Host "=== Face crop elapsed: $([math]::Round($FaceCropStart.Elapsed.TotalSeconds, 1))s ==="
+    if ($DetectedFaceCropFiles.Count -eq 0) {
+        $AttemptedText = ($AttemptedDetThresholds | ForEach-Object { "{0:0.00}" -f $_ }) -join ", "
+        throw "No cropped face image files were created in: $CropOutDir (attempted thresholds: $AttemptedText)"
     }
 }
 else {
     Write-Host ""
     Write-Host "=== Face crop step skipped ==="
     Write-Host "Reusing existing crops from: $CropOutDir"
+    Write-Host "Crop output dir: $CropOutDir"
     Write-Host "Preset: $Preset  (wplus_step $W1 $W2)"
     Write-Host ""
 }
 
 # Gather cropped faces.
-$CropFiles = Get-ChildItem -LiteralPath $CropOutDir -File -Filter "*.jpg" | Sort-Object Name
+$CropFiles = Get-FaceCropFiles $CropOutDir
 
 if ($CropFiles.Count -eq 0) {
-    throw "No cropped face JPGs were created in: $CropOutDir"
+    if ($AttemptedDetThresholds.Count -gt 0) {
+        $AttemptedText = ($AttemptedDetThresholds | ForEach-Object { "{0:0.00}" -f $_ }) -join ", "
+        throw "No cropped face image files were created in: $CropOutDir (attempted thresholds: $AttemptedText)"
+    }
+    throw "No cropped face image files were created in: $CropOutDir"
 }
 
-if ($CropIndex -ge 0) {
+$AllCropFiles = @($CropFiles)
+
+$ParsedSelectedCropIndices = @()
+if (-not [string]::IsNullOrWhiteSpace($SelectedCropIndices)) {
+    $ParsedSelectedCropIndices = @(
+        $SelectedCropIndices -split '[,\s;]+' |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { [int]$_ } |
+        Sort-Object -Unique
+    )
+}
+
+$ParsedSelectedCropNames = @()
+if (-not [string]::IsNullOrWhiteSpace($SelectedCropNames)) {
+    $SeenSelectedCropNames = @{}
+    foreach ($RawName in ($SelectedCropNames -split '[,\s;]+')) {
+        $Name = [string]$RawName
+        if ([string]::IsNullOrWhiteSpace($Name)) {
+            continue
+        }
+        $Key = $Name.ToLowerInvariant()
+        if (-not $SeenSelectedCropNames.ContainsKey($Key)) {
+            $SeenSelectedCropNames[$Key] = $true
+            $ParsedSelectedCropNames += $Name
+        }
+    }
+}
+
+if ($RequireSelection -and $ParsedSelectedCropIndices.Count -eq 0 -and $ParsedSelectedCropNames.Count -eq 0 -and $CropIndex -lt 0) {
+    throw "RequireSelection was set, but no selected crops were provided."
+}
+
+if ($ParsedSelectedCropNames.Count -gt 0) {
+    if ($CropIndex -ge 0) {
+        throw "Use either -CropIndex or -SelectedCropNames, not both."
+    }
+    if ($ParsedSelectedCropIndices.Count -gt 0) {
+        Write-Warning "Both SelectedCropNames and SelectedCropIndices were provided. Using SelectedCropNames and ignoring SelectedCropIndices."
+    }
+
+    $CropNameToIndex = @{}
+    for ($i = 0; $i -lt $AllCropFiles.Count; $i++) {
+        $File = $AllCropFiles[$i]
+        $NameKey = $File.Name.ToLowerInvariant()
+        if (-not $CropNameToIndex.ContainsKey($NameKey)) {
+            $CropNameToIndex[$NameKey] = $i
+        }
+        $StemKey = [System.IO.Path]::GetFileNameWithoutExtension($File.Name).ToLowerInvariant()
+        if (-not $CropNameToIndex.ContainsKey($StemKey)) {
+            $CropNameToIndex[$StemKey] = $i
+        }
+    }
+
+    $NormalizedNameIndices = @()
+    foreach ($RequestedName in $ParsedSelectedCropNames) {
+        $RequestedKeys = @()
+        $RequestedKeys += $RequestedName
+        $RequestedFileName = [System.IO.Path]::GetFileName($RequestedName)
+        if (-not [string]::IsNullOrWhiteSpace($RequestedFileName)) {
+            $RequestedKeys += $RequestedFileName
+            $RequestedStem = [System.IO.Path]::GetFileNameWithoutExtension($RequestedFileName)
+            if (-not [string]::IsNullOrWhiteSpace($RequestedStem)) {
+                $RequestedKeys += $RequestedStem
+            }
+        }
+        $RequestedKeys = @($RequestedKeys | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)
+
+        $MatchIndex = $null
+        foreach ($RequestedKey in $RequestedKeys) {
+            if ($CropNameToIndex.ContainsKey($RequestedKey)) {
+                $MatchIndex = [int]$CropNameToIndex[$RequestedKey]
+                break
+            }
+        }
+
+        if ($null -eq $MatchIndex) {
+            throw "Requested SelectedCropNames entry '$RequestedName' did not match any cropped face in $CropOutDir."
+        }
+        $NormalizedNameIndices += $MatchIndex
+    }
+
+    $CropFiles = @($NormalizedNameIndices | ForEach-Object { $AllCropFiles[$_] })
+    Write-Host "Selected crop names: $($ParsedSelectedCropNames -join ', ')"
+}
+elseif ($ParsedSelectedCropIndices.Count -gt 0) {
+    if ($CropIndex -ge 0) {
+        throw "Use either -CropIndex or -SelectedCropIndices, not both."
+    }
+
+    $NormalizedIndices = @($ParsedSelectedCropIndices)
+    foreach ($Index in $NormalizedIndices) {
+        if ($Index -lt 0 -or $Index -ge $AllCropFiles.Count) {
+            throw "Requested SelectedCropIndices entry '$Index' is out of range for $($AllCropFiles.Count) cropped face(s)."
+        }
+    }
+
+    $CropFiles = @($NormalizedIndices | ForEach-Object { $AllCropFiles[$_] })
+    Write-Host "Selected crop indices: $($NormalizedIndices -join ', ')"
+}
+elseif ($CropIndex -ge 0) {
     if ($CropIndex -ge $CropFiles.Count) {
         throw "Requested CropIndex $CropIndex but only $($CropFiles.Count) cropped face(s) exist."
     }
@@ -212,7 +513,8 @@ Write-Host ""
 Write-Host "Cropped face count: $($CropFiles.Count)"
 Write-Host ""
 
-$TotalSteps = if ($CropOnly) { 1 } else { 2 + $CropFiles.Count }
+# Batch mode: 1 crop step + 1 pre-flight/GFPGAN step + 1 batch rephoto step
+$TotalSteps = if ($CropOnly) { 1 } else { 3 }
 $CurrentStep = 1
 
 Write-Progress -Activity "run_rephoto_with_facecrop" `
@@ -226,11 +528,20 @@ if ($CropOnly) {
 }
 
 
-if (-not $CropOnly) {
-    $CurrentStep++
-    Write-Progress -Activity "run_rephoto_with_facecrop" `
-        -Status "GPU pre-check ($CurrentStep of $TotalSteps)" `
-        -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
+$CurrentStep++
+Write-Progress -Activity "run_rephoto_with_facecrop" `
+    -Status "GPU pre-check ($CurrentStep of $TotalSteps)" `
+    -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
+
+$GFPGANInputDir = $CropOutDir
+$GFPGANSelectedInputDir = Join-Path $GFPGANRunRoot "selected_input"
+if ($UseGFPGAN -and $CropFiles.Count -lt $AllCropFiles.Count) {
+    New-Item -ItemType Directory -Path $GFPGANSelectedInputDir -Force | Out-Null
+    Get-ChildItem -LiteralPath $GFPGANSelectedInputDir -File -ErrorAction SilentlyContinue | Remove-Item -Force
+    foreach ($Crop in $CropFiles) {
+        Copy-Item -LiteralPath $Crop.FullName -Destination (Join-Path $GFPGANSelectedInputDir $Crop.Name) -Force
+    }
+    $GFPGANInputDir = $GFPGANSelectedInputDir
 }
 
 # Optional GFPGAN enhancement + blend stage.
@@ -239,66 +550,103 @@ if ($UseGFPGAN) {
     Write-Host "GFPGAN root: $GFPGANRoot"
     Write-Host "GFPGAN version: $GFPGANVersion"
     Write-Host "GFPGAN blend: $GFPGANBlend"
+    Write-Host "GFPGAN input: $GFPGANInputDir"
     Write-Host ""
 
     Get-ChildItem -LiteralPath $GFPGANOutputDir -Recurse -File -ErrorAction SilentlyContinue | Remove-Item -Force
     Get-ChildItem -LiteralPath $GFPGANBlendDir  -File    -ErrorAction SilentlyContinue | Remove-Item -Force
 
-    Push-Location -LiteralPath $GFPGANRoot
-try {
-    conda run -n $GFPGANEnvName python (Join-Path $GFPGANRoot "inference_gfpgan.py") `
-        -i $CropOutDir `
-        -o $GFPGANOutputDir `
-        -v $GFPGANVersion `
-        -s 1 `
-        --aligned `
-        --bg_upsampler none `
-        --suffix gfp
+    # Run GFPGAN inference + blend in a single conda run call.
+    # The blend is pure CPU Pillow work — running it in the same process avoids
+    # a second conda env activation (~5-8s saved).
+    $BlendScriptPath = Join-Path $env:TEMP "rephoto_gfpgan_infer_blend.py"
 
-    if ($LASTEXITCODE -ne 0) { throw "GFPGAN inference failed." }
-}
-finally {
-    Pop-Location
-}
+@"
+import subprocess, sys, os, glob
+from pathlib import Path
 
-    $BlendScriptPath = Join-Path $env:TEMP "rephoto_gfpgan_blend.py"
+# --- Phase 1: GFPGAN inference ---
+gfpgan_root = sys.argv[1]
+input_dir   = sys.argv[2]
+output_dir  = sys.argv[3]
+version     = sys.argv[4]
+blend_out   = sys.argv[5]
+alpha       = float(sys.argv[6])
 
-@'
-from PIL import Image
-import os
-import sys
-import glob
+infer_script = os.path.join(gfpgan_root, "inference_gfpgan.py")
+ret = subprocess.run([
+    sys.executable, infer_script,
+    "-i", input_dir,
+    "-o", output_dir,
+    "-v", version,
+    "-s", "1",
+    "--aligned",
+    "--bg_upsampler", "none",
+    "--suffix", "gfp",
+], cwd=gfpgan_root)
+if ret.returncode != 0:
+    print("GFPGAN inference failed.", file=sys.stderr)
+    sys.exit(1)
 
-orig_dir = sys.argv[1]
-enh_dir = sys.argv[2]
-out_dir = sys.argv[3]
-alpha = float(sys.argv[4])
+# --- Phase 2: Blend original crops with enhanced faces ---
+# Use NumPy vectorized blend for ~3-5x speedup over PIL.Image.blend
+import numpy as np
+import cv2 as cv
 
-os.makedirs(out_dir, exist_ok=True)
+enh_dir = os.path.join(output_dir, "restored_faces")
+os.makedirs(blend_out, exist_ok=True)
 
-for f in sorted(glob.glob(os.path.join(orig_dir, "*.jpg"))):
+patterns = ("*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tif", "*.tiff", "*.webp")
+orig_files = []
+for pattern in patterns:
+    orig_files.extend(glob.glob(os.path.join(input_dir, pattern)))
+
+for f in sorted(set(orig_files)):
     base = os.path.splitext(os.path.basename(f))[0]
-    matches = sorted(glob.glob(os.path.join(enh_dir, base + "*_gfp.png")))
+    matches = sorted(glob.glob(os.path.join(enh_dir, base + "_*_gfp.png")))
+    if not matches:
+        exact = os.path.join(enh_dir, base + "_gfp.png")
+        if os.path.exists(exact):
+            matches = [exact]
     if not matches:
         print(f"MISSING {base}")
         continue
+    match = matches[0]
 
-    a = Image.open(f).convert("RGBA")
-    b = Image.open(matches[0]).convert("RGBA").resize(a.size)
-    out = os.path.join(out_dir, base + "_blend.png")
-    Image.blend(a, b, alpha).convert("RGB").save(out, quality=95)
+    a = cv.imread(f, cv.IMREAD_COLOR)
+    b = cv.imread(match, cv.IMREAD_COLOR)
+    if a is None or b is None:
+        print(f"MISSING {base}")
+        continue
+    if a.shape[:2] != b.shape[:2]:
+        b = cv.resize(b, (a.shape[1], a.shape[0]), interpolation=cv.INTER_LANCZOS4)
+    blended = np.clip(a.astype(np.float32) * (1.0 - alpha) + b.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
+    out = os.path.join(blend_out, base + "_blend.png")
+    cv.imwrite(out, blended, [cv.IMWRITE_PNG_COMPRESSION, 3])
     print(f"WROTE {out}")
-'@ | Set-Content -LiteralPath $BlendScriptPath
+"@ | Set-Content -LiteralPath $BlendScriptPath
 
-    conda run -n $GFPGANEnvName python $BlendScriptPath `
-        $CropOutDir `
-        (Join-Path $GFPGANOutputDir "restored_faces") `
-        $GFPGANBlendDir `
-        $GFPGANBlend
+    Push-Location -LiteralPath $GFPGANRoot
+    $GFPGANStart = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        conda run -n $GFPGANEnvName python $BlendScriptPath `
+            $GFPGANRoot `
+            $GFPGANInputDir `
+            $GFPGANOutputDir `
+            $GFPGANVersion `
+            $GFPGANBlendDir `
+            $GFPGANBlend
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "GFPGAN blend step failed."
+        if ($LASTEXITCODE -ne 0) {
+            throw "GFPGAN inference + blend failed."
+        }
     }
+    finally {
+        Pop-Location
+        Remove-Item -LiteralPath $BlendScriptPath -Force -ErrorAction SilentlyContinue
+    }
+    $GFPGANStart.Stop()
+    Write-Host "=== GFPGAN elapsed: $([math]::Round($GFPGANStart.Elapsed.TotalSeconds, 1))s ==="
 
     Write-Host "GFPGAN output: $GFPGANOutputDir"
     Write-Host "GFPGAN blended faces: $GFPGANBlendDir"
@@ -318,106 +666,164 @@ $ManifestPath = Join-Path $ResultRoot "run_manifest.txt"
     "WPlusStep=$W1,$W2"
     "Strategy=$Strategy"
     "FaceFactor=$FaceFactor"
-    "DetThreshold=$DetThreshold"
+    "DetThreshold=$RequestedDetThreshold"
+    "DetThresholdRequested=$RequestedDetThreshold"
+    "DetThresholdUsed=$EffectiveDetThreshold"
+    "AutoLowerDetThresholdOnNoFaces=$AutoLowerDetThresholdOnNoFaces"
+    "MinDetThreshold=$MinDetThreshold"
+    "DetThresholdStep=$DetThresholdStep"
+    "DetThresholdAttempts=$($(if ($AttemptedDetThresholds.Count -gt 0) { ($AttemptedDetThresholds | ForEach-Object { '{0:0.00}' -f $_ }) -join ',' } else { '' }))"
     "CropIndex=$CropIndex"
+    "SelectedCropIndices=$SelectedCropIndices"
+    "SelectedCropNames=$SelectedCropNames"
+    "StopFlagPath=$StopFlagPath"
+    "PauseFlagPath=$PauseFlagPath"
     "CropOnly=$CropOnly"
     "UseExistingCrops=$UseExistingCrops"
+    "RequireSelection=$RequireSelection"
     "UseGFPGAN=$UseGFPGAN"
     "GFPGANVersion=$GFPGANVersion"
     "GFPGANEnvName=$GFPGANEnvName"
     "FaceCropEnvName=$FaceCropEnvName"
     "FaceCropCommand=$FaceCropCommand"
+    "FaceResizeSize=3072"
     "RephotoEnvName=$RephotoEnvName"
     "EncoderCkptPath=$EncoderCkptPath"
     "PreprocessRoot=$PreprocessRoot"
     "ResultsRoot=$ResultsRoot"
     "GFPGANBlend=$GFPGANBlend"
+    "GFPGANInputDir=$GFPGANInputDir"
     "ProjectorInputDir=$ProjectorInputDir"
     "CropCount=$($CropFiles.Count)"
     "RunStamp=$RunStamp"
     "CropOutputDir=$CropOutDir"
     "ResultRoot=$ResultRoot"
     "ProjectorScriptPath=$ProjectorScriptPath"
+    "VGG=$VGG"
 ) | Set-Content -LiteralPath $ManifestPath
 
 Write-Host "Manifest: $ManifestPath"
 Write-Host ""
 
-Write-Host "=== GPU pre-check ==="
+Write-Host "=== Pre-flight checks ==="
 
-conda run -n $RephotoEnvName python -c "import sys, torch; ok = torch.cuda.is_available(); print(f'cuda_available={ok}'); print(f'device_count={torch.cuda.device_count()}'); sys.exit(0 if ok else 1)"
-
-if ($LASTEXITCODE -ne 0) {
-  throw "CUDA is not available in $RephotoEnvName. Aborting before projector run."
-}
-
-Write-Host ""
-
+# Skip the separate GPU pre-check conda run (saves ~5-8s of env activation + torch import).
+# projector.py will fail with a clear CUDA error if the GPU is unavailable.
+# We still validate the checkpoint and script exist before starting.
 if (-not (Test-Path -LiteralPath $EncoderCkptPath)) {
     throw "Encoder checkpoint not found: $EncoderCkptPath"
 }
 
-if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
-    throw "Projector script not found: $ProjectorScriptPath"
+$BatchScriptPathCheck = Join-Path $RepoRoot "projector_batch.py"
+if (-not (Test-Path -LiteralPath $BatchScriptPathCheck)) {
+    # Fall back to original projector.py check for error messaging
+    if (-not (Test-Path -LiteralPath $ProjectorScriptPath)) {
+        throw "Projector script not found: $ProjectorScriptPath"
+    }
+    throw "Batch projector script not found: $BatchScriptPathCheck"
 }
 
-# Run projector on each crop in the rephoto environment.
+Write-Host "Encoder checkpoint: OK"
+Write-Host "Batch projector script: OK"
+Write-Host ""
+
+# Build batch manifest JSON for projector_batch.py
+$BatchManifestEntries = @()
+$CropOrdinal = 0
+foreach ($Crop in $CropFiles) {
+    $CropOrdinal++
+    $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
+    $ThisResultDir = Join-Path $ResultRoot ("face_{0:D3}_p{1}" -f $CropOrdinal, $Preset)
+
+    $ProjectorImagePath = $Crop.FullName
+    if ($UseGFPGAN) {
+        $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
+        if (-not (Test-Path -LiteralPath $BlendedCandidate)) {
+            throw "Expected GFPGAN blended face not found: $BlendedCandidate"
+        }
+        $ProjectorImagePath = $BlendedCandidate
+    }
+
+    New-Item -ItemType Directory -Path $ThisResultDir -Force | Out-Null
+    $BatchManifestEntries += @{ input = $ProjectorImagePath; results_dir = $ThisResultDir }
+}
+
+$BatchManifestJson = Join-Path $ResultRoot "batch_manifest.json"
+# Force array serialization even for a single face (ConvertTo-Json unwraps 1-element arrays)
+ConvertTo-Json -InputObject @($BatchManifestEntries) -Depth 3 | Set-Content -LiteralPath $BatchManifestJson -Encoding UTF8
+Write-Host "Batch manifest: $BatchManifestJson ($($BatchManifestEntries.Count) face(s))"
+Write-Host ""
+
+# Build optional optimization flags
+$ProjectorOptArgs = @()
+if ($UseAMP) {
+    $ProjectorOptArgs += "--use_amp"
+}
+if ($EarlyStopPatience -gt 0) {
+    $ProjectorOptArgs += @("--early_stop_patience", $EarlyStopPatience)
+    $ProjectorOptArgs += @("--early_stop_min_delta", $EarlyStopMinDelta)
+}
+if ($LRDecay -gt 0) {
+    $ProjectorOptArgs += @("--lr_decay", $LRDecay)
+}
+
+$ProjectorStopFlagArgs = @()
+$ProjectorPauseFlagArgs = @()
+if (-not [string]::IsNullOrWhiteSpace($StopFlagPath)) {
+    $ProjectorStopFlagArgs = @("--stop_flag", $StopFlagPath)
+}
+if (-not [string]::IsNullOrWhiteSpace($PauseFlagPath)) {
+    $ProjectorPauseFlagArgs = @("--pause_flag", $PauseFlagPath)
+}
+
+$BatchScriptPath = Join-Path $RepoRoot "projector_batch.py"
+
+# Run batch projector — loads models once, processes all faces sequentially.
 Push-Location -LiteralPath $RepoRoot
 try {
-    foreach ($Crop in $CropFiles) {
-        $CropBase = [System.IO.Path]::GetFileNameWithoutExtension($Crop.Name)
-        $ThisResultDir = Join-Path $ResultRoot "$CropBase`_p$Preset"
+    $CurrentStep++
+    Write-Progress -Activity "run_rephoto_with_facecrop" `
+        -Status "Rephoto batch: $($CropFiles.Count) face(s)" `
+        -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
 
-        $ProjectorImagePath = $Crop.FullName
+    $RephotoStart = [System.Diagnostics.Stopwatch]::StartNew()
 
-        if ($UseGFPGAN) {
-            $BlendedCandidate = Join-Path $GFPGANBlendDir "$CropBase`_blend.png"
-            if (-not (Test-Path -LiteralPath $BlendedCandidate)) {
-                throw "Expected GFPGAN blended face not found: $BlendedCandidate"
-            }
-            $ProjectorImagePath = $BlendedCandidate
-        }
+    conda run --no-capture-output -n $RephotoEnvName python -u $BatchScriptPath `
+        --manifest $BatchManifestJson `
+        --encoder_ckpt $EncoderCkptPath `
+        --encoder_size 256 `
+        --e4e_ckpt checkpoint/e4e_ffhq_encode.pt `
+        --e4e_size 256 `
+        --mix_layer_range $MixLayerStart $MixLayerEnd `
+        --coarse_min 32 `
+        --color_transfer $ColorTransfer `
+        --contextual $Contextual `
+        --cx_layers relu3_4 relu2_2 relu1_2 `
+        --eye $Eye `
+        --gaussian $Gaussian `
+        --spectral_sensitivity $SpectralSensitivity `
+        --recon_size 256 `
+        --vgg $VGG `
+        --vggface $VGGFace `
+        --lr $LR `
+        --noise_strength 0.0 `
+        --noise_ramp 0.75 `
+        --noise_regularize $NoiseRegularize `
+        --camera_lr $CameraLR `
+        --log_freq 10 `
+        --log_visual_freq 1000 `
+        --wplus_step $W1 $W2 `
+        $ProjectorStopFlagArgs `
+        $ProjectorPauseFlagArgs `
+        $ProjectorOptArgs `
+        $(if ($RecompositeOriginalImage) { "--recomposite_original_image" } else { "" }) `
+        $(if ($AutoColorAfterBlend) { "--auto_color_after_blend" } else { "" })
 
-        New-Item -ItemType Directory -Path $ThisResultDir -Force | Out-Null
+    $RephotoStart.Stop()
+    Write-Host "=== Batch rephoto elapsed: $([math]::Round($RephotoStart.Elapsed.TotalSeconds, 1))s ==="
 
-        $CurrentStep++
-        Write-Progress -Activity "run_rephoto_with_facecrop" `
-            -Status "Rephoto crop $CurrentStep of $TotalSteps" `
-            -PercentComplete ([math]::Round(($CurrentStep / $TotalSteps) * 100, 0))
-
-        Write-Host "=== Rephoto step ==="
-        Write-Host "Crop: $($Crop.FullName)"
-        Write-Host "Results: $ThisResultDir"
-        Write-Host ""
-
-        conda run -n $RephotoEnvName python $ProjectorScriptPath `
-            $ProjectorImagePath `
-            --encoder_ckpt $EncoderCkptPath `
-            --color_transfer 0 `
-            --eye 0 `
-            --lr 0.001 `
-            --noise_regularize 0 `
-            --camera_lr 0 `
-            --wplus_step $W1 $W2 `
-            --results_dir $ThisResultDir
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "projector.py failed for crop: $($Crop.Name)"
-        }
-
-        $FinalPng = Get-ChildItem -LiteralPath $ThisResultDir -File -Filter "*.png" |
-            Where-Object {
-                $_.Name -notmatch '(-init|-rand)\.png$' -and
-                $_.Name -notmatch '_g\.png$'
-            } |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
-
-        if ($null -ne $FinalPng) {
-            $SimpleFinal = Join-Path $ThisResultDir "final_$CropBase`_p$Preset.png"
-            Copy-Item -LiteralPath $FinalPng.FullName -Destination $SimpleFinal -Force
-            Write-Host "Simple final copy: $SimpleFinal"
-        }
+    if ($LASTEXITCODE -ne 0) {
+        throw "projector_batch.py failed (exit code $LASTEXITCODE)"
     }
 }
 finally {
@@ -430,3 +836,6 @@ Write-Host ""
 Write-Host "Done."
 Write-Host "Crops are in: $CropOutDir"
 Write-Host "Rephoto results are in: $ResultRoot"
+
+
+

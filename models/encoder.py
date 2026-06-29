@@ -12,8 +12,16 @@ def add_arguments(parser: ArgumentParser) -> ArgumentParser:
 
 
 def create_model(args) -> nn.Module:
-    in_channels = 3 if "rgb" in args and args.rgb else 1
-    return Encoder(in_channels, args.encoder_size, latent_size=args.latent_size)
+    if isinstance(args, dict):
+        rgb_enabled = bool(args.get("rgb", False))
+        encoder_size = args["encoder_size"]
+        latent_size = args.get("latent_size", 512)
+    else:
+        rgb_enabled = bool(getattr(args, "rgb", False))
+        encoder_size = args.encoder_size
+        latent_size = getattr(args, "latent_size", 512)
+    in_channels = 3 if rgb_enabled else 1
+    return Encoder(in_channels, encoder_size, latent_size=latent_size)
 
 
 class Flatten(nn.Module):

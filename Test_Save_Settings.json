@@ -1,0 +1,23 @@
+{
+  "photo_type": "Cabinet card",
+  "approx_date": "",
+  "spectral_mode": "Auto",
+  "quality": 1000,
+  "advanced_mode": true,
+  "results_root": "C:\\Users\\james\\Projects\\Time-Travel-Rephotography.github.io\\results",
+  "enhancement_enabled": false,
+  "gfpgan_blend": 0.55,
+  "det_threshold": 0.9,
+  "face_factor": 0.65,
+  "gaussian": 0.75,
+  "identity_preservation": "Default",
+  "tonal_transfer": "Default",
+  "eye_preservation": "Default",
+  "structure_matching": "Default",
+  "vgg_appearance": "Default",
+  "noise_regularize": 50000.0,
+  "lr": 0.1,
+  "camera_lr": 0.01,
+  "mix_layer_start": 10,
+  "mix_layer_end": 18
+}
