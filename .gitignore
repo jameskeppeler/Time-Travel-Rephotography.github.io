@@ -143,3 +143,9 @@ deps/
 
 # Auto-downloaded DNN face detection model files
 models/face_detector/
+
+# Pipeline working/output dirs — regenerated every run, never source.
+# (Staged input copies, detected face crops, and GFPGAN/blend outputs.)
+preprocess/face_crops/
+preprocess/gfpgan_runs/
+preprocess/facecrop_input/
