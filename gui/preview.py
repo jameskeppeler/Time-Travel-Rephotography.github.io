@@ -34,6 +34,7 @@ from pathlib import Path
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QImageReader, QPainter, QPen, QPixmap
 
+from gui import path_utils
 from gui.constants import IMAGE_EXTENSIONS
 from gui.widgets import _PixmapLoader
 

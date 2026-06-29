@@ -131,22 +131,24 @@ class TestGuiSmoke(unittest.TestCase):
         )
 
     def test_pixmap_loader_signals_wired(self):
-        # The async pixmap loader infrastructure must be ready immediately;
-        # otherwise the first input-image drop would AttributeError.
-        self.assertTrue(hasattr(self.window, "_input_pixmap_loader_signals"))
-        self.assertTrue(hasattr(self.window, "_result_pixmap_loader_signals"))
-        self.assertTrue(hasattr(self.window, "_pixmap_thread_pool"))
+        # The async pixmap loader infrastructure (now on the PreviewController)
+        # must be ready immediately; otherwise the first input-image drop would
+        # AttributeError. The result-pixmap loader signals were removed as dead
+        # code, so only the input loader + shared thread pool remain.
+        self.assertTrue(hasattr(self.window.preview, "_input_pixmap_loader_signals"))
+        self.assertTrue(hasattr(self.window.preview, "_pixmap_thread_pool"))
 
     def test_compare_wipe_cache_state_initialized(self):
-        # Cache state added with P10 round 3 must exist on a fresh instance;
-        # otherwise the first mouse-move over the result preview AttributeErrors.
+        # Cache state (now on the PreviewController) must exist on a fresh
+        # instance; otherwise the first mouse-move over the result preview
+        # AttributeErrors.
         for attr in (
             "_compare_wipe_result_scaled",
             "_compare_wipe_result_scaled_key",
             "_compare_wipe_input_scaled",
             "_compare_wipe_input_scaled_key",
         ):
-            self.assertTrue(hasattr(self.window, attr), f"missing {attr}")
+            self.assertTrue(hasattr(self.window.preview, attr), f"missing {attr}")
 
     def test_log_box_colorizes_errors(self):
         # When an "error" cue is in the message, the TimestampedLogBox should
@@ -201,14 +203,15 @@ class TestGuiSmoke(unittest.TestCase):
         self.window.face_strip.render_face_preview_strip()
 
     def test_pause_ack_helpers_callable(self):
-        # Round-4 pause-ack helpers must be safely callable even with no
-        # active run (no timer to cancel).
-        self.window._cancel_pause_ack_warning()  # must not raise
+        # Round-4 pause-ack helpers (now on the PipelineController) must be
+        # safely callable even with no active run (no timer to cancel).
+        pipeline = self.window.pipeline
+        pipeline._cancel_pause_ack_warning()  # must not raise
         # Arming requires the helpers to construct a QTimer cleanly.
-        self.window._arm_pause_ack_warning()
-        self.assertIsNotNone(getattr(self.window, "_pause_ack_warn_timer", None))
-        self.window._cancel_pause_ack_warning()
-        self.assertIsNone(getattr(self.window, "_pause_ack_warn_timer", None))
+        pipeline._arm_pause_ack_warning()
+        self.assertIsNotNone(getattr(pipeline, "_pause_ack_warn_timer", None))
+        pipeline._cancel_pause_ack_warning()
+        self.assertIsNone(getattr(pipeline, "_pause_ack_warn_timer", None))
 
 
 if __name__ == "__main__":
