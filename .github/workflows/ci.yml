@@ -17,6 +17,10 @@ jobs:
         python-version: ["3.8", "3.10"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # losses/contextual_loss is a git submodule; TestContextualLossKillswitch
+          # reads a file inside it, so it must be checked out.
+          submodules: recursive
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -47,7 +51,10 @@ jobs:
       - name: Run pytest
         env:
           QT_QPA_PLATFORM: offscreen
-        run: pytest tests/ -v
+        # TestContentHash exercises tools.match_skin_histogram, which imports
+        # torch. torch is intentionally absent from this lightweight CI
+        # (projector/GPU tests belong on a self-hosted runner), so deselect it.
+        run: pytest tests/ -v --deselect tests/test_audit_fixes.py::TestContentHash
 
   lint:
     name: Syntax + lint
